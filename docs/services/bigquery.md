@@ -91,11 +91,92 @@ REST paths live under `/bigquery/v2/projects/{project}/...`.
   These fields follow the [BigQuery v2 discovery document](https://bigquery.googleapis.com/discovery/v1/apis/bigquery/v2/rest).
 - **Query parameters**: `parameterMode` `NAMED` (`@name`) and `POSITIONAL` (`?`), with scalar,
   `ARRAY` and `STRUCT` parameter types.
+- **Scripts and temporary objects**: request-scoped `CREATE TEMP FUNCTION` and `CREATE TEMP TABLE`
+  declarations can be interleaved with queries in source order. Functions become temporary
+  DuckDB macros; typed scalar, array and nested `STRUCT` parameters are accepted, and CTEs in a
+  function body remain local to that body. Temporary tables accept an explicit schema, an `AS`
+  query, or both, and can be explicitly addressed through the `_SESSION` qualifier; a `_SESSION`
+  name that was not declared answers `Not found: Dataset <project>:_SESSION was not found`, as
+  BigQuery does. `CREATE TEMP TABLE IF NOT EXISTS` skips a temporary table that already exists and
+  `CREATE OR REPLACE TEMP TABLE` replaces one, where `CREATE TEMP FUNCTION` rejects a clause such as
+  `IF NOT EXISTS` or `OR REPLACE`: `Clauses such as IF NOT EXISTS are not yet supported with CREATE TEMP
+  FUNCTION`. `OR REPLACE` after the object name answers `Syntax error: Unexpected keyword OR`, as
+  BigQuery's grammar takes it before `TEMP`. Results from preceding statements are discarded; the final query or DML
+  statement supplies the result. A script reports no DML counts, `numDmlAffectedRows` or `dmlStats`,
+  since BigQuery runs its statements as child jobs and the parent carries only the final result. A declaration, an assignment, or the condition that ends a loop does not
+  discard it, so a loop reports its final iteration's result and a script that declares or assigns
+  only answers with no rows. A `FOR` loop reports no result of its own, even when it runs no iteration,
+  so a script that ends with one answers with no rows. A request that holds only one procedural statement, such as
+  `DECLARE x INT64;`, runs as a script, as BigQuery runs it. Procedural `BEGIN`/`END` blocks can be
+  nested and contain supported
+  statements or `IF`/`ELSEIF`/`ELSE` blocks; their statements execute in source order using the
+  same temporary objects. Searched and simple `CASE` statements run the first matching branch, with
+  optional `ELSE`. `DECLARE`/`SET` supports `INT64`,
+  `BOOL`, `STRING`, `FLOAT64`, `NUMERIC`, `DATE`, `TIMESTAMP`, `BYTES`,
+  `DATETIME`, `TIME`, `JSON`, `STRUCT`, and arrays of those non-array types, including
+  `ARRAY<STRUCT<...>>`; multiple names may share a declaration type and default expression. Simple
+  literals, array literals, and arithmetic are evaluated by floci-gcp; other supported expressions are
+  evaluated by the configured SQL engine. A `FLOAT64` literal stays floating point, so `f + 0.2` over
+  `DECLARE f FLOAT64 DEFAULT 0.1` answers `0.30000000000000004`, as BigQuery does, and the operands type
+  the arithmetic, so `SET f = 9007199254740993 - 9007199254740992` stores the exact `1.0` and an `INT64`
+  overflow fails even when the target is `FLOAT64`. A typed array literal
+  keeps its element type, so `DECLARE xs DEFAULT ARRAY<FLOAT64>[]` declares an empty `ARRAY<FLOAT64>`, and
+  a `STRUCT` value is assigned by field position, so `STRUCT(1 AS b, 2 AS a)` reaches
+  `STRUCT<a INT64, b INT64>` as `a = 1, b = 2`. Variable references
+  are token-substituted as typed literals; the statement's own names win over a variable of the same
+  name: a source column, a column a DML statement names, a CTE name, the columns a CTE's select list
+  exposes, a function's parameters, a `FROM` item's alias (a table, `UNNEST` or derived table), the
+  columns a derived table exposes, function names, and qualified fields are left intact, so a column
+  keeps its name while the values an `INSERT` supplies still bind the variables. Those names win in the
+  query that reads them and in the queries nested inside it, never in a sibling query, so `DECLARE v
+  INT64 DEFAULT 1; CREATE TEMP TABLE t AS SELECT 4 AS v; SET v = v + (SELECT COUNT(*) FROM t)` stores
+  `2`: the column answers `4` inside the subquery, and the variable the `v` around it, while `SELECT
+  COUNT(*) FROM t UNION ALL SELECT v` answers `1` and the variable's `1`. A `WITH` clause declares its
+  CTE for every branch of a set operation, so `WITH t AS (SELECT 4 AS v) SELECT 0 UNION ALL SELECT v FROM
+  t` answers `0` and `4`, and a nested `WITH` of the same name shadows the CTE of the query around it, so
+  `WITH t AS (SELECT 4 AS v) SELECT 0 UNION ALL SELECT (WITH t AS (SELECT 2 AS w) SELECT v FROM t)`
+  answers `0` and the variable's `1`. The expression a `SET` or
+  `DECLARE` default evaluates and the condition of an `IF`, `WHILE` or `REPEAT` collect the same names
+  from the tables they read and the CTEs they define, in the same queries, and a CTE nothing reads
+  declares none of them. A
+  variable that is a whole select item keeps its name as the result column, while
+  `SELECT f + 0.2` is named `f0_`, as BigQuery names it; so are a function argument such as
+  `SELECT COALESCE(NULL, f)` and a grouped expression such as `SELECT (f) + 1`.
+  `EXECUTE IMMEDIATE` supports a single query, supported DDL or DML statement, or `BEGIN`
+  block. `USING` binds named or positional query
+  parameters, and `INTO` assigns a zero- or one-row result to declared variables. SQL-text expressions can use
+  outer script variables. The dynamic statement itself only sees `USING` values, not outer script variables or
+  request query parameters; nested `EXECUTE IMMEDIATE` is rejected, and the SQL it supplies is
+  validated before any of it runs, so an invalid block writes nothing.
+  `WHILE` supports simple scalar comparisons with a
+  1,000-iteration safety limit. `BEGIN` blocks scope variables. Full GoogleSQL expression and type
+  semantics are not supported. Labels are supported
+  on `BEGIN` blocks and loops, including labeled `BREAK`/`LEAVE` and
+  `CONTINUE`/`ITERATE`; `CONTINUE` cannot target a block.
+  `BEGIN` blocks do not provide transaction semantics, and
+  transactions and exception handlers are not supported. Procedural `IF` blocks execute only their
+  selected branch. Supported persistent DML
+  and DDL statements execute in source order. A sequence
+  of temporary function declarations followed by one query remains a single query, as in BigQuery.
+  `FOR … IN` evaluates its table expression once and exposes each row as a struct of the query's
+  fields in the loop body, so a field keeps its type. A `CREATE TEMP TABLE` whose declared schema
+  makes a field `NOT NULL` rejects a row that would store a NULL there.
+  All loop forms stop after 1,000 iterations. JavaScript UDFs and positional parameters in
+  multi-statement scripts are not supported, where BigQuery binds positional parameters across the
+  statements of a script; a parameter list sent without names rejects a script the same way, since
+  that is the positional mode BigQuery infers for it. Multi-statement queries reject destination,
+  disposition, schema update, partitioning, clustering, destination encryption, and user-defined
+  function resource configuration fields.
 - **Dry runs**: `dryRun` on `jobs.query` or `configuration.dryRun` on `jobs.insert` validates the
   query and returns its result schema (`statistics.query.schema` on the job) and
   `totalBytesProcessed`, without running it or persisting a job. An invalid query in a dry run is
   an HTTP 400. DML and DDL dry runs resolve every table the statement reads or writes, and DML is
-  bound against those tables, so a dry run fails wherever the real run would.
+  bound against those tables, so a dry run fails wherever the real run would. A script dry run
+  describes its `CREATE TEMP TABLE` declarations instead of storing them, so a later statement of
+  the same script still resolves them by name and the reported schema is the last statement's. It
+  stops at variable statements or control flow without validating their following statements, and
+  stops after validating the first DDL statement; BigQuery validates every statement of a script,
+  including the ones after a `DECLARE` and in unselected branches.
 - **Destination tables**: `jobs.insert` honors `configuration.query.destinationTable` with
   `createDisposition` (`CREATE_IF_NEEDED` default, `CREATE_NEVER`) and `writeDisposition`
   (`WRITE_EMPTY` default, `WRITE_TRUNCATE`, `WRITE_TRUNCATE_DATA`, `WRITE_APPEND`). Failures are
@@ -575,9 +656,32 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
   `USING` join, is not positionally rewritten, so a repeated input name can keep DuckDB's generated
   name and order. A `* EXCEPT` over `PIVOT` output whose generated column names cannot be derived
   from literal `IN` values and aggregate aliases is not validated.
-- Multi-statement scripts, temporary tables, `ALTER TABLE` / `ALTER VIEW` other than
-  `SET OPTIONS`, `CREATE FUNCTION` / `PROCEDURE`, `EXPORT DATA` and `LOAD DATA` are not supported
-  yet; they fail with `invalidQuery`.
+- Scripts support nested `BEGIN` blocks, `IF`, searched/simple `CASE`, scalar variables, and
+  `WHILE`, `LOOP`, `REPEAT`, and `FOR` with labels and loop control. Full GoogleSQL variable type
+  and expression semantics, exception handlers, transactions, JavaScript UDFs, persistent
+  `CREATE FUNCTION` / `PROCEDURE`, `EXPORT DATA`, `LOAD DATA`, `ALTER TABLE`, and `ALTER VIEW`
+  inside scripts are not supported; they fail with `invalidQuery`, and so do the `ASSERT` and
+  `RETURN` statements, which a script here cannot run yet.
+  Dynamic SQL goes through `EXECUTE IMMEDIATE` and is supported only in the shapes listed above.
+  A `BIGNUMERIC` variable is not supported: DuckDB's `DECIMAL(38,9)` is BigQuery's `NUMERIC` precision
+  and cannot hold its 76 digits. Rejections use floci's own wording in a few places where BigQuery adds
+  a position, for example `IF condition must be a BOOL expression` for `Cannot coerce expression 1 to
+  type BOOL at [1:4]`, and `EXECUTE IMMEDIATE cannot be nested.` for `SQL created by EXECUTE IMMEDIATE
+  contains unsupported statement type: ExecuteImmediateStatement`.
+- A script variable reference keeps BigQuery's value but not always its column name: a parenthesised
+  reference is named `f0_`, where BigQuery names it after the variable (`SELECT (x)` answers a column
+  named `x`), a qualified field of a `JSON` variable is `f0_`, where BigQuery names the field, and a
+  backticked reference such as ``SELECT `x` `` fails instead of reading the variable. Two
+  shapes BigQuery rejects also run here: a variable in `LIMIT`, which BigQuery refuses with `LIMIT
+  expects an integer literal or parameter`, and a reserved keyword used as a loop or block label,
+  which it refuses with `Reserved keyword 'outer' may not be used as a label name without backticks`.
+- Values a script needs at validation time are what a dry run cannot supply: a script dry run stops
+  at the first variable or control-flow statement and after the first DDL statement, where BigQuery
+  validates every statement of the script. A dry run whose script declares a temporary table reports
+  the last statement's schema, where BigQuery reports none.
+- Script statements execute synchronously within the parent job. Separate child jobs are not
+  created or returned by `jobs.list`.
+- Outside scripts, `ALTER TABLE` and `ALTER VIEW` support only `SET OPTIONS`.
 - DML statements are applied atomically per statement by reading and rewriting the whole target
   table; there is no fine-grained DML or streaming-buffer interaction.
 - `CLUSTER BY` and table `OPTIONS` in plain `CREATE TABLE` and `CREATE TABLE AS SELECT` are

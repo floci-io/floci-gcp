@@ -963,6 +963,36 @@ class BigQueryTest {
     }
 
     @Test
+    @Order(23)
+    void proceduralScriptRunsThroughJobsQueryWithTheBigQuerySdk() throws InterruptedException {
+        TableResult result = bigquery.query(QueryJobConfiguration.newBuilder("""
+                DECLARE target_age INT64 DEFAULT 24;
+                WHILE target_age < 25 DO
+                  SET target_age = target_age + 1;
+                END WHILE;
+                SELECT name FROM `%s.%s.%s` WHERE age = target_age;
+                """.formatted(PROJECT_ID, DATASET, TABLE)).build());
+
+        assertThat(result.getTotalRows()).isEqualTo(1);
+        assertThat(result.iterateAll().iterator().next().get("name").getStringValue()).isEqualTo("bob");
+    }
+
+    @Test
+    @Order(24)
+    void proceduralScriptDryRunAndErrorsSurfaceThroughJobsInsert() {
+        String script = "DECLARE target_age INT64 DEFAULT 25; SELECT name FROM `"
+                + PROJECT_ID + "." + DATASET + "." + TABLE + "` WHERE age = target_age;";
+        Job dryRun = bigquery.create(JobInfo.of(QueryJobConfiguration.newBuilder(script).setDryRun(true).build()));
+        assertThat(dryRun.getStatus().getError()).isNull();
+
+        Job failed = bigquery.create(JobInfo.of(QueryJobConfiguration.newBuilder(
+                "BREAK; SELECT name FROM `" + PROJECT_ID + "." + DATASET + "." + TABLE + "`").build()));
+        assertThat(failed.getStatus().getState().toString()).isEqualTo("DONE");
+        assertThat(failed.getStatus().getError()).isNotNull();
+        assertThat(failed.getStatus().getError().getReason()).isEqualTo("invalidQuery");
+    }
+
+    @Test
     @Order(99)
     void deleteDataset() {
         boolean deleted = bigquery.delete(DatasetId.of(PROJECT_ID, DATASET),

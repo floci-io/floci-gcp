@@ -62,6 +62,9 @@ interface BigQuerySqlEngine {
     record DmlResult(long affectedRows, long insertedRows, long updatedRows, long deletedRows,
                      List<Map<String, Object>> tableRows, long totalBytesProcessed) {}
 
+    /** DML applied to a request-local temporary table, including its resulting schema. */
+    record TemporaryDmlResult(TableSchema schema, DmlResult dmlResult) {}
+
     /**
      * Source files of a load job, already staged in {@link BigQueryLoadFiles}. {@code schema} is
      * null for auto-detection (CSV, JSON) or when the file carries its own schema (Parquet).
@@ -79,4 +82,7 @@ interface BigQuerySqlEngine {
     Result readFiles(LoadSource source);
 
     DmlResult executeDml(Request request, Tables tables);
+
+    TemporaryDmlResult executeTemporaryDml(Request request, Tables tables, String temporaryTable,
+                                           List<TableFieldSchema> targetFields);
 }

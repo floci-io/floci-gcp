@@ -32,11 +32,14 @@ import org.jboss.logging.Logger;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.math.RoundingMode;
 import java.nio.charset.StandardCharsets;
 import java.time.DateTimeException;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
+import java.time.OffsetDateTime;
 import java.time.Year;
 import java.time.YearMonth;
 import java.time.ZoneOffset;
@@ -44,8 +47,13 @@ import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.time.format.ResolverStyle;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Base64;
+import java.util.Collection;
+import java.util.Deque;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -56,6 +64,7 @@ import java.util.UUID;
 import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 /**
  * BigQuery: datasets/tables metadata, streaming inserts ({@code insertAll}), row reads and
@@ -651,6 +660,16 @@ public class BigQueryService {
     /** Hidden dataset holding materialized query results; never listed, has no dataset record. */
     static final String ANON_DATASET = "_floci_anon";
     private static final Pattern PARTITION_DECORATOR = Pattern.compile("^(.+)\\$(-?\\d+)$");
+    private static final Pattern SCRIPT_DECLARE = Pattern.compile(
+            "(?is)^DECLARE\\s+((?:[A-Za-z_][A-Za-z0-9_]*)(?:\\s*,\\s*[A-Za-z_][A-Za-z0-9_]*)*)"
+                    + "(?:\\s+(.*))?$");
+    private static final Pattern SCRIPT_SET = Pattern.compile(
+            "(?is)^SET\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*(.+)$");
+    private static final Pattern SCRIPT_SET_TUPLE = Pattern.compile(
+            "(?is)^SET\\s*\\((.*)\\)\\s*=\\s*\\((.*)\\)$");
+    /** A typed array literal, whose element type BigQuery keeps instead of inferring one. */
+    private static final Pattern SCRIPT_TYPED_ARRAY_LITERAL = Pattern.compile(
+            "(?is)^ARRAY\\s*<\\s*([^<>]+?)\\s*>\\s*\\[(.*)]$");
     private static final DateTimeFormatter HOUR_PARTITION = DateTimeFormatter.ofPattern("uuuuMMddHH")
             .withResolverStyle(ResolverStyle.STRICT);
     private static final DateTimeFormatter DAY_PARTITION = DateTimeFormatter.ofPattern("uuuuMMdd")
@@ -677,20 +696,21 @@ public class BigQueryService {
                                TableReference destinationTable, String writeDisposition,
                                String createDisposition, List<String> schemaUpdateOptions,
                                Map<String, Object> timePartitioning, Map<String, Object> rangePartitioning,
-                               String defaultProjectId) {
+                               String defaultProjectId, Set<String> scriptIncompatibleOptions) {
 
         public QueryOptions {
             schemaUpdateOptions = schemaUpdateOptions != null ? schemaUpdateOptions : List.of();
+            scriptIncompatibleOptions = scriptIncompatibleOptions != null ? scriptIncompatibleOptions : Set.of();
         }
 
         public QueryOptions(String sql, String defaultDatasetId, List<Map<String, Object>> queryParameters,
                             String parameterMode, boolean dryRun, Boolean useLegacySql,
-                            TableReference destinationTable, String writeDisposition, String createDisposition,
-                            List<String> schemaUpdateOptions, Map<String, Object> timePartitioning,
-                            Map<String, Object> rangePartitioning) {
+                            TableReference destinationTable, String writeDisposition,
+                            String createDisposition, List<String> schemaUpdateOptions,
+                            Map<String, Object> timePartitioning, Map<String, Object> rangePartitioning) {
             this(sql, defaultDatasetId, queryParameters, parameterMode, dryRun, useLegacySql, destinationTable,
                     writeDisposition, createDisposition, schemaUpdateOptions, timePartitioning, rangePartitioning,
-                    null);
+                    null, Set.of());
         }
 
         public QueryOptions(String sql, String defaultDatasetId, List<Map<String, Object>> queryParameters,
@@ -698,14 +718,14 @@ public class BigQueryService {
                             TableReference destinationTable, String writeDisposition, String createDisposition,
                             List<String> schemaUpdateOptions) {
             this(sql, defaultDatasetId, queryParameters, parameterMode, dryRun, useLegacySql, destinationTable,
-                    writeDisposition, createDisposition, schemaUpdateOptions, null, null, null);
+                    writeDisposition, createDisposition, schemaUpdateOptions, null, null, null, Set.of());
         }
 
         public QueryOptions(String sql, String defaultDatasetId, List<Map<String, Object>> queryParameters,
                             String parameterMode, boolean dryRun, Boolean useLegacySql,
                             TableReference destinationTable, String writeDisposition, String createDisposition) {
             this(sql, defaultDatasetId, queryParameters, parameterMode, dryRun, useLegacySql, destinationTable,
-                    writeDisposition, createDisposition, List.of(), null, null, null);
+                    writeDisposition, createDisposition, List.of(), null, null, null, Set.of());
         }
 
         public QueryOptions(String sql, String defaultDatasetId, List<Map<String, Object>> queryParameters,
@@ -724,6 +744,17 @@ public class BigQueryService {
         String dataProjectId(String jobProjectId) {
             return defaultDatasetId != null && defaultProjectId != null && !defaultProjectId.isBlank()
                     ? defaultProjectId : jobProjectId;
+        }
+
+        /**
+         * True when the parameters bind by position: an explicit {@code POSITIONAL} mode or, as the
+         * SDKs send them, a list without names and without a mode, the same rule
+         * {@link SqlDialectTranslator.QueryParameters} follows.
+         */
+        boolean positionalParameters() {
+            return "POSITIONAL".equalsIgnoreCase(parameterMode)
+                    || queryParameters != null && !queryParameters.isEmpty()
+                    && queryParameters.getFirst().get("name") == null;
         }
     }
 
@@ -774,8 +805,26 @@ public class BigQueryService {
                     + " set useLegacySql to false to run GoogleSQL.");
         }
         String dataProjectId = options.dataProjectId(projectId);
-        SqlDialectTranslator.Statement statement = SqlDialectTranslator.parseStatement(options.sql(), dataProjectId,
-                projectId, options.defaultDatasetId());
+        boolean script = SqlDialectTranslator.multiStatementScript(options.sql())
+                || SqlDialectTranslator.singleStatementScript(options.sql())
+                || isExecuteImmediateStatement(options.sql());
+        SqlDialectTranslator.ProceduralScript procedural = script
+                ? SqlDialectTranslator.proceduralScript(options.sql()) : null;
+        if (script) {
+            validateScriptConfiguration(options);
+        }
+        if (script && options.positionalParameters()) {
+            throw QueryEngine.invalidQuery(
+                    "Positional query parameters are not supported in multi-statement scripts.");
+        }
+        if (procedural != null) {
+            validateProceduralStatements(dataProjectId, projectId, procedural, options.defaultDatasetId(),
+                    new SqlDialectTranslator.QueryParameters(options.queryParameters(), options.parameterMode()));
+        }
+        SqlDialectTranslator.Statement statement = procedural == null
+                ? SqlDialectTranslator.scriptFinalStatement(options.sql(), dataProjectId, projectId,
+                        options.defaultDatasetId())
+                : null;
 
         StoredJob job = new StoredJob();
         job.setJobId(resolvedJobId);
@@ -784,8 +833,31 @@ public class BigQueryService {
         job.setQuery(options.sql());
         job.setState("DONE");
         job.setCreationTime(nowMillis());
-        job.setStatementType(statement.statementType());
+        job.setStatementType(procedural == null ? statement.statementType() : "SCRIPT");
         job.setTotalBytesProcessed("0");
+
+        if (procedural != null) {
+            if (options.dryRun()) {
+                // The default dataset may name another project, so resolve temporary objects and tables
+                // while the stores see the project the statement reads from.
+                ProceduralContext context = inProject(projectId, dataProjectId, () -> validateProceduralScript(
+                        dataProjectId, projectId, procedural, options, jobLocation));
+                BigQuerySqlEngine.Result result = context.lastQueryResult();
+                if (result != null) {
+                    job.setSchema(result.schema());
+                }
+                job.setTotalBytesProcessed(String.valueOf(context.totalBytesProcessed()));
+                job.setLocation(jobLocation.resolved());
+                job.setDryRun(true);
+                return job;
+            }
+            synchronized (writeLock) {
+                executeProceduralScript(dataProjectId, projectId, procedural, options, job, jobLocation);
+            }
+            job.setLocation(jobLocation.resolved());
+            jobStore.put(job.getJobId(), job);
+            return job;
+        }
 
         if (statement.kind() != SqlDialectTranslator.StatementKind.QUERY) {
             // The default dataset only qualifies table names, so a schema statement stays in the job's project.
@@ -793,11 +865,11 @@ public class BigQueryService {
             if (options.dryRun()) {
                 // "an invalid query will return the same error it would if it wasn't a dry run", so
                 // a dry run has to resolve what the statement touches rather than only classify it.
-                inProject(projectId, targetProjectId, () -> {
+                long validatedBytes = inProject(projectId, targetProjectId, () -> {
                     admitWrittenDataset(statement, jobLocation);
-                    validateStatement(targetProjectId, projectId, statement, options, jobLocation);
-                    return null;
+                    return validateStatement(targetProjectId, projectId, statement, options, jobLocation);
                 });
+                job.setTotalBytesProcessed(String.valueOf(validatedBytes));
                 job.setLocation(jobLocation.resolved());
                 job.setDryRun(true);
                 return job;
@@ -912,13 +984,17 @@ public class BigQueryService {
      * reports the same error a real run would, so a DML statement against a missing target or
      * source table, or a CREATE VIEW over a missing one, fails here instead of reporting success.
      */
-    private void validateStatement(String projectId, String jobProjectId, SqlDialectTranslator.Statement statement,
+    private long validateStatement(String projectId, String jobProjectId, SqlDialectTranslator.Statement statement,
                                    QueryOptions options, JobLocation jobLocation) {
         SqlDialectTranslator.TableRef target = statement.target();
+        long totalBytesProcessed = 0;
         switch (statement.kind()) {
             case INSERT, UPDATE, DELETE, MERGE -> {
                 getTable(projectId, target.datasetId(), target.tableId());
-                engine.executeDml(request(projectId, jobProjectId, options.sql(), options, true), tables(projectId, jobLocation));
+                BigQuerySqlEngine.DmlResult result = engine.executeDml(
+                        request(projectId, jobProjectId, options.sql(), options, true),
+                        tables(projectId, jobLocation));
+                totalBytesProcessed = result.totalBytesProcessed();
             }
             case TRUNCATE -> getTable(projectId, target.datasetId(), target.tableId());
             case DROP_TABLE, DROP_VIEW -> {
@@ -957,6 +1033,7 @@ public class BigQueryService {
                             options, true),
                             tables(projectId, jobLocation));
                     rejectDuplicateQueryColumns(statement, described);
+                    totalBytesProcessed = described.totalBytesProcessed();
                 }
                 if (statement.kind() == SqlDialectTranslator.StatementKind.CREATE_TABLE
                         && statement.copySource() == null) {
@@ -989,6 +1066,3548 @@ public class BigQueryService {
             }
             default -> { }
         }
+        return totalBytesProcessed;
+    }
+
+    private ProceduralContext validateProceduralScript(String projectId, String jobProjectId,
+                                                        SqlDialectTranslator.ProceduralScript script,
+                                                        QueryOptions options, JobLocation jobLocation) {
+        ProceduralContext context = new ProceduralContext();
+        validateProceduralItemsForDryRun(projectId, jobProjectId, script.items(), options, context, jobLocation);
+        return context;
+    }
+
+    private boolean validateProceduralItemsForDryRun(String projectId, String jobProjectId,
+                                                       List<SqlDialectTranslator.ScriptItem> items,
+                                                       QueryOptions options, ProceduralContext context,
+                                                       JobLocation jobLocation) {
+        for (SqlDialectTranslator.ScriptItem item : items) {
+            if (item instanceof SqlDialectTranslator.SqlItem sql
+                    && (SCRIPT_DECLARE.matcher(sql.sql().trim()).matches()
+                            || SCRIPT_SET.matcher(sql.sql().trim()).matches()
+                            || SCRIPT_SET_TUPLE.matcher(sql.sql().trim()).matches()
+                            || isExecuteImmediateStatement(sql.sql()))) {
+                return false;
+            }
+            if (item instanceof SqlDialectTranslator.IfBlock || item instanceof SqlDialectTranslator.CaseBlock
+                    || item instanceof SqlDialectTranslator.WhileBlock
+                    || item instanceof SqlDialectTranslator.LoopBlock || item instanceof SqlDialectTranslator.RepeatBlock
+                    || item instanceof SqlDialectTranslator.ForBlock || item instanceof SqlDialectTranslator.LoopControl) {
+                return false;
+            }
+            if (item instanceof SqlDialectTranslator.BeginBlock block) {
+                if (!validateProceduralItemsForDryRun(projectId, jobProjectId, block.items(), options, context,
+                        jobLocation)) {
+                    return false;
+                }
+            } else if (!validateProceduralItem(projectId, jobProjectId, item, options, context, jobLocation)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static void validateProceduralStatements(String projectId, String jobProjectId,
+                                                     SqlDialectTranslator.ProceduralScript script,
+                                                     String defaultDatasetId,
+                                                     SqlDialectTranslator.QueryParameters parameters) {
+        validateProceduralItems(projectId, jobProjectId, script.items(), defaultDatasetId,
+                new LinkedHashSet<>(), parameters, true);
+        validateLoopControlTargets(script.items(), new LinkedHashMap<>(), 0);
+    }
+
+    private static void validateLoopControlTargets(List<SqlDialectTranslator.ScriptItem> items,
+                                                   Map<String, Boolean> labels, int loopDepth) {
+        for (SqlDialectTranslator.ScriptItem item : items) {
+            if (item instanceof SqlDialectTranslator.LoopControl control) {
+                if (control.label() == null) {
+                    if (loopDepth == 0) {
+                        throw QueryEngine.invalidQuery(control.continueLoop()
+                                ? "CONTINUE is only allowed inside of a loop body"
+                                : "BREAK without label is only allowed inside of a loop body");
+                    }
+                    continue;
+                }
+                Boolean loopLabel = labels.get(control.label().toLowerCase(Locale.ROOT));
+                if (loopLabel == null) {
+                    throw QueryEngine.invalidQuery("Loop control label " + control.label()
+                            + " does not name an enclosing block or loop.");
+                }
+                if (control.continueLoop() && !loopLabel) {
+                    throw QueryEngine.invalidQuery("CONTINUE cannot target a block label.");
+                }
+                continue;
+            }
+            if (item instanceof SqlDialectTranslator.BeginBlock block) {
+                validateLabeledScriptBody(block.label(), false, block.items(), labels, loopDepth);
+            } else if (item instanceof SqlDialectTranslator.WhileBlock loop) {
+                validateLabeledScriptBody(loop.label(), true, loop.items(), labels, loopDepth);
+            } else if (item instanceof SqlDialectTranslator.LoopBlock loop) {
+                validateLabeledScriptBody(loop.label(), true, loop.items(), labels, loopDepth);
+            } else if (item instanceof SqlDialectTranslator.RepeatBlock loop) {
+                validateLabeledScriptBody(loop.label(), true, loop.items(), labels, loopDepth);
+            } else if (item instanceof SqlDialectTranslator.ForBlock loop) {
+                validateLabeledScriptBody(loop.label(), true, loop.items(), labels, loopDepth);
+            } else if (item instanceof SqlDialectTranslator.IfBlock conditional) {
+                validateLoopControlTargets(conditional.whenTrue(), labels, loopDepth);
+                validateLoopControlTargets(conditional.whenFalse(), labels, loopDepth);
+            } else if (item instanceof SqlDialectTranslator.CaseBlock caseBlock) {
+                for (SqlDialectTranslator.CaseWhen branch : caseBlock.branches()) {
+                    validateLoopControlTargets(branch.items(), labels, loopDepth);
+                }
+                validateLoopControlTargets(caseBlock.otherwise(), labels, loopDepth);
+            }
+        }
+    }
+
+    private static void validateLabeledScriptBody(String label, boolean loop,
+                                                  List<SqlDialectTranslator.ScriptItem> items,
+                                                  Map<String, Boolean> labels, int loopDepth) {
+        String normalized = label != null ? label.toLowerCase(Locale.ROOT) : null;
+        if (normalized != null && labels.containsKey(normalized)) {
+            throw QueryEngine.invalidQuery("Label " + label + " is already used in an enclosing block or loop.");
+        }
+        if (normalized != null) {
+            labels.put(normalized, loop);
+        }
+        try {
+            validateLoopControlTargets(items, labels, loopDepth + (loop ? 1 : 0));
+        } finally {
+            if (normalized != null) {
+                labels.remove(normalized);
+            }
+        }
+    }
+
+    private static Set<String> validateProceduralItems(String projectId, String jobProjectId,
+                                                       List<SqlDialectTranslator.ScriptItem> items,
+                                                       String defaultDatasetId, Set<String> temporaryTables,
+                                                       SqlDialectTranslator.QueryParameters parameters,
+                                                       boolean declarationsAllowed) {
+        Set<String> current = new LinkedHashSet<>(temporaryTables);
+        boolean proceduralStatementSeen = false;
+        for (SqlDialectTranslator.ScriptItem item : items) {
+            if (item instanceof SqlDialectTranslator.SqlItem sql) {
+                if (SCRIPT_DECLARE.matcher(sql.sql().trim()).matches()) {
+                    if (!declarationsAllowed) {
+                        throw QueryEngine.invalidQuery(
+                                "Variable declarations are allowed only at the start of a script or BEGIN block.");
+                    }
+                    if (proceduralStatementSeen) {
+                        throw QueryEngine.invalidQuery(
+                                "Variable declarations must appear at the start of a block.");
+                    }
+                    continue;
+                }
+                proceduralStatementSeen = true;
+                if (isExecuteImmediateStatement(sql.sql())) {
+                    continue;
+                }
+                if (SCRIPT_SET.matcher(sql.sql().trim()).matches()
+                        || SCRIPT_SET_TUPLE.matcher(sql.sql().trim()).matches()) {
+                    continue;
+                }
+                SqlDialectTranslator.validateProceduralStatement(
+                        sql.sql(), projectId, jobProjectId, defaultDatasetId, current, parameters);
+                SqlDialectTranslator.TemporaryTableDefinition declaration =
+                        SqlDialectTranslator.temporaryTableDefinition(sql.sql());
+                if (declaration != null) {
+                    current.add(declaration.name());
+                    continue;
+                }
+                SqlDialectTranslator.TemporaryTableDrop drop =
+                        SqlDialectTranslator.temporaryTableDrop(sql.sql());
+                if (drop != null && current.contains(drop.name())) {
+                    current.remove(drop.name());
+                }
+                continue;
+            }
+            proceduralStatementSeen = true;
+            if (item instanceof SqlDialectTranslator.BeginBlock block) {
+                Set<String> nested = validateProceduralItems(projectId, jobProjectId, block.items(), defaultDatasetId,
+                        current, parameters, true);
+                current.clear();
+                current.addAll(nested);
+                continue;
+            }
+            if (item instanceof SqlDialectTranslator.LoopControl) {
+                continue;
+            }
+            if (item instanceof SqlDialectTranslator.LoopBlock loop) {
+                validateProceduralItems(projectId, jobProjectId, loop.items(), defaultDatasetId, current, parameters,
+                        false);
+                continue;
+            }
+            if (item instanceof SqlDialectTranslator.ForBlock loop) {
+                SqlDialectTranslator.validateProceduralStatement(loop.query(), projectId, jobProjectId,
+                        defaultDatasetId, current, parameters);
+                validateProceduralItems(projectId, jobProjectId, loop.items(), defaultDatasetId, current, parameters,
+                        false);
+                continue;
+            }
+            if (item instanceof SqlDialectTranslator.RepeatBlock loop) {
+                if (!loop.condition().matches("(?i)\\s*[A-Za-z_][A-Za-z0-9_]*\\s*(<=|>=|!=|<>|=|<|>)\\s*"
+                        + "([A-Za-z_][A-Za-z0-9_]*|[-+]?[0-9]+)\\s*")) {
+                    SqlDialectTranslator.validateProceduralStatement(
+                            "SELECT " + loop.condition(), projectId, jobProjectId, defaultDatasetId, current,
+                            parameters);
+                }
+                validateProceduralItems(projectId, jobProjectId, loop.items(), defaultDatasetId, current, parameters,
+                        false);
+                continue;
+            }
+            if (item instanceof SqlDialectTranslator.CaseBlock caseBlock) {
+                List<Set<String>> branchTemporaryTables = new ArrayList<>();
+                for (SqlDialectTranslator.CaseWhen branch : caseBlock.branches()) {
+                    SqlDialectTranslator.validateProceduralStatement(
+                            "SELECT " + caseBlock.condition(branch), projectId, jobProjectId, defaultDatasetId, current,
+                            parameters);
+                    branchTemporaryTables.add(validateProceduralItems(
+                            projectId, jobProjectId, branch.items(), defaultDatasetId, current, parameters, false));
+                }
+                branchTemporaryTables.add(validateProceduralItems(
+                            projectId, jobProjectId, caseBlock.otherwise(), defaultDatasetId, current, parameters,
+                            false));
+                current.clear();
+                branchTemporaryTables.forEach(current::addAll);
+                continue;
+            }
+            if (item instanceof SqlDialectTranslator.WhileBlock loop) {
+                if (!loop.condition().matches("(?i)\\s*[A-Za-z_][A-Za-z0-9_]*\\s*(<=|>=|!=|<>|=|<|>)\\s*"
+                        + "([A-Za-z_][A-Za-z0-9_]*|[-+]?[0-9]+)\\s*")) {
+                    SqlDialectTranslator.validateProceduralStatement(
+                            "SELECT " + loop.condition(), projectId, jobProjectId, defaultDatasetId, current,
+                            parameters);
+                }
+                validateProceduralItems(projectId, jobProjectId, loop.items(), defaultDatasetId, current, parameters,
+                        false);
+                continue;
+            }
+            SqlDialectTranslator.IfBlock conditional = (SqlDialectTranslator.IfBlock) item;
+            SqlDialectTranslator.validateProceduralStatement(
+                    "SELECT " + conditional.condition(), projectId, jobProjectId, defaultDatasetId, current,
+                    parameters);
+            Set<String> whenTrue = validateProceduralItems(
+                    projectId, jobProjectId, conditional.whenTrue(), defaultDatasetId, current, parameters, false);
+            Set<String> whenFalse = validateProceduralItems(
+                    projectId, jobProjectId, conditional.whenFalse(), defaultDatasetId, current, parameters, false);
+            current.clear();
+            current.addAll(whenTrue);
+            current.addAll(whenFalse);
+        }
+        return current;
+    }
+
+    private boolean validateProceduralItem(String projectId, String jobProjectId, SqlDialectTranslator.ScriptItem item,
+                                           QueryOptions options, ProceduralContext context,
+                                           JobLocation jobLocation) {
+        if (item instanceof SqlDialectTranslator.SqlItem sql) {
+            SqlDialectTranslator.TemporaryTableDefinition temporaryTable =
+                    SqlDialectTranslator.temporaryTableDefinition(sql.sql());
+            if (temporaryTable != null) {
+                if (temporaryTable.ifNotExists() && context.temporaryTables().contains(temporaryTable.name())) {
+                    context.clearQueryResult();
+                    return true;
+                }
+                // A dry run describes the definition instead of storing it, so a later statement of the
+                // same script still resolves the temporary table by name.
+                materializeTemporaryTable(projectId, jobProjectId, sql.sql(), temporaryTable.name(),
+                        temporaryTable.fields(), options, context, jobLocation, true);
+                return true;
+            }
+            String truncatedTemporaryTable = SqlDialectTranslator.temporaryTruncateTarget(
+                    sql.sql(), context.temporaryTables());
+            if (truncatedTemporaryTable != null) {
+                context.truncateTemporaryTable(truncatedTemporaryTable);
+                return true;
+            }
+            String temporaryTarget = SqlDialectTranslator.temporaryDmlTarget(sql.sql(), context.temporaryTables());
+            if (temporaryTarget != null) {
+                materializeTemporaryTable(projectId, jobProjectId, sql.sql(), temporaryTarget, List.of(), options,
+                        context, jobLocation, true);
+                return true;
+            }
+            validateTemporaryFunctionDeclaration(projectId, jobProjectId, sql.sql(), options, context);
+            if (context.applyTemporaryObjectChange(sql.sql(), projectId)) {
+                return true;
+            }
+            SqlDialectTranslator.Statement statement = SqlDialectTranslator.parseStatement(sql.sql(), projectId,
+                    jobProjectId, options.defaultDatasetId());
+            String effectiveSql = context.prependTo(sql.sql());
+            statement = withTemporarySetup(statement, context);
+            if (statement.kind() == SqlDialectTranslator.StatementKind.QUERY) {
+                BigQuerySqlEngine.Result result = engine.execute(
+                        request(projectId, jobProjectId, effectiveSql, options, true), tables(projectId, jobLocation));
+                context.recordQueryResult(result);
+            } else {
+                admitWrittenDataset(statement, jobLocation);
+                context.recordBytes(validateStatement(
+                        projectId, jobProjectId, statement, leafOptions(effectiveSql, options), jobLocation));
+                context.clearQueryResult();
+            }
+            return statement.kind() == SqlDialectTranslator.StatementKind.QUERY || statement.isDml();
+        }
+        throw new IllegalStateException("Procedural dry-run validation must stop before control flow");
+    }
+
+    private void executeProceduralScript(String projectId, String jobProjectId,
+                                         SqlDialectTranslator.ProceduralScript script,
+                                         QueryOptions options, StoredJob job, JobLocation jobLocation) {
+        ProceduralContext context = new ProceduralContext();
+        try {
+            // A script's default dataset may name another project, so the stores must see the project
+            // its statements read from. Saved results stay in the job's project below.
+            inProject(jobProjectId, projectId, () -> {
+                for (SqlDialectTranslator.ScriptItem item : script.items()) {
+                    executeProceduralItem(projectId, jobProjectId, item, options, job, context, jobLocation);
+                }
+                return null;
+            });
+        } catch (LoopControlSignal signal) {
+            throw QueryEngine.invalidQuery(signal.label != null
+                    ? "Loop control label " + signal.label + " does not name an enclosing block or loop."
+                    : signal.continueLoop ? "CONTINUE is only allowed inside of a loop body"
+                    : "BREAK without label is only allowed inside of a loop body");
+        }
+        BigQuerySqlEngine.Result result = context.lastQueryResult();
+        job.setTotalBytesProcessed(String.valueOf(context.totalBytesProcessed()));
+        // A script reports only its final result. BigQuery runs a script's statements as child jobs, so the
+        // parent job carries no DML counts, even when the last statement is DML.
+        job.setNumDmlAffectedRows(null);
+        job.setDmlStats(null);
+        if (result != null) {
+            job.setTotalRows(result.rows().size());
+            job.setDestinationDatasetId(ANON_DATASET);
+            job.setDestinationTableId("anon_" + job.getJobId());
+            materializeResult(jobProjectId, job, result.schema(), result.rows());
+        }
+    }
+
+    private record ExecuteImmediateStatement(String sqlExpression, List<String> intoVariables,
+                                             List<ScriptUsingValue> usingValues) {}
+
+    private record ScriptUsingValue(String expression, String alias, boolean aliasSpecified) {}
+
+    private static boolean isExecuteImmediateStatement(String sql) {
+        return executeImmediateRemainder(sql) != null;
+    }
+
+    private static String executeImmediateRemainder(String sql) {
+        if (sql == null) {
+            return null;
+        }
+        int index = skipScriptSqlTrivia(sql, 0);
+        index = consumeScriptSqlKeyword(sql, index, "EXECUTE");
+        if (index < 0) {
+            return null;
+        }
+        index = skipScriptSqlTrivia(sql, index);
+        index = consumeScriptSqlKeyword(sql, index, "IMMEDIATE");
+        if (index < 0) {
+            return null;
+        }
+        String expression = sql.substring(skipScriptSqlTrivia(sql, index)).trim();
+        return expression.isEmpty() ? null : expression;
+    }
+
+    private static int skipScriptSqlTrivia(String sql, int from) {
+        int index = from;
+        while (index < sql.length()) {
+            if (Character.isWhitespace(sql.charAt(index))) {
+                index++;
+            } else if (sql.charAt(index) == '#' || sql.startsWith("--", index)) {
+                while (index < sql.length() && sql.charAt(index) != '\n') {
+                    index++;
+                }
+            } else if (sql.startsWith("/*", index)) {
+                int end = sql.indexOf("*/", index + 2);
+                if (end < 0) {
+                    return sql.length();
+                }
+                index = end + 2;
+            } else {
+                break;
+            }
+        }
+        return index;
+    }
+
+    private static int consumeScriptSqlKeyword(String sql, int from, String keyword) {
+        int end = from + keyword.length();
+        if (end > sql.length() || !sql.regionMatches(true, from, keyword, 0, keyword.length())) {
+            return -1;
+        }
+        if (end < sql.length() && (Character.isLetterOrDigit(sql.charAt(end)) || sql.charAt(end) == '_')) {
+            return -1;
+        }
+        return end;
+    }
+
+    private static ExecuteImmediateStatement parseExecuteImmediate(String sql) {
+        String remainder = executeImmediateRemainder(sql);
+        if (remainder == null) {
+            throw QueryEngine.invalidQuery("EXECUTE IMMEDIATE requires a SQL expression.");
+        }
+        int intoPosition = topLevelScriptKeyword(remainder, "INTO");
+        int usingPosition = topLevelScriptKeyword(remainder, "USING");
+        if (intoPosition >= 0 && usingPosition >= 0 && usingPosition < intoPosition) {
+            throw QueryEngine.invalidQuery("EXECUTE IMMEDIATE clauses must appear in INTO then USING order.");
+        }
+        int expressionEnd = remainder.length();
+        if (intoPosition >= 0) {
+            expressionEnd = Math.min(expressionEnd, intoPosition);
+        }
+        if (usingPosition >= 0) {
+            expressionEnd = Math.min(expressionEnd, usingPosition);
+        }
+        String sqlExpression = remainder.substring(0, expressionEnd).trim();
+        if (sqlExpression.isEmpty()) {
+            throw QueryEngine.invalidQuery("EXECUTE IMMEDIATE requires a SQL expression.");
+        }
+        List<String> intoVariables = List.of();
+        if (intoPosition >= 0) {
+            int intoEnd = usingPosition >= 0 ? usingPosition : remainder.length();
+            String intoClause = remainder.substring(intoPosition + "INTO".length(), intoEnd).trim();
+            intoVariables = splitScriptExpressions(intoClause).stream()
+                    .map(BigQueryService::scriptIdentifier).toList();
+            if (intoVariables.isEmpty()) {
+                throw QueryEngine.invalidQuery("EXECUTE IMMEDIATE INTO requires at least one variable.");
+            }
+        }
+        List<ScriptUsingValue> usingValues = List.of();
+        if (usingPosition >= 0) {
+            usingValues = parseScriptUsingValues(
+                    remainder.substring(usingPosition + "USING".length()).trim());
+        }
+        return new ExecuteImmediateStatement(sqlExpression, intoVariables, usingValues);
+    }
+
+    private static String scriptIdentifier(String expression) {
+        List<SqlDialectTranslator.Token> tokens = new SqlDialectTranslator.Lexer(expression).tokenize().stream()
+                .filter(token -> token.kind != SqlDialectTranslator.Kind.SPACE).toList();
+        if (tokens.size() != 1 || (tokens.getFirst().kind != SqlDialectTranslator.Kind.IDENT
+                && tokens.getFirst().kind != SqlDialectTranslator.Kind.QIDENT)) {
+            throw QueryEngine.invalidQuery("EXECUTE IMMEDIATE variable names must be identifiers.");
+        }
+        return tokens.getFirst().identifierText();
+    }
+
+    private static List<ScriptUsingValue> parseScriptUsingValues(String clause) {
+        if (clause.isBlank()) {
+            throw QueryEngine.invalidQuery("EXECUTE IMMEDIATE USING requires at least one value.");
+        }
+        List<ScriptUsingValue> values = new ArrayList<>();
+        for (String value : splitScriptExpressions(clause)) {
+            int aliasPosition = topLevelScriptKeyword(value, "AS");
+            String expression = aliasPosition >= 0 ? value.substring(0, aliasPosition).trim() : value.trim();
+            String alias = aliasPosition >= 0
+                    ? scriptIdentifier(value.substring(aliasPosition + "AS".length()).trim()) : null;
+            if (expression.isEmpty()) {
+                throw QueryEngine.invalidQuery("EXECUTE IMMEDIATE USING values cannot be empty.");
+            }
+            values.add(new ScriptUsingValue(expression, alias, aliasPosition >= 0));
+        }
+        return values;
+    }
+
+    private void executeImmediate(String projectId, String jobProjectId, String sql, QueryOptions options,
+                                  StoredJob job, ProceduralContext context, JobLocation jobLocation) {
+        if (context.dynamicSqlExecution()) {
+            throw QueryEngine.invalidQuery("EXECUTE IMMEDIATE cannot be nested.");
+        }
+        ExecuteImmediateStatement statement = parseExecuteImmediate(sql);
+        for (String variable : statement.intoVariables()) {
+            if (!context.variables().containsKey(variable.toLowerCase(Locale.ROOT))) {
+                throw QueryEngine.invalidQuery("Variable " + variable + " has not been declared.");
+            }
+        }
+        String dynamicSql = evaluateImmediateSqlExpression(projectId, jobProjectId, statement.sqlExpression(),
+                options, context, jobLocation);
+        List<Map<String, Object>> parameters = executeImmediateQueryParameters(
+                statement.usingValues(), projectId, jobProjectId, options, context, jobLocation);
+        String parameterMode = statement.usingValues().isEmpty() ? null
+                : statement.usingValues().stream().allMatch(ScriptUsingValue::aliasSpecified) ? "NAMED" : "POSITIONAL";
+        QueryOptions dynamicOptions = new QueryOptions(dynamicSql, options.defaultDatasetId(), parameters,
+                parameterMode, false, options.useLegacySql());
+        SqlDialectTranslator.ProceduralScript dynamicScript = SqlDialectTranslator.proceduralScript(dynamicSql);
+        if (dynamicScript.items().size() != 1
+                || !(dynamicScript.items().getFirst() instanceof SqlDialectTranslator.SqlItem
+                || dynamicScript.items().getFirst() instanceof SqlDialectTranslator.BeginBlock)) {
+            throw QueryEngine.invalidQuery("EXECUTE IMMEDIATE requires a single query, DDL, DML, or BEGIN block.");
+        }
+        // BigQuery validates the SQL a dynamic statement supplies before running it, so an invalid block
+        // reports its error instead of writing the part of it that came first.
+        validateProceduralStatements(projectId, jobProjectId, dynamicScript, options.defaultDatasetId(),
+                new SqlDialectTranslator.QueryParameters(parameters, parameterMode));
+        ProceduralContext dynamicContext = context.dynamicSqlChild();
+        try {
+            executeProceduralItem(projectId, jobProjectId, dynamicScript.items().getFirst(), dynamicOptions, job,
+                    dynamicContext, jobLocation);
+        } catch (LoopControlSignal signal) {
+            throw QueryEngine.invalidQuery(signal.label != null
+                    ? "Loop control label " + signal.label + " does not name an enclosing block or loop."
+                    : signal.continueLoop ? "CONTINUE is only allowed inside of a loop body"
+                    : "BREAK without label is only allowed inside of a loop body");
+        }
+        context.mergeDynamicSqlContext(dynamicContext);
+        if (!statement.intoVariables().isEmpty()) {
+            assignImmediateResults(statement.intoVariables(), dynamicContext.lastQueryResult(), context);
+            context.clearQueryResult();
+        }
+    }
+
+    private String evaluateImmediateSqlExpression(String projectId, String jobProjectId, String expression,
+                                                  QueryOptions options, ProceduralContext context,
+                                                  JobLocation jobLocation) {
+        Object value;
+        try {
+            value = scriptOperand(expression, context);
+        } catch (GcpException e) {
+            value = evaluateScriptSqlExpression(expression, projectId, jobProjectId, options, context, jobLocation)
+                    .value();
+        }
+        if (!(value instanceof String sql) || sql.isBlank()) {
+            throw QueryEngine.invalidQuery("EXECUTE IMMEDIATE SQL expression must produce a non-empty STRING.");
+        }
+        return sql;
+    }
+
+    private List<Map<String, Object>> executeImmediateQueryParameters(List<ScriptUsingValue> values, String projectId,
+                                                                     String jobProjectId, QueryOptions options,
+                                                                     ProceduralContext context,
+                                                                     JobLocation jobLocation) {
+        List<Map<String, Object>> parameters = new ArrayList<>(values.size());
+        Set<String> names = new LinkedHashSet<>();
+        for (ScriptUsingValue usingValue : values) {
+            ScriptExpressionValue evaluated = evaluateScriptUsingValue(
+                    usingValue.expression(), projectId, jobProjectId, options, context, jobLocation);
+            String name = usingValue.alias();
+            if (name == null) {
+                String variable = simpleScriptVariableName(usingValue.expression());
+                name = variable != null && context.variables().containsKey(variable.toLowerCase(Locale.ROOT))
+                        ? variable : null;
+            }
+            if (name != null && !names.add(name.toLowerCase(Locale.ROOT))) {
+                throw QueryEngine.invalidQuery("EXECUTE IMMEDIATE USING aliases must be unique.");
+            }
+            parameters.add(scriptQueryParameter(name, evaluated.type(), evaluated.value()));
+        }
+        return parameters;
+    }
+
+    private ScriptExpressionValue evaluateScriptUsingValue(String expression, String projectId, String jobProjectId,
+                                                           QueryOptions options, ProceduralContext context,
+                                                           JobLocation jobLocation) {
+        String variableName = simpleScriptVariableName(expression);
+        if (variableName != null && context.variables().containsKey(variableName.toLowerCase(Locale.ROOT))) {
+            String type = context.variableTypes().get(variableName.toLowerCase(Locale.ROOT));
+            ScriptVariableType variableType = new ScriptVariableTypeParser(type).parse();
+            Object value = coerceScriptVariableValue(context.variables().get(variableName.toLowerCase(Locale.ROOT)),
+                    variableType);
+            return new ScriptExpressionValue(value, scriptVariableTypeSql(variableType));
+        }
+        Object value;
+        String type;
+        if (isScriptIntegerLiteral(expression)) {
+            value = scriptOperand(expression.trim(), context);
+            type = inferredScriptVariableType(value);
+        } else {
+            try {
+                value = scriptOperand(expression, context);
+                String literalType = scriptLiteralType(expression);
+                type = literalType != null ? literalType
+                        : value == null ? "STRING" : inferredScriptVariableType(value);
+            } catch (GcpException e) {
+                ScriptExpressionValue evaluated = evaluateScriptSqlExpression(
+                        expression, projectId, jobProjectId, options, context, jobLocation);
+                value = evaluated.value();
+                type = evaluated.type() != null ? evaluated.type()
+                        : value == null ? "STRING" : inferredScriptVariableType(value);
+            }
+        }
+        ScriptVariableType variableType = new ScriptVariableTypeParser(type).parse();
+        return new ScriptExpressionValue(coerceScriptVariableValue(value, variableType),
+                scriptVariableTypeSql(variableType));
+    }
+
+    private static String simpleScriptVariableName(String expression) {
+        List<SqlDialectTranslator.Token> tokens = new SqlDialectTranslator.Lexer(expression).tokenize().stream()
+                .filter(token -> token.kind != SqlDialectTranslator.Kind.SPACE).toList();
+        return tokens.size() == 1 && (tokens.getFirst().kind == SqlDialectTranslator.Kind.IDENT
+                || tokens.getFirst().kind == SqlDialectTranslator.Kind.QIDENT)
+                ? tokens.getFirst().identifierText() : null;
+    }
+
+    private static Map<String, Object> scriptQueryParameter(String name, String type, Object value) {
+        ScriptVariableType variableType = new ScriptVariableTypeParser(type).parse();
+        Map<String, Object> parameter = new LinkedHashMap<>();
+        if (name != null) {
+            parameter.put("name", name);
+        }
+        parameter.put("parameterType", scriptQueryParameterType(variableType));
+        parameter.put("parameterValue", scriptQueryParameterValue(variableType, value));
+        return parameter;
+    }
+
+    private static Map<String, Object> scriptQueryParameterType(ScriptVariableType type) {
+        Map<String, Object> parameterType = new LinkedHashMap<>();
+        if (type.isArray()) {
+            parameterType.put("type", "ARRAY");
+            parameterType.put("arrayType", scriptQueryParameterType(type.elementType()));
+        } else if (type.isStruct()) {
+            parameterType.put("type", "STRUCT");
+            List<Map<String, Object>> structTypes = new ArrayList<>(type.fields().size());
+            for (int index = 0; index < type.fields().size(); index++) {
+                ScriptVariableField field = type.fields().get(index);
+                Map<String, Object> structFieldType = new LinkedHashMap<>();
+                structFieldType.put("name", field.name() != null ? field.name() : "_field_" + (index + 1));
+                structFieldType.put("type", scriptQueryParameterType(field.type()));
+                structTypes.add(structFieldType);
+            }
+            parameterType.put("structTypes", structTypes);
+        } else {
+            parameterType.put("type", type.scalarType());
+        }
+        return parameterType;
+    }
+
+    private static Map<String, Object> scriptQueryParameterValue(ScriptVariableType type, Object value) {
+        Map<String, Object> parameterValue = new LinkedHashMap<>();
+        if (value == null) {
+            parameterValue.put("value", null);
+            return parameterValue;
+        }
+        if (type.isArray()) {
+            if (!(value instanceof List<?> values)) {
+                throw QueryEngine.invalidQuery("USING value cannot be coerced to " + scriptVariableTypeSql(type));
+            }
+            List<Map<String, Object>> arrayValues = new ArrayList<>(values.size());
+            for (Object element : values) {
+                arrayValues.add(scriptQueryParameterValue(type.elementType(), element));
+            }
+            parameterValue.put("arrayValues", arrayValues);
+            return parameterValue;
+        }
+        if (type.isStruct()) {
+            if (!(value instanceof Map<?, ?> values)) {
+                throw QueryEngine.invalidQuery("USING value cannot be coerced to " + scriptVariableTypeSql(type));
+            }
+            Map<String, Object> structValues = new LinkedHashMap<>();
+            List<Map.Entry<?, ?>> entries = new ArrayList<>(values.entrySet());
+            for (int index = 0; index < type.fields().size(); index++) {
+                ScriptVariableField field = type.fields().get(index);
+                Map.Entry<?, ?> entry = structFieldEntry(entries, field.name(), index);
+                if (entry == null) {
+                    throw QueryEngine.invalidQuery("USING STRUCT value does not match its type.");
+                }
+                String fieldName = field.name() != null ? field.name() : "_field_" + (index + 1);
+                structValues.put(fieldName, scriptQueryParameterValue(field.type(), entry.getValue()));
+            }
+            parameterValue.put("structValues", structValues);
+            return parameterValue;
+        }
+        String literal = switch (type.scalarType()) {
+            case "DATE" -> coerceScriptDate(value).toString();
+            case "TIMESTAMP" -> coerceScriptTimestamp(value).toString();
+            case "DATETIME" -> coerceScriptDateTime(value).toString().replace('T', ' ');
+            case "TIME" -> coerceScriptTime(value).toString();
+            case "BYTES" -> coerceScriptBytes(value);
+            case "JSON" -> coerceScriptJson(value);
+            default -> value.toString();
+        };
+        parameterValue.put("value", literal);
+        return parameterValue;
+    }
+
+    private static void assignImmediateResults(List<String> targets, BigQuerySqlEngine.Result result,
+                                               ProceduralContext context) {
+        if (result == null || result.schema() == null || result.schema().getFields() == null) {
+            throw QueryEngine.invalidQuery("EXECUTE IMMEDIATE INTO requires a query result.");
+        }
+        List<TableFieldSchema> fields = result.schema().getFields();
+        if (fields.size() != targets.size()) {
+            throw QueryEngine.invalidQuery("EXECUTE IMMEDIATE INTO variable count must match query result columns.");
+        }
+        if (result.rows().size() > 1) {
+            throw QueryEngine.invalidQuery("EXECUTE IMMEDIATE INTO query must return at most one row.");
+        }
+        Map<String, Object> assigned = new LinkedHashMap<>();
+        Map<String, Object> row = result.rows().isEmpty() ? null : result.rows().getFirst();
+        for (int index = 0; index < targets.size(); index++) {
+            String target = targets.get(index).toLowerCase(Locale.ROOT);
+            if (!context.variables().containsKey(target)) {
+                throw QueryEngine.invalidQuery("Variable " + targets.get(index) + " has not been declared.");
+            }
+            Object value = row == null ? null : scriptResultValue(row, fields.get(index), index);
+            assigned.put(target, coerceScriptVariableValue(value, context.variableTypes().get(target)));
+        }
+        context.variables().putAll(assigned);
+    }
+
+    private static Object scriptResultValue(Map<String, Object> row, TableFieldSchema field, int index) {
+        Object value = null;
+        if (row.containsKey(field.getName())) {
+            value = row.get(field.getName());
+        } else if (index < row.size()) {
+            value = new ArrayList<>(row.values()).get(index);
+        }
+        return scriptResultValue(value, field);
+    }
+
+    /** A result's value as a script holds it: a TIMESTAMP result is decimal epoch seconds. */
+    private static Object scriptResultValue(Object value, TableFieldSchema field) {
+        if (value == null || field == null) {
+            return value;
+        }
+        if ("TIMESTAMP".equals(field.getType()) && !"REPEATED".equals(field.getMode())) {
+            return resultTimestamp(value);
+        }
+        if ("REPEATED".equals(field.getMode()) && value instanceof List<?> values) {
+            TableFieldSchema element = new TableFieldSchema();
+            element.setName(field.getName());
+            element.setType(field.getType());
+            element.setMode("NULLABLE");
+            element.setFields(field.getFields());
+            List<Object> converted = new ArrayList<>(values.size());
+            for (Object item : values) {
+                converted.add(scriptResultValue(item, element));
+            }
+            return converted;
+        }
+        if ("RECORD".equals(field.getType()) && value instanceof Map<?, ?> record) {
+            Map<String, Object> converted = new LinkedHashMap<>();
+            for (TableFieldSchema child : field.getFields() != null ? field.getFields() : List.<TableFieldSchema>of()) {
+                converted.put(child.getName(), scriptResultValue(record.get(child.getName()), child));
+            }
+            return converted;
+        }
+        return value;
+    }
+
+    /** A result row as a script holds it, converting every field a script represents differently. */
+    private static Map<String, Object> scriptResultRow(Map<String, Object> row, TableSchema schema) {
+        List<TableFieldSchema> fields = schema != null && schema.getFields() != null
+                ? schema.getFields() : List.of();
+        Map<String, Object> converted = new LinkedHashMap<>();
+        for (TableFieldSchema field : fields) {
+            if (row.containsKey(field.getName())) {
+                converted.put(field.getName(), scriptResultValue(row.get(field.getName()), field));
+            }
+        }
+        for (Map.Entry<String, Object> entry : row.entrySet()) {
+            converted.putIfAbsent(entry.getKey(), entry.getValue());
+        }
+        return converted;
+    }
+
+    private void validateScriptConfiguration(QueryOptions options) {
+        if (options.destinationTable() != null || options.writeDisposition() != null
+                || options.createDisposition() != null || !options.schemaUpdateOptions().isEmpty()
+                || options.timePartitioning() != null || options.rangePartitioning() != null
+                || !options.scriptIncompatibleOptions().isEmpty()) {
+            throw QueryEngine.invalidQuery("Destination, disposition, schema update, partitioning, clustering, "
+                    + "encryption, and user-defined function resource options cannot be set for multi-statement "
+                    + "queries.");
+        }
+    }
+
+    private boolean applyScriptVariableStatement(String sql, String projectId, String jobProjectId,
+                                                 QueryOptions options, ProceduralContext context,
+                                                 JobLocation jobLocation) {
+        Matcher declaration = SCRIPT_DECLARE.matcher(sql.trim());
+        if (declaration.matches()) {
+            List<String> names = splitScriptExpressions(declaration.group(1));
+            String remainder = declaration.group(2) != null ? declaration.group(2).trim() : "";
+            int defaultPosition = topLevelScriptKeyword(remainder, "DEFAULT");
+            String typeExpression = defaultPosition >= 0 ? remainder.substring(0, defaultPosition).trim()
+                    : remainder;
+            String defaultExpression = defaultPosition >= 0
+                    ? remainder.substring(defaultPosition + "DEFAULT".length()).trim() : null;
+            String type = typeExpression.isBlank() ? null : normalizeScriptVariableType(typeExpression);
+            if (type == null && defaultExpression == null) {
+                throw QueryEngine.invalidQuery("A variable declaration without a type requires a DEFAULT expression.");
+            }
+            for (String name : names) {
+                String normalized = name.trim().toLowerCase(Locale.ROOT);
+                if (context.variables().containsKey(normalized)) {
+                    throw QueryEngine.invalidQuery("Variable " + name.trim() + " has already been declared.");
+                }
+            }
+            Object value = null;
+            if (defaultExpression != null) {
+                if (type != null) {
+                    value = parseScriptVariableValue(defaultExpression, type, projectId, jobProjectId, options, context, jobLocation);
+                } else {
+                    try {
+                        value = scriptOperand(defaultExpression, context);
+                    } catch (GcpException e) {
+                        ScriptExpressionValue evaluated = evaluateScriptSqlExpression(
+                                defaultExpression, projectId, jobProjectId, options, context, jobLocation);
+                        value = evaluated.value();
+                        type = evaluated.type();
+                    }
+                }
+            }
+            if (type == null) {
+                // A value cannot always convey its type: `DECLARE xs DEFAULT ARRAY<FLOAT64>[]` is an
+                // empty list and `DECLARE b DEFAULT a` may be NULL, so keep the literal's element type
+                // or the declared type of the variable the default names.
+                String literalType = defaultExpression != null ? scriptLiteralType(defaultExpression) : null;
+                String referenceType = literalType == null && defaultExpression != null
+                        ? scriptVariableReferenceType(defaultExpression, context) : null;
+                type = literalType != null ? literalType
+                        : referenceType != null ? referenceType : inferredScriptVariableType(value);
+            }
+            value = coerceScriptVariableValue(value, type);
+            for (String name : names) {
+                String normalized = name.trim().toLowerCase(Locale.ROOT);
+                context.variables().put(normalized, value);
+                context.variableTypes().put(normalized, type);
+            }
+            return true;
+        }
+        Matcher tupleAssignment = SCRIPT_SET_TUPLE.matcher(sql.trim());
+        if (tupleAssignment.matches()) {
+            List<String> names = splitScriptExpressions(tupleAssignment.group(1));
+            List<String> expressions = splitScriptExpressions(tupleAssignment.group(2));
+            if (names.size() != expressions.size() || names.isEmpty()) {
+                throw QueryEngine.invalidQuery("SET tuple assignment must have matching variable and expression counts.");
+            }
+            Map<String, Object> assigned = new LinkedHashMap<>();
+            for (int index = 0; index < names.size(); index++) {
+                String name = names.get(index).trim().toLowerCase(Locale.ROOT);
+                if (!context.variables().containsKey(name)) {
+                    throw QueryEngine.invalidQuery("Variable " + names.get(index).trim() + " has not been declared.");
+                }
+                assigned.put(name, parseScriptVariableValue(expressions.get(index), context.variableTypes().get(name),
+                        projectId, jobProjectId, options, context, jobLocation));
+            }
+            context.variables().putAll(assigned);
+            return true;
+        }
+        Matcher assignment = SCRIPT_SET.matcher(sql.trim());
+        if (assignment.matches()) {
+            String name = assignment.group(1).toLowerCase(Locale.ROOT);
+            if (!context.variables().containsKey(name)) {
+                throw QueryEngine.invalidQuery("Variable " + assignment.group(1) + " has not been declared.");
+            }
+            String type = context.variableTypes().get(name);
+            Object value = parseScriptVariableValue(assignment.group(2), type,
+                    projectId, jobProjectId, options, context, jobLocation);
+            context.variables().put(name, value);
+            return true;
+        }
+        return false;
+    }
+
+    private static int topLevelScriptKeyword(String expression, String keyword) {
+        int parentheses = 0;
+        int brackets = 0;
+        int braces = 0;
+        int angles = 0;
+        String previousWord = null;
+        int index = 0;
+        while (index < expression.length()) {
+            char current = expression.charAt(index);
+            if (current == '-' && index + 1 < expression.length() && expression.charAt(index + 1) == '-'
+                    || current == '#') {
+                while (index < expression.length() && expression.charAt(index) != '\n') {
+                    index++;
+                }
+                continue;
+            }
+            if (current == '/' && index + 1 < expression.length() && expression.charAt(index + 1) == '*') {
+                int end = expression.indexOf("*/", index + 2);
+                if (end < 0) {
+                    return -1;
+                }
+                index = end + 2;
+                continue;
+            }
+            if (current == '\'' || current == '"' || current == '`') {
+                char quote = current;
+                boolean triple = quote != '`' && expression.startsWith(String.valueOf(quote).repeat(3), index);
+                String delimiter = triple ? String.valueOf(quote).repeat(3) : String.valueOf(quote);
+                index += delimiter.length();
+                while (index < expression.length()) {
+                    if (expression.startsWith(delimiter, index)) {
+                        index += delimiter.length();
+                        if (!triple && quote != '`' && index < expression.length()
+                                && expression.charAt(index) == quote) {
+                            index++;
+                            continue;
+                        }
+                        break;
+                    }
+                    if (expression.charAt(index) == '\\' && quote != '`' && index + 1 < expression.length()) {
+                        index += 2;
+                    } else {
+                        index++;
+                    }
+                }
+                previousWord = null;
+                continue;
+            }
+            if (parentheses == 0 && brackets == 0 && braces == 0 && angles == 0
+                    && Character.isLetter(current)) {
+                int wordEnd = index + 1;
+                while (wordEnd < expression.length()
+                        && (Character.isLetterOrDigit(expression.charAt(wordEnd))
+                        || expression.charAt(wordEnd) == '_')) {
+                    wordEnd++;
+                }
+                String word = expression.substring(index, wordEnd);
+                if (word.equalsIgnoreCase(keyword)) {
+                    return index;
+                }
+                previousWord = word.toUpperCase(Locale.ROOT);
+                index = wordEnd;
+                continue;
+            }
+            switch (current) {
+                case '(' -> parentheses++;
+                case ')' -> parentheses--;
+                case '[' -> brackets++;
+                case ']' -> brackets--;
+                case '{' -> braces++;
+                case '}' -> braces--;
+                case '<' -> {
+                    if (startsTypeParameters(previousWord)) {
+                        angles++;
+                    }
+                }
+                case '>' -> angles = Math.max(0, angles - 1);
+                default -> { }
+            }
+            previousWord = null;
+            index++;
+        }
+        return -1;
+    }
+
+    private static boolean startsTypeParameters(String previousWord) {
+        return "ARRAY".equals(previousWord) || "STRUCT".equals(previousWord);
+    }
+
+    private static List<String> splitScriptExpressions(String expression) {
+        List<SqlDialectTranslator.Token> tokens = new SqlDialectTranslator.Lexer(expression).tokenize();
+        List<String> expressions = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        int parentheses = 0;
+        int brackets = 0;
+        int braces = 0;
+        int typeAngles = 0;
+        String previousWord = null;
+        for (SqlDialectTranslator.Token token : tokens) {
+            if (token.isPunct("(")) {
+                parentheses++;
+            } else if (token.isPunct(")")) {
+                parentheses--;
+            } else if (token.isPunct("[")) {
+                brackets++;
+            } else if (token.isPunct("]")) {
+                brackets--;
+            } else if (token.isPunct("{")) {
+                braces++;
+            } else if (token.isPunct("}")) {
+                braces--;
+            } else if (token.isPunct("<") && ("ARRAY".equals(previousWord) || "STRUCT".equals(previousWord))) {
+                typeAngles++;
+            } else if (typeAngles > 0 && token.isPunct(">")) {
+                typeAngles--;
+            } else if (typeAngles > 0 && token.isPunct(">>")) {
+                typeAngles = Math.max(0, typeAngles - 2);
+            }
+            if (token.isPunct(",") && parentheses == 0 && brackets == 0 && braces == 0 && typeAngles == 0) {
+                expressions.add(current.toString().trim());
+                current.setLength(0);
+            } else {
+                current.append(token.text);
+            }
+            if (token.kind == SqlDialectTranslator.Kind.IDENT) {
+                previousWord = token.upper();
+            } else if (token.kind != SqlDialectTranslator.Kind.SPACE) {
+                previousWord = null;
+            }
+        }
+        expressions.add(current.toString().trim());
+        return expressions;
+    }
+
+    private ScriptExpressionValue evaluateScriptSqlExpression(String expression, String projectId,
+                                                               String jobProjectId, QueryOptions options,
+                                                               ProceduralContext context,
+                                                               JobLocation jobLocation) {
+        String sql = context.prependTo("SELECT " + expandScriptExpressionVariables(expression, projectId,
+                jobProjectId, options, context, jobLocation) + " AS _floci_script_value");
+        BigQuerySqlEngine.Result result = engine.execute(request(projectId, jobProjectId, sql, options, false),
+                tables(projectId, jobLocation));
+        context.recordBytes(result.totalBytesProcessed());
+        List<TableFieldSchema> fields = result.schema() != null && result.schema().getFields() != null
+                ? result.schema().getFields() : List.of();
+        if (result.rows().isEmpty()) {
+            return new ScriptExpressionValue(null, fields.isEmpty() ? null : scriptVariableType(fields.getFirst()));
+        }
+        Map<String, Object> row = result.rows().getFirst();
+        Object value;
+        if (row.containsKey("_floci_script_value")) {
+            value = row.get("_floci_script_value");
+        } else if (row.size() == 1) {
+            value = row.values().iterator().next();
+        } else {
+            throw QueryEngine.invalidQuery("Script expression did not produce exactly one value.");
+        }
+        value = scriptResultValue(value, fields.isEmpty() ? null : fields.getFirst());
+        return new ScriptExpressionValue(value, fields.isEmpty() ? inferredScriptVariableType(value)
+                : scriptVariableType(fields.getFirst()));
+    }
+
+    private record ScriptVariableField(String name, ScriptVariableType type) {}
+
+    private record ScriptVariableType(String scalarType, ScriptVariableType elementType,
+                                      List<ScriptVariableField> fields) {
+        private boolean isArray() {
+            return elementType != null;
+        }
+
+        private boolean isStruct() {
+            return fields != null;
+        }
+    }
+
+    private record ScriptExpressionValue(Object value, String type) {}
+
+    private static final class ScriptVariableTypeParser {
+        private static final Set<String> SCALAR_TYPES = Set.of("INT64", "INTEGER", "BOOL", "BOOLEAN", "STRING",
+                "FLOAT64", "FLOAT", "NUMERIC", "DATE", "TIMESTAMP", "BYTES", "DATETIME", "TIME", "JSON");
+
+        private final List<SqlDialectTranslator.Token> tokens;
+        private int at;
+
+        private ScriptVariableTypeParser(String type) {
+            List<SqlDialectTranslator.Token> parsed = new ArrayList<>();
+            for (SqlDialectTranslator.Token token : new SqlDialectTranslator.Lexer(type).tokenize()) {
+                if (token.kind == SqlDialectTranslator.Kind.SPACE) {
+                    continue;
+                }
+                if (token.isPunct(">>")) {
+                    parsed.add(new SqlDialectTranslator.Token(SqlDialectTranslator.Kind.PUNCT, ">", null));
+                    parsed.add(new SqlDialectTranslator.Token(SqlDialectTranslator.Kind.PUNCT, ">", null));
+                } else {
+                    parsed.add(token);
+                }
+            }
+            tokens = parsed;
+        }
+
+        private ScriptVariableType parse() {
+            ScriptVariableType type = parseType();
+            if (at != tokens.size()) {
+                throw invalidType();
+            }
+            return type;
+        }
+
+        private ScriptVariableType parseType() {
+            if (at >= tokens.size()) {
+                throw invalidType();
+            }
+            SqlDialectTranslator.Token head = tokens.get(at++);
+            if (head.kind != SqlDialectTranslator.Kind.IDENT) {
+                throw invalidType();
+            }
+            String name = head.upper();
+            if ("ARRAY".equals(name)) {
+                expect("<");
+                ScriptVariableType elementType = parseType();
+                expect(">");
+                if (elementType.isArray()) {
+                    throw QueryEngine.invalidQuery("BigQuery arrays cannot contain arrays.");
+                }
+                return new ScriptVariableType(null, elementType, null);
+            }
+            if ("STRUCT".equals(name)) {
+                expect("<");
+                List<ScriptVariableField> fields = new ArrayList<>();
+                while (!peek(">")) {
+                    if (at >= tokens.size()) {
+                        throw invalidType();
+                    }
+                    SqlDialectTranslator.Token fieldOrType = tokens.get(at);
+                    if (isUnnamedType()) {
+                        fields.add(new ScriptVariableField(null, parseType()));
+                    } else {
+                        if (fieldOrType.kind != SqlDialectTranslator.Kind.IDENT
+                                && fieldOrType.kind != SqlDialectTranslator.Kind.QIDENT) {
+                            throw invalidType();
+                        }
+                        at++;
+                        fields.add(new ScriptVariableField(fieldOrType.identifierText(), parseType()));
+                    }
+                    if (!peek(">")) {
+                        expect(",");
+                    }
+                }
+                expect(">");
+                if (fields.isEmpty()) {
+                    throw invalidType();
+                }
+                return new ScriptVariableType(null, null, List.copyOf(fields));
+            }
+            if (!SCALAR_TYPES.contains(name)) {
+                throw invalidType();
+            }
+            return new ScriptVariableType(normalizeScalarType(name), null, null);
+        }
+
+        private boolean isUnnamedType() {
+            SqlDialectTranslator.Token token = tokens.get(at);
+            if (token.kind != SqlDialectTranslator.Kind.IDENT) {
+                return false;
+            }
+            String name = token.upper();
+            if ("ARRAY".equals(name) || "STRUCT".equals(name)) {
+                return at + 1 < tokens.size() && tokens.get(at + 1).isPunct("<");
+            }
+            if (!SCALAR_TYPES.contains(name)) {
+                return false;
+            }
+            int next = at + 1;
+            if (next < tokens.size() && tokens.get(next).isPunct("(")) {
+                int parentheses = 0;
+                while (next < tokens.size()) {
+                    if (tokens.get(next).isPunct("(")) {
+                        parentheses++;
+                    } else if (tokens.get(next).isPunct(")")) {
+                        parentheses--;
+                        if (parentheses == 0) {
+                            next++;
+                            break;
+                        }
+                    }
+                    next++;
+                }
+            }
+            return next >= tokens.size() || tokens.get(next).isPunct(",") || tokens.get(next).isPunct(">");
+        }
+
+        private boolean peek(String punctuation) {
+            return at < tokens.size() && tokens.get(at).isPunct(punctuation);
+        }
+
+        private void expect(String punctuation) {
+            if (!peek(punctuation)) {
+                throw invalidType();
+            }
+            at++;
+        }
+
+        private GcpException invalidType() {
+            return QueryEngine.invalidQuery("Variable type is not supported by the floci BigQuery emulator.");
+        }
+    }
+
+    private static String normalizeScriptVariableType(String type) {
+        return scriptVariableTypeSql(new ScriptVariableTypeParser(type).parse());
+    }
+
+    private static String normalizeScalarType(String type) {
+        return switch (type) {
+            case "INTEGER" -> "INT64";
+            case "BOOLEAN" -> "BOOL";
+            case "FLOAT" -> "FLOAT64";
+            default -> type;
+        };
+    }
+
+    private static String scriptVariableTypeSql(ScriptVariableType type) {
+        if (type.isArray()) {
+            return "ARRAY<" + scriptVariableTypeSql(type.elementType()) + ">";
+        }
+        if (type.isStruct()) {
+            List<String> fields = new ArrayList<>(type.fields().size());
+            for (ScriptVariableField field : type.fields()) {
+                String fieldType = scriptVariableTypeSql(field.type());
+                fields.add(field.name() == null ? fieldType
+                        : quoteScriptTypeField(field.name()) + " " + fieldType);
+            }
+            return "STRUCT<" + String.join(", ", fields) + ">";
+        }
+        return type.scalarType();
+    }
+
+    private static String quoteScriptTypeField(String name) {
+        return "`" + name.replace("`", "``") + "`";
+    }
+
+    private static String scriptVariableType(TableFieldSchema field) {
+        return scriptVariableTypeSql(scriptVariableTypeNode(field));
+    }
+
+    private static ScriptVariableType scriptVariableTypeNode(TableFieldSchema field) {
+        if ("RECORD".equalsIgnoreCase(field.getType())) {
+            List<TableFieldSchema> children = field.getFields() != null ? field.getFields() : List.of();
+            List<ScriptVariableField> fields = new ArrayList<>(children.size());
+            for (TableFieldSchema child : children) {
+                fields.add(new ScriptVariableField(child.getName(), scriptVariableTypeNode(child)));
+            }
+            if (fields.isEmpty()) {
+                throw QueryEngine.invalidQuery("A STRUCT variable must have at least one field.");
+            }
+            ScriptVariableType struct = new ScriptVariableType(null, null, List.copyOf(fields));
+            return "REPEATED".equalsIgnoreCase(field.getMode())
+                    ? new ScriptVariableType(null, struct, null) : struct;
+        }
+        ScriptVariableType scalar = scalarVariableType(field.getType());
+        return "REPEATED".equalsIgnoreCase(field.getMode())
+                ? new ScriptVariableType(null, scalar, null) : scalar;
+    }
+
+    private static ScriptVariableType scalarVariableType(String type) {
+        if (type == null) {
+            throw QueryEngine.invalidQuery("Script expression has no supported result type.");
+        }
+        String normalized = switch (type.toUpperCase(Locale.ROOT)) {
+            case "INTEGER" -> "INT64";
+            case "FLOAT" -> "FLOAT64";
+            case "BOOLEAN" -> "BOOL";
+            default -> type.toUpperCase(Locale.ROOT);
+        };
+        if (!ScriptVariableTypeParser.SCALAR_TYPES.contains(normalized)) {
+            throw QueryEngine.invalidQuery(
+                    "Variable type " + type + " is not supported by the floci BigQuery emulator.");
+        }
+        return new ScriptVariableType(normalized, null, null);
+    }
+
+    private static String inferredScriptVariableType(Object value) {
+        return scriptVariableTypeSql(inferredScriptVariableTypeNode(value));
+    }
+
+    private static ScriptVariableType inferredScriptVariableTypeNode(Object value) {
+        if (value instanceof List<?> values) {
+            ScriptVariableType elementType = null;
+            for (Object element : values) {
+                if (element == null) {
+                    continue;
+                }
+                ScriptVariableType currentType = inferredScriptVariableTypeNode(element);
+                if (currentType.isArray()) {
+                    throw QueryEngine.invalidQuery("BigQuery arrays cannot contain arrays.");
+                }
+                if (elementType != null && !elementType.equals(currentType)) {
+                    throw QueryEngine.invalidQuery("Array variable elements must have a common type.");
+                }
+                elementType = currentType;
+            }
+            if (elementType == null) {
+                throw QueryEngine.invalidQuery("Variable type cannot be inferred from an empty or NULL array.");
+            }
+            return new ScriptVariableType(null, elementType, null);
+        }
+        if (value instanceof Map<?, ?> map) {
+            List<ScriptVariableField> fields = new ArrayList<>(map.size());
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                if (!(entry.getKey() instanceof String name)) {
+                    throw QueryEngine.invalidQuery("STRUCT variable field names must be strings.");
+                }
+                fields.add(new ScriptVariableField(name, inferredScriptVariableTypeNode(entry.getValue())));
+            }
+            if (fields.isEmpty()) {
+                throw QueryEngine.invalidQuery("A STRUCT variable must have at least one field.");
+            }
+            return new ScriptVariableType(null, null, List.copyOf(fields));
+        }
+        return inferredScalarVariableType(value);
+    }
+
+    private static ScriptVariableType inferredScalarVariableType(Object value) {
+        if (value instanceof String) {
+            return new ScriptVariableType("STRING", null, null);
+        }
+        if (value instanceof LocalDate) {
+            return new ScriptVariableType("DATE", null, null);
+        }
+        if (value instanceof Instant) {
+            return new ScriptVariableType("TIMESTAMP", null, null);
+        }
+        if (value instanceof LocalDateTime) {
+            return new ScriptVariableType("DATETIME", null, null);
+        }
+        if (value instanceof LocalTime) {
+            return new ScriptVariableType("TIME", null, null);
+        }
+        if (value instanceof byte[]) {
+            return new ScriptVariableType("BYTES", null, null);
+        }
+        if (value instanceof Boolean) {
+            return new ScriptVariableType("BOOL", null, null);
+        }
+        if (value instanceof Double || value instanceof Float) {
+            return new ScriptVariableType("FLOAT64", null, null);
+        }
+        if (value instanceof BigDecimal) {
+            return new ScriptVariableType("NUMERIC", null, null);
+        }
+        if (value instanceof Number) {
+            return new ScriptVariableType("INT64", null, null);
+        }
+        throw QueryEngine.invalidQuery("Variable type cannot be inferred from a NULL expression.");
+    }
+
+    private Object parseScriptVariableValue(String expression, String type, String projectId, String jobProjectId,
+                                            QueryOptions options, ProceduralContext context,
+                                            JobLocation jobLocation) {
+        String value = expression.trim();
+        Matcher arithmetic = Pattern.compile("(?i)^([A-Za-z_][A-Za-z0-9_]*|[-+]?[0-9]+)\\s*([+*-])\\s*"
+                + "([A-Za-z_][A-Za-z0-9_]*|[-+]?[0-9]+)$").matcher(value);
+        Object evaluated;
+        if (arithmetic.matches()) {
+            Object left = scriptOperand(arithmetic.group(1), context);
+            Object right = scriptOperand(arithmetic.group(3), context);
+            // Arithmetic with NULL is NULL, so `DECLARE x INT64; SET x = x + 1` keeps x NULL.
+            if (left == null || right == null) {
+                evaluated = null;
+            } else if (!(left instanceof Number leftNumber) || !(right instanceof Number rightNumber)) {
+                throw QueryEngine.invalidQuery("Variable arithmetic requires numeric operands.");
+            } else if (leftNumber instanceof Double || rightNumber instanceof Double) {
+                // The operands type the arithmetic, not the declared type of the target: BigQuery evaluates
+                // `9007199254740993 - 9007199254740992` as INT64 and coerces the exact 1 to FLOAT64, so a
+                // FLOAT64 target does not widen the operands first.
+                evaluated = switch (arithmetic.group(2)) {
+                    case "+" -> leftNumber.doubleValue() + rightNumber.doubleValue();
+                    case "-" -> leftNumber.doubleValue() - rightNumber.doubleValue();
+                    default -> leftNumber.doubleValue() * rightNumber.doubleValue();
+                };
+            } else if (leftNumber instanceof BigDecimal || rightNumber instanceof BigDecimal) {
+                BigDecimal leftDecimal = scriptDecimal(leftNumber);
+                BigDecimal rightDecimal = scriptDecimal(rightNumber);
+                evaluated = switch (arithmetic.group(2)) {
+                    case "+" -> leftDecimal.add(rightDecimal);
+                    case "-" -> leftDecimal.subtract(rightDecimal);
+                    default -> leftDecimal.multiply(rightDecimal);
+                };
+            } else {
+                try {
+                    evaluated = switch (arithmetic.group(2)) {
+                        case "+" -> Math.addExact(leftNumber.longValue(), rightNumber.longValue());
+                        case "-" -> Math.subtractExact(leftNumber.longValue(), rightNumber.longValue());
+                        default -> Math.multiplyExact(leftNumber.longValue(), rightNumber.longValue());
+                    };
+                } catch (ArithmeticException overflow) {
+                    // BigQuery reports an out-of-range INT64 result as an invalid query.
+                    throw QueryEngine.invalidQuery("Integer Overflow");
+                }
+            }
+        } else if (isScriptIntegerLiteral(value)) {
+            // An integer literal is a scalar operand, never an engine expression: an out-of-range one is
+            // BigQuery's "Invalid integer literal" rather than a value some wider type could hold.
+            evaluated = scriptOperand(value, context);
+        } else {
+            try {
+                evaluated = scriptOperand(value, context);
+            } catch (GcpException e) {
+                evaluated = evaluateScriptSqlExpression(value, projectId, jobProjectId, options, context, jobLocation).value();
+            }
+        }
+        return coerceScriptVariableValue(evaluated, type);
+    }
+
+    private static Object coerceScriptVariableValue(Object value, String type) {
+        return coerceScriptVariableValue(value, new ScriptVariableTypeParser(type).parse());
+    }
+
+    private static Object coerceScriptVariableValue(Object value, ScriptVariableType type) {
+        if (value == null) {
+            return null;
+        }
+        if (type.isArray()) {
+            if (!(value instanceof List<?> values)) {
+                throw QueryEngine.invalidQuery("Value cannot be coerced to " + scriptVariableTypeSql(type) + ".");
+            }
+            List<Object> coerced = new ArrayList<>(values.size());
+            for (Object element : values) {
+                coerced.add(coerceScriptVariableValue(element, type.elementType()));
+            }
+            return coerced;
+        }
+        if (type.isStruct()) {
+            if (!(value instanceof Map<?, ?> values) || values.size() != type.fields().size()) {
+                throw QueryEngine.invalidQuery("Value cannot be coerced to " + scriptVariableTypeSql(type) + ".");
+            }
+            // BigQuery assigns a STRUCT by field position, whatever the source calls its fields, so
+            // `STRUCT(1 AS b, 2 AS a)` reaches `STRUCT<a INT64, b INT64>` as a=1, b=2.
+            List<Map.Entry<?, ?>> entries = new ArrayList<>(values.entrySet());
+            Map<String, Object> coerced = new LinkedHashMap<>();
+            for (int index = 0; index < type.fields().size(); index++) {
+                ScriptVariableField field = type.fields().get(index);
+                Map.Entry<?, ?> entry = entries.get(index);
+                if (!(entry.getKey() instanceof String sourceName)) {
+                    throw QueryEngine.invalidQuery("STRUCT variable fields must have string names.");
+                }
+                String targetName = field.name() != null ? field.name() : sourceName;
+                coerced.put(targetName, coerceScriptVariableValue(entry.getValue(), field.type()));
+            }
+            return coerced;
+        }
+        return switch (type.scalarType()) {
+            case "INT64" -> scriptInt64Assignment(value);
+            case "FLOAT64" -> {
+                if (value instanceof Number number) {
+                    yield number.doubleValue();
+                }
+                throw QueryEngine.invalidQuery("Value cannot be coerced to FLOAT64.");
+            }
+            case "NUMERIC" -> coerceScriptNumeric(value);
+            case "BOOL" -> {
+                if (value instanceof Boolean) {
+                    yield value;
+                }
+                throw QueryEngine.invalidQuery("Value cannot be coerced to BOOL.");
+            }
+            case "STRING" -> {
+                if (value instanceof String) {
+                    yield value;
+                }
+                throw QueryEngine.invalidQuery("Value cannot be coerced to STRING.");
+            }
+            case "DATE" -> coerceScriptDate(value);
+            case "TIMESTAMP" -> coerceScriptTimestamp(value);
+            case "BYTES" -> coerceScriptBytes(value);
+            case "DATETIME" -> coerceScriptDateTime(value);
+            case "TIME" -> coerceScriptTime(value);
+            case "JSON" -> coerceScriptJson(value);
+            default -> throw QueryEngine.invalidQuery(
+                    "Variable type " + type.scalarType() + " is not supported.");
+        };
+    }
+
+    /**
+     * BigQuery assigns to an INT64 variable only a value that already is an exact INT64. A FLOAT64, a
+     * NUMERIC, or an out-of-range value is rejected instead of truncated or wrapped: live BigQuery
+     * answers "Cannot coerce expression 1.9 to type INT64" where the emulator names the target type.
+     */
+    private static long scriptInt64Assignment(Object value) {
+        if (value instanceof Long || value instanceof Integer || value instanceof Short || value instanceof Byte) {
+            return ((Number) value).longValue();
+        }
+        throw QueryEngine.invalidQuery("Value cannot be coerced to INT64.");
+    }
+
+    /** A NUMERIC value: BigQuery keeps 38 digits with 9 after the point, and rejects a value that needs more. */
+    private static BigDecimal coerceScriptNumeric(Object value) {
+        BigDecimal decimal;
+        try {
+            if (value instanceof BigDecimal exact) {
+                decimal = exact;
+            } else if (value instanceof Double || value instanceof Float) {
+                decimal = BigDecimal.valueOf(((Number) value).doubleValue());
+            } else if (value instanceof Number number) {
+                decimal = new BigDecimal(number.toString());
+            } else if (value instanceof String text) {
+                decimal = new BigDecimal(text.trim());
+            } else {
+                throw QueryEngine.invalidQuery("Value cannot be coerced to NUMERIC.");
+            }
+        } catch (NumberFormatException e) {
+            throw QueryEngine.invalidQuery("Invalid NUMERIC value: " + value);
+        }
+        if (decimal.scale() > 9 && decimal.stripTrailingZeros().scale() > 9) {
+            throw QueryEngine.invalidQuery("Invalid NUMERIC value: " + decimal.toPlainString());
+        }
+        if (decimal.precision() - decimal.scale() > 29) {
+            throw QueryEngine.invalidQuery("Invalid NUMERIC value: " + decimal.toPlainString());
+        }
+        return decimal.setScale(Math.min(9, decimal.scale()));
+    }
+
+    /** An exact decimal for {@code value}: an integral operand keeps every digit it carries. */
+    private static BigDecimal scriptDecimal(Number value) {
+        if (value instanceof BigDecimal decimal) {
+            return decimal;
+        }
+        if (value instanceof Double || value instanceof Float) {
+            return BigDecimal.valueOf(value.doubleValue());
+        }
+        if (value instanceof BigInteger integer) {
+            return new BigDecimal(integer);
+        }
+        return BigDecimal.valueOf(value.longValue());
+    }
+
+    private static ScriptVariableField scriptStructField(ScriptVariableType type, String name) {
+        if (!type.isStruct()) {
+            return null;
+        }
+        return type.fields().stream().filter(field -> field.name() != null
+                && field.name().equalsIgnoreCase(name)).findFirst().orElse(null);
+    }
+
+    private static Map.Entry<?, ?> structFieldEntry(Map<?, ?> values, String name) {
+        for (Map.Entry<?, ?> entry : values.entrySet()) {
+            if (entry.getKey() instanceof String key && key.equalsIgnoreCase(name)) {
+                return entry;
+            }
+        }
+        return null;
+    }
+
+    private static Map.Entry<?, ?> structFieldEntry(List<Map.Entry<?, ?>> entries, String name, int index) {
+        if (name != null) {
+            for (Map.Entry<?, ?> entry : entries) {
+                if (entry.getKey() instanceof String key && key.equalsIgnoreCase(name)) {
+                    return entry;
+                }
+            }
+        }
+        return index < entries.size() ? entries.get(index) : null;
+    }
+
+    private static LocalDate coerceScriptDate(Object value) {
+        if (value instanceof LocalDate date) {
+            return date;
+        }
+        if (value instanceof String string) {
+            try {
+                return LocalDate.parse(string);
+            } catch (DateTimeParseException e) {
+                throw QueryEngine.invalidQuery("Value cannot be coerced to DATE.");
+            }
+        }
+        throw QueryEngine.invalidQuery("Value cannot be coerced to DATE.");
+    }
+
+    private static Instant coerceScriptTimestamp(Object value) {
+        if (value instanceof Instant instant) {
+            return instant.truncatedTo(ChronoUnit.MICROS);
+        }
+        if (value instanceof OffsetDateTime dateTime) {
+            return dateTime.toInstant().truncatedTo(ChronoUnit.MICROS);
+        }
+        if (value instanceof LocalDateTime dateTime) {
+            return dateTime.toInstant(ZoneOffset.UTC).truncatedTo(ChronoUnit.MICROS);
+        }
+        if (value instanceof String string) {
+            String normalized = string.trim().replaceFirst("(?i)\\s+UTC$", "Z").replace(' ', 'T');
+            normalized = normalized.replaceFirst("([+-][0-9]{2})$", "$1:00");
+            // Try the standard timestamp forms in order, falling back to UTC for an unzoned value.
+            try {
+                return Instant.parse(normalized).truncatedTo(ChronoUnit.MICROS);
+            } catch (DateTimeParseException ignored) {
+                try {
+                    return OffsetDateTime.parse(normalized).toInstant().truncatedTo(ChronoUnit.MICROS);
+                } catch (DateTimeParseException ignoredOffset) {
+                    try {
+                        return LocalDateTime.parse(normalized).toInstant(ZoneOffset.UTC)
+                                .truncatedTo(ChronoUnit.MICROS);
+                    } catch (DateTimeParseException e) {
+                        throw QueryEngine.invalidQuery("Value cannot be coerced to TIMESTAMP.");
+                    }
+                }
+            }
+        }
+        throw QueryEngine.invalidQuery("Value cannot be coerced to TIMESTAMP.");
+    }
+
+    /** A TIMESTAMP result as a script holds it: decimal epoch seconds, or the engine's text form. */
+    private static Instant resultTimestamp(Object value) {
+        if (value instanceof Instant instant) {
+            return instant.truncatedTo(ChronoUnit.MICROS);
+        }
+        String text = value.toString().trim();
+        return text.matches("[-+]?[0-9]+(\\.[0-9]+)?") ? epochSeconds(text) : coerceScriptTimestamp(text);
+    }
+
+    /** A TIMESTAMP in BigQuery's decimal epoch seconds, e.g. {@code 1735689600.123456}. */
+    private static Instant epochSeconds(String text) {
+        long micros;
+        try {
+            micros = new BigDecimal(text.trim()).movePointRight(6)
+                    .setScale(0, RoundingMode.HALF_UP).longValueExact();
+        } catch (NumberFormatException | ArithmeticException e) {
+            throw QueryEngine.invalidQuery("A TIMESTAMP result must be epoch seconds.");
+        }
+        return Instant.ofEpochSecond(Math.floorDiv(micros, 1_000_000L), Math.floorMod(micros, 1_000_000L) * 1000L)
+                .truncatedTo(ChronoUnit.MICROS);
+    }
+
+    private static LocalDateTime coerceScriptDateTime(Object value) {
+        if (value instanceof LocalDateTime dateTime) {
+            return dateTime;
+        }
+        if (value instanceof String string) {
+            try {
+                return LocalDateTime.parse(string.replace(' ', 'T'));
+            } catch (DateTimeParseException e) {
+                throw QueryEngine.invalidQuery("Value cannot be coerced to DATETIME.");
+            }
+        }
+        throw QueryEngine.invalidQuery("Value cannot be coerced to DATETIME.");
+    }
+
+    private static LocalTime coerceScriptTime(Object value) {
+        if (value instanceof LocalTime time) {
+            return time;
+        }
+        if (value instanceof String string) {
+            try {
+                return LocalTime.parse(string);
+            } catch (DateTimeParseException e) {
+                throw QueryEngine.invalidQuery("Value cannot be coerced to TIME.");
+            }
+        }
+        throw QueryEngine.invalidQuery("Value cannot be coerced to TIME.");
+    }
+
+    private static String coerceScriptBytes(Object value) {
+        if (value instanceof byte[] bytes) {
+            return Base64.getEncoder().encodeToString(bytes);
+        }
+        if (value instanceof String encoded) {
+            try {
+                return Base64.getEncoder().encodeToString(Base64.getDecoder().decode(encoded));
+            } catch (IllegalArgumentException e) {
+                throw QueryEngine.invalidQuery("Value cannot be coerced to BYTES.");
+            }
+        }
+        throw QueryEngine.invalidQuery("Value cannot be coerced to BYTES.");
+    }
+
+    private static String coerceScriptJson(Object value) {
+        try {
+            if (value instanceof String json) {
+                return JSON.writeValueAsString(JSON.readValue(json, Object.class));
+            }
+            return JSON.writeValueAsString(value);
+        } catch (IOException e) {
+            throw QueryEngine.invalidQuery("Value cannot be coerced to JSON.");
+        }
+    }
+
+    private static Object scriptOperand(String expression, ProceduralContext context) {
+        String value = expression.trim();
+        if (value.matches("(?i)TRUE|FALSE")) {
+            return Boolean.valueOf(value);
+        }
+        if (value.equalsIgnoreCase("NULL")) {
+            return null;
+        }
+        Matcher dateLiteral = Pattern.compile("(?is)^DATE\\s+'((?:''|[^'])*)'\\s*$").matcher(value);
+        if (dateLiteral.matches()) {
+            return coerceScriptDate(dateLiteral.group(1).replace("''", "'"));
+        }
+        Matcher timestampLiteral = Pattern.compile("(?is)^TIMESTAMP\\s+'((?:''|[^'])*)'\\s*$").matcher(value);
+        if (timestampLiteral.matches()) {
+            return coerceScriptTimestamp(timestampLiteral.group(1).replace("''", "'"));
+        }
+        Matcher dateTimeLiteral = Pattern.compile("(?is)^DATETIME\\s+'((?:''|[^'])*)'\\s*$").matcher(value);
+        if (dateTimeLiteral.matches()) {
+            return coerceScriptDateTime(dateTimeLiteral.group(1).replace("''", "'"));
+        }
+        Matcher timeLiteral = Pattern.compile("(?is)^TIME\\s+'((?:''|[^'])*)'\\s*$").matcher(value);
+        if (timeLiteral.matches()) {
+            return coerceScriptTime(timeLiteral.group(1).replace("''", "'"));
+        }
+        List<SqlDialectTranslator.Token> tokens = new SqlDialectTranslator.Lexer(value).tokenize().stream()
+                .filter(token -> token.kind != SqlDialectTranslator.Kind.SPACE).toList();
+        if (tokens.size() == 1 && tokens.getFirst().kind == SqlDialectTranslator.Kind.STRING) {
+            return tokens.getFirst().value;
+        }
+        if (tokens.size() == 1 && tokens.getFirst().kind == SqlDialectTranslator.Kind.BYTES) {
+            return scriptBytesLiteral(tokens.getFirst().value);
+        }
+        Matcher typedArray = SCRIPT_TYPED_ARRAY_LITERAL.matcher(value);
+        if (typedArray.matches()) {
+            return scriptArrayLiteral(typedArray.group(2), context);
+        }
+        if (value.startsWith("[") && value.endsWith("]")) {
+            return scriptArrayLiteral(value.substring(1, value.length() - 1), context);
+        }
+        if (value.matches("[-+]?[0-9]+")) {
+            return scriptIntegerLiteral(value);
+        }
+        if (value.matches("[-+]?[0-9]+\\.[0-9]+")) {
+            return Double.valueOf(value);
+        }
+        Object variable = context.variables().get(value.toLowerCase(Locale.ROOT));
+        if (variable == null && !context.variables().containsKey(value.toLowerCase(Locale.ROOT))) {
+            throw QueryEngine.invalidQuery("Variable " + value + " has not been declared.");
+        }
+        return variable;
+    }
+
+    /** An integer literal operand, which BigQuery rejects as a whole when it is out of INT64 range. */
+    private static boolean isScriptIntegerLiteral(String expression) {
+        return expression.trim().matches("[-+]?[0-9]+");
+    }
+
+    private static long scriptIntegerLiteral(String value) {
+        try {
+            return Long.parseLong(value);
+        } catch (NumberFormatException e) {
+            throw QueryEngine.invalidQuery("Invalid integer literal: " + value);
+        }
+    }
+
+    private static byte[] scriptBytesLiteral(String bytes) {
+        byte[] value = new byte[bytes.length()];
+        for (int index = 0; index < bytes.length(); index++) {
+            value[index] = (byte) bytes.charAt(index);
+        }
+        return value;
+    }
+
+    /** The declared type of a typed array literal, or null when the expression is anything else. */
+    private static String scriptLiteralType(String expression) {
+        Matcher literal = SCRIPT_TYPED_ARRAY_LITERAL.matcher(expression.trim());
+        return literal.matches() ? "ARRAY<" + normalizeScriptVariableType(literal.group(1)) + ">" : null;
+    }
+
+    /** The declared type of the variable an expression names, or null when it names none. */
+    private static String scriptVariableReferenceType(String expression, ProceduralContext context) {
+        String name = simpleScriptVariableName(expression.trim());
+        return name == null ? null : context.variableTypes().get(name.toLowerCase(Locale.ROOT));
+    }
+
+    private static List<Object> scriptArrayLiteral(String expression, ProceduralContext context) {
+        List<String> elements = splitScriptArrayElements(expression);
+        if (elements.size() == 1 && elements.getFirst().isEmpty()) {
+            return List.of();
+        }
+        List<Object> values = new ArrayList<>(elements.size());
+        for (String element : elements) {
+            values.add(scriptOperand(element, context));
+        }
+        return values;
+    }
+
+    private static List<String> splitScriptArrayElements(String expression) {
+        List<SqlDialectTranslator.Token> tokens = new SqlDialectTranslator.Lexer(expression).tokenize();
+        List<String> elements = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        int depth = 0;
+        for (SqlDialectTranslator.Token token : tokens) {
+            if (token.isPunct("(") || token.isPunct("[") || token.isPunct("{")) {
+                depth++;
+            } else if (token.isPunct(")") || token.isPunct("]") || token.isPunct("}")) {
+                depth--;
+            }
+            if (token.isPunct(",") && depth == 0) {
+                elements.add(current.toString().trim());
+                current.setLength(0);
+            } else {
+                current.append(token.text);
+            }
+        }
+        elements.add(current.toString().trim());
+        return elements;
+    }
+
+    private String expandScriptVariables(String sql, String projectId, String jobProjectId, QueryOptions options,
+                                         ProceduralContext context, JobLocation jobLocation) {
+        ScriptColumns columns;
+        Set<Integer> columnPositions = Set.of();
+        try {
+            SqlDialectTranslator.Translation translation = SqlDialectTranslator.translateStatement(sql, projectId,
+                    jobProjectId, options.defaultDatasetId(),
+                    new SqlDialectTranslator.QueryParameters(options.queryParameters(), options.parameterMode()),
+                    context.temporaryTables());
+            columns = temporaryColumnNames(sql, context, SCRIPT_TABLE_KEYWORDS);
+            addTableColumnNames(sql, translation.tables(), projectId, jobLocation, context, columns);
+        } catch (GcpException e) {
+            // Variable substitution runs before statement-specific handling. A DML statement writes and
+            // reads tables, and a DDL statement declares or targets columns, that a query translation
+            // cannot describe; their own handling reports errors.
+            columns = new ScriptColumns();
+            columnPositions = statementColumnPositions(sql, projectId, jobProjectId, options, context, jobLocation,
+                    columns);
+        }
+        return expandScriptVariables(sql, context, columns, columnPositions);
+    }
+
+    /**
+     * Expands an expression a procedure evaluates on its own, keeping the names BigQuery resolves first:
+     * the columns of the tables the expression reads and the columns a CTE it defines exposes.
+     */
+    private String expandScriptExpressionVariables(String expression, String projectId, String jobProjectId,
+                                                   QueryOptions options, ProceduralContext context,
+                                                   JobLocation jobLocation) {
+        return expandScriptVariables(expression, context, scriptExpressionColumnNames(expression, projectId,
+                jobProjectId, options, context, jobLocation));
+    }
+
+    /**
+     * The columns an expression a procedure evaluates on its own reads. BigQuery resolves them, and the
+     * columns a CTE it defines exposes, before a script variable of the same name, so an expression that
+     * reads a table collects its columns the way a statement does, at the depth that reads the table.
+     */
+    private ScriptColumns scriptExpressionColumnNames(String expression, String projectId, String jobProjectId,
+                                                      QueryOptions options, ProceduralContext context,
+                                                      JobLocation jobLocation) {
+        String select = "SELECT " + expression;
+        ScriptColumns columns = temporaryColumnNames(select, context, SCRIPT_TABLE_KEYWORDS);
+        try {
+            SqlDialectTranslator.Translation translation = SqlDialectTranslator.translateStatement(select,
+                    projectId, jobProjectId, options.defaultDatasetId(),
+                    new SqlDialectTranslator.QueryParameters(options.queryParameters(), options.parameterMode()),
+                    context.temporaryTables());
+            addTableColumnNames(select, translation.tables(), projectId, jobLocation, context, columns);
+        } catch (GcpException e) {
+            // An expression the translator cannot describe reads nothing more this path can name; the
+            // engine that evaluates it reports any error.
+            return columns;
+        }
+        return columns;
+    }
+
+    /**
+     * Adds the lower-cased column names of {@code refs}: a temporary table has no entry in the store,
+     * so its schema comes from the script context. Each name keeps the depth of the table position that
+     * reads it, so a table a subquery reads hides a variable of the same name inside that query only.
+     */
+    private void addTableColumnNames(String sql, Collection<SqlDialectTranslator.TableRef> refs, String projectId,
+                                     JobLocation jobLocation, ProceduralContext context, ScriptColumns columns) {
+        List<SqlDialectTranslator.Token> tokens = new SqlDialectTranslator.Lexer(sql).tokenize();
+        Map<String, Set<Integer>> tableScopes = tableScopes(tokens, queryStructure(tokens), SCRIPT_TABLE_KEYWORDS);
+        for (SqlDialectTranslator.TableRef ref : refs) {
+            Set<String> columnNames = tableColumnNames(ref, projectId, jobLocation, context);
+            for (int scope : tableScopesOf(tableScopes, ref)) {
+                columns.add(columnNames, scope);
+            }
+        }
+    }
+
+    private Set<String> tableColumnNames(SqlDialectTranslator.TableRef ref, String projectId,
+                                         JobLocation jobLocation, ProceduralContext context) {
+        if (context.temporaryTables().contains(ref.tableId())) {
+            return fieldNames(context.temporaryTableColumns(ref.tableId()));
+        }
+        Table table;
+        try {
+            table = tables(projectId, jobLocation).table(ref.datasetId(), ref.tableId());
+        } catch (GcpException e) {
+            if (e.getHttpStatus() == 404) {
+                return Set.of();
+            }
+            throw e;
+        }
+        return table.getSchema() != null ? fieldNames(table.getSchema().getFields()) : Set.of();
+    }
+
+    private static Set<String> fieldNames(List<TableFieldSchema> fields) {
+        Set<String> names = new LinkedHashSet<>();
+        if (fields != null) {
+            for (TableFieldSchema field : fields) {
+                if (field.getName() != null) {
+                    names.add(field.getName().toLowerCase(Locale.ROOT));
+                }
+            }
+        }
+        return names;
+    }
+
+    /**
+     * The token positions where a statement that is not a query resolves a name to a column:
+     * the columns a {@code CREATE TABLE} declares, and the {@code INSERT} column list of a statement
+     * whose values or query is a scope of its own, where a variable still substitutes as in BigQuery.
+     * The other DML statements read their target's columns wherever they name one, so those names join
+     * {@code columns} instead. Returns the positions of a declaration's column list.
+     */
+    private Set<Integer> statementColumnPositions(String sql, String projectId, String jobProjectId,
+                                                  QueryOptions options, ProceduralContext context,
+                                                  JobLocation jobLocation, ScriptColumns columns) {
+        Set<Integer> positions = new LinkedHashSet<>();
+        List<SqlDialectTranslator.Token> tokens = new SqlDialectTranslator.Lexer(sql).tokenize();
+
+        // A declared schema is a list of column names, whether the table lives in the session or not.
+        SqlDialectTranslator.TemporaryTableDefinition declaration = SqlDialectTranslator.temporaryTableDefinition(sql);
+        if (declaration != null) {
+            positions.addAll(columnListPositions(tokens, declaration.name(), fieldNames(declaration.fields())));
+            return positions;
+        }
+
+        SqlDialectTranslator.Statement statement;
+        try {
+            statement = SqlDialectTranslator.parseStatement(sql, projectId, jobProjectId,
+                    options.defaultDatasetId(), context.temporaryTables());
+        } catch (GcpException e) {
+            return positions;
+        }
+        if (statement.target() == null && !statement.isDml()) {
+            return positions;
+        }
+        Set<String> declared = fieldNames(statement.columns());
+        if (!declared.isEmpty() && statement.target() != null) {
+            positions.addAll(columnListPositions(tokens, statement.target().tableId(), declared));
+        }
+        if (!statement.isDml()) {
+            return positions;
+        }
+        // A DML statement against a temporary table has no resolved target: the table is request-local,
+        // so its name comes from the statement itself.
+        String targetTable = statement.target() != null ? statement.target().tableId()
+                : SqlDialectTranslator.temporaryDmlTarget(sql, context.temporaryTables());
+        if (targetTable == null) {
+            return positions;
+        }
+        Set<String> target = Set.of();
+        if (context.temporaryTables().contains(targetTable)) {
+            target = fieldNames(context.temporaryTableColumns(targetTable));
+        } else if (statement.target() != null) {
+            target = tableColumnNames(statement.target(), projectId, jobLocation, context);
+        }
+        if (statement.kind() == SqlDialectTranslator.StatementKind.INSERT) {
+            positions.addAll(columnListPositions(tokens, targetTable, target));
+            // Only the column list names the target's columns; the values or query an INSERT supplies
+            // is a scope of its own, where a variable of the same name still substitutes.
+            columns.add(temporaryColumnNames(sql, context, SCRIPT_SOURCE_KEYWORDS));
+            addDmlTableColumnNames(sql, projectId, jobProjectId, options, jobLocation, context,
+                    targetTable, columns);
+            if (readsTable(tokens, targetTable)) {
+                // A self-referencing INSERT reads the columns of its own target.
+                columns.add(target, 0);
+            }
+            return positions;
+        }
+        // UPDATE, DELETE and MERGE read their target's columns wherever they name one.
+        columns.add(target, 0);
+        if (statement.kind() == SqlDialectTranslator.StatementKind.MERGE) {
+            columns.add(temporaryColumnNames(sql, context, SCRIPT_SOURCE_KEYWORDS));
+            addDmlTableColumnNames(sql, projectId, jobProjectId, options, jobLocation, context, null, columns);
+        }
+        return positions;
+    }
+
+    /**
+     * Adds the columns of the tables a DML statement reads, leaving out the target {@code skip}. The
+     * translation that names them rejects a shape it cannot translate; the statement's own handling
+     * then reports that error.
+     */
+    private void addDmlTableColumnNames(String sql, String projectId, String jobProjectId, QueryOptions options,
+                                        JobLocation jobLocation, ProceduralContext context,
+                                        String skip, ScriptColumns columns) {
+        SqlDialectTranslator.Translation translation;
+        try {
+            translation = SqlDialectTranslator.translateDml(sql, projectId, jobProjectId, options.defaultDatasetId(),
+                    new SqlDialectTranslator.QueryParameters(options.queryParameters(), options.parameterMode()),
+                    ref -> null);
+        } catch (GcpException e) {
+            return;
+        }
+        List<SqlDialectTranslator.Token> tokens = new SqlDialectTranslator.Lexer(sql).tokenize();
+        Map<String, Set<Integer>> tableScopes = tableScopes(tokens, queryStructure(tokens), SCRIPT_TABLE_KEYWORDS);
+        for (SqlDialectTranslator.TableRef ref : translation.tables()) {
+            if (skip == null || !skip.equalsIgnoreCase(ref.tableId())) {
+                Set<String> columnNames = tableColumnNames(ref, projectId, jobLocation, context);
+                for (int scope : tableScopesOf(tableScopes, ref)) {
+                    columns.add(columnNames, scope);
+                }
+            }
+        }
+    }
+
+    /**
+     * True when {@code tableName} stands in a table position the statement reads: a self-referencing
+     * {@code INSERT} reads the columns of the table it writes.
+     */
+    private static boolean readsTable(List<SqlDialectTranslator.Token> tokens, String tableName) {
+        for (int index = 0; index < tokens.size(); index++) {
+            SqlDialectTranslator.Token token = tokens.get(index);
+            if (token.kind != SqlDialectTranslator.Kind.IDENT && token.kind != SqlDialectTranslator.Kind.QIDENT
+                    || !tableName.equalsIgnoreCase(token.identifierText())) {
+                continue;
+            }
+            if (tablePosition(tokens, index, Set.of("FROM", "JOIN", "USING"))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Positions of the column names in the parenthesized list that follows {@code tableName}: the
+     * columns a {@code CREATE TABLE} declares, or the column list of an {@code INSERT}. BigQuery reads
+     * those names as columns, so a variable of the same name cannot replace them.
+     */
+    private static Set<Integer> columnListPositions(List<SqlDialectTranslator.Token> tokens, String tableName,
+                                                    Set<String> columnNames) {
+        Set<Integer> positions = new LinkedHashSet<>();
+        if (tableName == null || columnNames.isEmpty()) {
+            return positions;
+        }
+        int open = -1;
+        for (int index = 0; index < tokens.size() && open < 0; index++) {
+            SqlDialectTranslator.Token token = tokens.get(index);
+            if (token.kind != SqlDialectTranslator.Kind.IDENT && token.kind != SqlDialectTranslator.Kind.QIDENT
+                    || !tableName.equalsIgnoreCase(token.identifierText())) {
+                continue;
+            }
+            int next = nextSignificantToken(tokens, index + 1);
+            if (next >= 0 && tokens.get(next).isPunct("(")) {
+                open = next;
+            }
+        }
+        if (open < 0) {
+            return positions;
+        }
+        int depth = 0;
+        for (int index = open; index < tokens.size(); index++) {
+            SqlDialectTranslator.Token token = tokens.get(index);
+            if (token.isPunct("(")) {
+                depth++;
+                continue;
+            }
+            if (token.isPunct(")")) {
+                depth--;
+                if (depth == 0) {
+                    break;
+                }
+                continue;
+            }
+            if (depth == 1 && (token.kind == SqlDialectTranslator.Kind.IDENT
+                    || token.kind == SqlDialectTranslator.Kind.QIDENT)
+                    && columnNames.contains(token.identifierText().toLowerCase(Locale.ROOT))) {
+                positions.add(index);
+            }
+        }
+        return positions;
+    }
+
+    /**
+     * Columns of the request-local tables a statement names. A temporary table has no entry in the
+     * store, so its schema comes from the script context; without these names a variable of the same
+     * name would replace a column reference or a DML column list.
+     */
+    private static ScriptColumns temporaryColumnNames(String sql, ProceduralContext context,
+                                                      Set<String> keywords) {
+        ScriptColumns columns = new ScriptColumns();
+        if (context.temporaryTables().isEmpty()) {
+            return columns;
+        }
+        List<SqlDialectTranslator.Token> tokens = new SqlDialectTranslator.Lexer(sql).tokenize();
+        QueryStructure structure = queryStructure(tokens);
+        for (int index = 0; index < tokens.size(); index++) {
+            SqlDialectTranslator.Token token = tokens.get(index);
+            if (token.kind != SqlDialectTranslator.Kind.IDENT && token.kind != SqlDialectTranslator.Kind.QIDENT) {
+                continue;
+            }
+            String name = token.identifierText();
+            if (!context.temporaryTables().contains(name) || !tablePosition(tokens, index, keywords)) {
+                continue;
+            }
+            columns.add(fieldNames(context.temporaryTableColumns(name)), structure.scopes()[index]);
+        }
+        return columns;
+    }
+
+    /**
+     * The queries a statement is made of. A parenthesis that opens a query is a scope of its own, while one
+     * that groups an expression stays in the query around it, and each branch of a set operation is a query
+     * of its own, so the columns one branch reads leave the names another branch writes alone. The root
+     * scope encloses every query, so a name it declares is a name no query resolves.
+     */
+    private static QueryStructure queryStructure(List<SqlDialectTranslator.Token> tokens) {
+        int[] depths = new int[tokens.size()];
+        int[] scopes = new int[tokens.size()];
+        List<Integer> parents = new ArrayList<>();
+        parents.add(-1);
+        parents.add(0);
+        List<Integer> setOperations = new ArrayList<>();
+        setOperations.add(0);
+        setOperations.add(1);
+        Deque<QueryFrame> frames = new ArrayDeque<>();
+        int depth = 0;
+        int scope = 1;
+        for (int index = 0; index < tokens.size(); index++) {
+            SqlDialectTranslator.Token token = tokens.get(index);
+            if (token.isPunct("(")) {
+                boolean query = startsQuery(tokens, index);
+                frames.push(new QueryFrame(scope, query));
+                if (query) {
+                    depth++;
+                    parents.add(scope);
+                    scope = parents.size() - 1;
+                    // A query of its own starts a set operation of its own.
+                    setOperations.add(scope);
+                }
+            } else if (token.isPunct(")") && !frames.isEmpty()) {
+                QueryFrame frame = frames.pop();
+                if (frame.query()) {
+                    depth--;
+                    scope = frame.enclosingScope();
+                }
+            } else if (token.kind == SqlDialectTranslator.Kind.IDENT && startsSetOperation(tokens, index)) {
+                // A branch of a set operation sits beside the query it continues, not inside it.
+                parents.add(parents.get(scope));
+                setOperations.add(setOperations.get(scope));
+                scope = parents.size() - 1;
+            }
+            depths[index] = depth;
+            scopes[index] = scope;
+        }
+        return new QueryStructure(depths, scopes, parents, setOperations);
+    }
+
+    /** A parenthesis that opens a query, and the query it opened if it opened one. */
+    private record QueryFrame(int enclosingScope, boolean query) {}
+
+    /**
+     * Whether the keyword at {@code index} starts a branch of a set operation. {@code EXCEPT} does too,
+     * except in the select-star form {@code SELECT * EXCEPT (...)}, which stays inside its query.
+     */
+    private static boolean startsSetOperation(List<SqlDialectTranslator.Token> tokens, int index) {
+        SqlDialectTranslator.Token token = tokens.get(index);
+        if (token.isKeyword("UNION") || token.isKeyword("INTERSECT")) {
+            return true;
+        }
+        if (!token.isKeyword("EXCEPT")) {
+            return false;
+        }
+        int previous = previousSignificantToken(tokens, index - 1);
+        return previous < 0 || !tokens.get(previous).isPunct("*");
+    }
+
+    /**
+     * The queries that read the tables a statement names, by bare and by qualified lower-case name. A table
+     * has no entry when the statement names it in no position the scan recognizes, such as an
+     * {@code INFORMATION_SCHEMA} pseudo-table.
+     */
+    private static Map<String, Set<Integer>> tableScopes(List<SqlDialectTranslator.Token> tokens,
+                                                         QueryStructure structure, Set<String> keywords) {
+        Map<String, Set<Integer>> tableScopes = new LinkedHashMap<>();
+        for (int index = 0; index < tokens.size(); index++) {
+            SqlDialectTranslator.Token token = tokens.get(index);
+            if (token.kind != SqlDialectTranslator.Kind.IDENT && token.kind != SqlDialectTranslator.Kind.QIDENT
+                    || !tablePosition(tokens, index, keywords)) {
+                continue;
+            }
+            int scope = structure.scopes()[index];
+            tableScopes.computeIfAbsent(token.identifierText().toLowerCase(Locale.ROOT), key -> new LinkedHashSet<>())
+                    .add(scope);
+            List<String> chain = tableNameChain(tokens, index);
+            if (chain.size() > 1) {
+                tableScopes.computeIfAbsent(String.join(".", chain), key -> new LinkedHashSet<>()).add(scope);
+            }
+        }
+        return tableScopes;
+    }
+
+    /** The dotted name ending at {@code index}, lower-cased and in source order. */
+    private static List<String> tableNameChain(List<SqlDialectTranslator.Token> tokens, int index) {
+        List<String> chain = new ArrayList<>();
+        chain.add(tokens.get(index).identifierText().toLowerCase(Locale.ROOT));
+        int previous = previousSignificantToken(tokens, index - 1);
+        while (previous >= 0 && tokens.get(previous).isPunct(".")) {
+            int qualifier = previousSignificantToken(tokens, previous - 1);
+            if (qualifier < 0) {
+                break;
+            }
+            chain.addFirst(tokens.get(qualifier).identifierText().toLowerCase(Locale.ROOT));
+            previous = previousSignificantToken(tokens, qualifier - 1);
+        }
+        return chain;
+    }
+
+    /**
+     * The queries that read {@code ref}: its qualified name wins, its bare name is the fallback, and a table
+     * the scan cannot place keeps its columns out of a variable's way in every query, as the root scope
+     * encloses all of them.
+     */
+    private static Set<Integer> tableScopesOf(Map<String, Set<Integer>> tableScopes,
+                                              SqlDialectTranslator.TableRef ref) {
+        Set<Integer> qualified = tableScopes.get(ref.datasetId().toLowerCase(Locale.ROOT) + "."
+                + ref.tableId().toLowerCase(Locale.ROOT));
+        if (qualified != null) {
+            return qualified;
+        }
+        Set<Integer> bare = tableScopes.get(ref.tableId().toLowerCase(Locale.ROOT));
+        return bare != null ? bare : Set.of(0);
+    }
+
+    private static String expandScriptVariables(String sql, ProceduralContext context, ScriptColumns columns) {
+        return expandScriptVariables(sql, context, columns, Set.of());
+    }
+
+    /**
+     * True when the dotted name ending at {@code index} stands in one of the {@code keywords} table
+     * positions, so that {@code _SESSION.t} and {@code dataset.table} both count.
+     */
+    private static boolean tablePosition(List<SqlDialectTranslator.Token> tokens, int index,
+                                         Set<String> keywords) {
+        int previous = previousSignificantToken(tokens, index - 1);
+        while (previous >= 0 && tokens.get(previous).isPunct(".")) {
+            int qualifier = previousSignificantToken(tokens, previous - 1);
+            if (qualifier < 0) {
+                return false;
+            }
+            previous = previousSignificantToken(tokens, qualifier - 1);
+        }
+        return previous >= 0 && keywords.contains(tokens.get(previous).upper());
+    }
+
+    /**
+     * Replaces every script variable a statement may name with its typed literal. {@code columnPositions}
+     * are the token indexes a statement resolves as column names even when a variable has that name.
+     */
+    private static String expandScriptVariables(String sql, ProceduralContext context, ScriptColumns columns,
+                                                Set<Integer> columnPositions) {
+        List<SqlDialectTranslator.Token> tokens = new SqlDialectTranslator.Lexer(sql).tokenize();
+        ScriptNameResolution resolution = scriptNameResolution(tokens, columns);
+        StringBuilder expanded = new StringBuilder();
+        for (int index = 0; index < tokens.size(); index++) {
+            SqlDialectTranslator.Token token = tokens.get(index);
+            String name = token.text.toLowerCase(Locale.ROOT);
+            int previous = previousSignificantToken(tokens, index - 1);
+            int next = nextSignificantToken(tokens, index + 1);
+            boolean declarationPosition = previous >= 0
+                    && SCRIPT_DECLARATION_KEYWORDS.contains(tokens.get(previous).upper());
+            boolean functionName = next >= 0 && tokens.get(next).isPunct("(");
+            boolean qualifiedField = previous >= 0 && tokens.get(previous).isPunct(".");
+            boolean columnName = columnPositions.contains(index) || resolution.hides(name, index);
+            if (token.kind != SqlDialectTranslator.Kind.IDENT || !context.variables().containsKey(name)
+                    || declarationPosition || functionName || qualifiedField || columnName
+                    || resolution.isAliasReference(name, index)) {
+                expanded.append(token.text);
+                continue;
+            }
+            Object value = context.variables().get(name);
+            int dotIndex = nextSignificantToken(tokens, index + 1);
+            int fieldIndex = dotIndex >= 0 && tokens.get(dotIndex).isPunct(".")
+                    ? nextSignificantToken(tokens, dotIndex + 1) : -1;
+            if (value instanceof Map<?, ?> fields && fieldIndex >= 0
+                    && tokens.get(fieldIndex).kind == SqlDialectTranslator.Kind.IDENT) {
+                ScriptVariableType valueType = null;
+                String storedType = context.variableTypes().get(name);
+                if (storedType != null && !"STRUCT".equals(storedType)) {
+                    valueType = new ScriptVariableTypeParser(storedType).parse();
+                }
+                Object fieldValue = value;
+                int finalFieldIndex = index;
+                int memberIndex = fieldIndex;
+                while (fieldValue instanceof Map<?, ?> structValues
+                        && memberIndex >= 0
+                        && tokens.get(memberIndex).kind == SqlDialectTranslator.Kind.IDENT) {
+                    String fieldName = tokens.get(memberIndex).text;
+                    Map.Entry<?, ?> fieldEntry = structFieldEntry(structValues, fieldName);
+                    if (fieldEntry == null) {
+                        break;
+                    }
+                    fieldValue = fieldEntry.getValue();
+                    ScriptVariableField declaredField = valueType != null && valueType.isStruct()
+                            ? scriptStructField(valueType, fieldName) : null;
+                    valueType = declaredField != null ? declaredField.type() : null;
+                    finalFieldIndex = memberIndex;
+                    int nextDot = nextSignificantToken(tokens, memberIndex + 1);
+                    int nestedField = nextDot >= 0 && tokens.get(nextDot).isPunct(".")
+                            ? nextSignificantToken(tokens, nextDot + 1) : -1;
+                    if (!(fieldValue instanceof Map<?, ?>) || nestedField < 0
+                            || tokens.get(nestedField).kind != SqlDialectTranslator.Kind.IDENT) {
+                        break;
+                    }
+                    memberIndex = nestedField;
+                }
+                if (finalFieldIndex != index) {
+                    String literal = valueType != null ? sqlVariableLiteral(fieldValue, valueType)
+                            : sqlVariableLiteral(fieldValue);
+                    // BigQuery names the column after the field a whole select item ends with.
+                    expanded.append(resolution.startsSelectItem(index)
+                            && endsSelectListItem(tokens, finalFieldIndex)
+                            ? literal + " AS " + tokens.get(finalFieldIndex).text
+                            : literal);
+                    index = finalFieldIndex;
+                    continue;
+                }
+            }
+            String literal = sqlVariableLiteral(value, context.variableTypes().get(name));
+            // A variable that is a whole select item keeps its name as the column name, as BigQuery's
+            // path expression does, where an expression over it is named f0_, f1_, ...
+            expanded.append(resolution.startsSelectItem(index) && endsSelectListItem(tokens, index)
+                    ? literal + " AS " + token.text
+                    : literal);
+        }
+        return expanded.toString();
+    }
+
+    /**
+     * The lower-cased columns the tables a statement names expose, each with the queries that read one of
+     * them. A table hides a variable of the same name in the query that reads it and in the queries nested
+     * inside it, so {@code DECLARE v INT64 DEFAULT 1; CREATE TEMP TABLE t AS SELECT 4 AS v;
+     * SET v = v + (SELECT COUNT(*) FROM t)} binds {@code v} outside the subquery and the column inside, and
+     * {@code SELECT COUNT(*) FROM t UNION ALL SELECT v} keeps the variable in the branch that reads no table.
+     */
+    private static final class ScriptColumns {
+
+        private final Map<String, Set<Integer>> scopes = new LinkedHashMap<>();
+
+        private void add(Collection<String> columns, int scope) {
+            for (String column : columns) {
+                scopes.computeIfAbsent(column, key -> new LinkedHashSet<>()).add(scope);
+            }
+        }
+
+        private void add(ScriptColumns columns) {
+            columns.scopes.forEach((column, owners) ->
+                    scopes.computeIfAbsent(column, key -> new LinkedHashSet<>()).addAll(owners));
+        }
+
+        /** Whether a token in {@code scope} names one of the columns rather than a script variable. */
+        private boolean hides(String name, int scope, QueryStructure structure) {
+            Set<Integer> owners = scopes.get(name);
+            if (owners == null) {
+                return false;
+            }
+            for (int owner : owners) {
+                if (structure.within(scope, owner)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+
+    /**
+     * The queries a statement is made of: {@code depths} counts the queries that enclose a token,
+     * {@code scopes} names the innermost query it belongs to, and {@code parents} links a scope to the query
+     * that encloses it. Two queries at the same depth, the branches of a set operation or sibling subqueries,
+     * are scopes of their own, so the columns one reads leave the names the other writes to the variable,
+     * while {@code setOperations} names the branch that opened the set operation a scope belongs to, because
+     * the CTEs a WITH clause declares reach every branch. The root scope encloses every query of the
+     * statement.
+     */
+    private record QueryStructure(int[] depths, int[] scopes, List<Integer> parents,
+                                  List<Integer> setOperations) {
+
+        /** Whether a token in {@code scope} resolves a name the query {@code owner} declares. */
+        private boolean within(int scope, int owner) {
+            for (int at = scope; at >= 0; at = parents.get(at)) {
+                if (at == owner) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /**
+         * The hops from a token in {@code scope} up to the query {@code owner} names, a branch of the set
+         * operation it is part of counted as that query, or -1 when the token stands outside it: a CTE is
+         * visible to every branch, while the columns a branch reads stay its own.
+         */
+        private int hopsTo(int scope, int owner) {
+            int hops = 0;
+            for (int at = scope; at >= 0; at = parents.get(at)) {
+                if (at == owner || setOperations.get(at).equals(setOperations.get(owner))) {
+                    return hops;
+                }
+                hops++;
+            }
+            return -1;
+        }
+    }
+
+    /**
+     * A statement's own name resolution, which BigQuery applies before a script variable of the same name:
+     * the token positions where a variable is a whole select item, whose column BigQuery names after it, and
+     * the names the statement binds to something else: a CTE name, the alias of a FROM item, and the columns
+     * a derived table exposes.
+     */
+    private record ScriptNameResolution(Set<Integer> selectItemStarts, List<HiddenName> hiddenNames,
+                                        List<LocalName> localNames, QueryStructure structure, String[] clauses,
+                                        Map<String, Set<Integer>> aliasDepths, ScriptColumns columns) {
+
+        /** Names that hide a script variable inside one range only: the parameters of a function. */
+        private record LocalName(Set<String> names, int from, int to) {}
+
+        /**
+         * {@code names} hide a script variable of that name outside {@code excludedFrom..excludedTo}, in the
+         * query {@code scope} and in the queries nested inside it: a nested query's alias names a column
+         * inside its own query, not in the query that encloses it.
+         */
+        private record HiddenName(Set<String> names, int excludedFrom, int excludedTo, int scope) {}
+
+        private boolean startsSelectItem(int index) {
+            return selectItemStarts.contains(index);
+        }
+
+        /**
+         * Whether the name is an alias of the query at this token: an unqualified name there stands for the
+         * select-list alias instead of a script variable, but only in the clauses that resolve aliases and
+         * only where that query declares it. BigQuery resolves {@code ORDER BY id} against
+         * {@code SELECT name AS id}, while a select-list item of the same name, and a query nested inside,
+         * still name the variable: {@code DECLARE id INT64 DEFAULT 99; SELECT id AS id} selects 99.
+         */
+        private boolean isAliasReference(String name, int index) {
+            String clause = clauses[index];
+            if (clause == null || !ALIAS_CLAUSES.contains(clause)) {
+                return false;
+            }
+            Set<Integer> declaredDepths = aliasDepths.get(name);
+            return declaredDepths != null && declaredDepths.contains(structure.depths()[index]);
+        }
+
+        /**
+         * Whether the name resolves to something the statement declares, rather than to a script variable: a
+         * column of one of its tables, a CTE or FROM item alias, a derived table's column, or a parameter of
+         * a temporary function.
+         */
+        private boolean hides(String name, int index) {
+            for (ScriptNameResolution.LocalName local : localNames) {
+                if (local.names().contains(name) && index >= local.from() && index <= local.to()) {
+                    return true;
+                }
+            }
+            int scope = structure.scopes()[index];
+            for (HiddenName hidden : hiddenNames) {
+                if (hidden.names().contains(name)
+                        && structure.within(scope, hidden.scope())
+                        && (index < hidden.excludedFrom() || index > hidden.excludedTo())) {
+                    return true;
+                }
+            }
+            return columns.hides(name, scope, structure);
+        }
+    }
+
+    /**
+     * The columns a CTE exposes, which BigQuery resolves before a script variable of the same name from
+     * the CTE's definition on, once the statement reads the CTE. {@code definitionEnd} is the parenthesis
+     * that closes the CTE body, and {@code scope} the query the WITH clause belongs to.
+     */
+    private record CteColumnScope(String name, Set<String> columns, int definitionEnd, int scope) {}
+
+    /**
+     * The queries that read the CTE {@code cte}: a {@code FROM} or {@code JOIN} item names it where no
+     * closer declaration of the same name shadows it, in the WITH clause's own query or in one nested inside
+     * it, a branch of the set operation it is part of included, since a WITH clause declares its CTE for
+     * every branch. Its columns resolve there. A CTE whose columns nothing reads leaves a variable of that
+     * name alone.
+     */
+    private static Set<Integer> cteReadScopes(List<SqlDialectTranslator.Token> tokens, CteColumnScope cte,
+                                              QueryStructure structure, List<CteColumnScope> ctes) {
+        Set<Integer> readScopes = new LinkedHashSet<>();
+        for (int index = cte.definitionEnd() + 1; index < tokens.size(); index++) {
+            SqlDialectTranslator.Token token = tokens.get(index);
+            if (token.kind != SqlDialectTranslator.Kind.IDENT && token.kind != SqlDialectTranslator.Kind.QIDENT
+                    || !cte.name().equalsIgnoreCase(token.identifierText())
+                    || !tablePosition(tokens, index, SCRIPT_SOURCE_KEYWORDS)
+                    || nearestCte(ctes, cte.name(), index, structure.scopes()[index], structure) != cte) {
+                continue;
+            }
+            readScopes.add(structure.scopes()[index]);
+        }
+        return readScopes;
+    }
+
+    /**
+     * The CTE a read of {@code name} at {@code index} resolves to: the innermost declaration already defined
+     * that reaches the reading query, since a nested WITH shadows the CTE of the query around it. {@code null}
+     * when no declaration reaches it.
+     */
+    private static CteColumnScope nearestCte(List<CteColumnScope> ctes, String name, int index, int readScope,
+                                             QueryStructure structure) {
+        CteColumnScope nearest = null;
+        int nearestHops = Integer.MAX_VALUE;
+        for (CteColumnScope candidate : ctes) {
+            if (!candidate.name().equalsIgnoreCase(name) || candidate.definitionEnd() >= index) {
+                continue;
+            }
+            int hops = structure.hopsTo(readScope, candidate.scope());
+            if (hops >= 0 && hops < nearestHops) {
+                nearest = candidate;
+                nearestHops = hops;
+            }
+        }
+        return nearest;
+    }
+
+    /**
+     * Collects the parameters a function declaration names: a parameter is local to the function, so it
+     * wins over a script variable of the same name in the declaration and in the body, as it does in
+     * BigQuery. The range ends with the body, so the statements that follow still bind the variable.
+     */
+    private static void addFunctionParameterNames(List<SqlDialectTranslator.Token> tokens,
+                                                  List<ScriptNameResolution.LocalName> localNames) {
+        for (int index = 0; index < tokens.size(); index++) {
+            if (!tokens.get(index).isKeyword("FUNCTION")) {
+                continue;
+            }
+            int name = nextSignificantToken(tokens, index + 1);
+            int open = name < 0 ? -1 : nextSignificantToken(tokens, name + 1);
+            if (open < 0 || !tokens.get(open).isPunct("(")) {
+                continue;
+            }
+            int close = matchingParenthesis(tokens, open);
+            Set<String> parameters = new LinkedHashSet<>();
+            for (List<SqlDialectTranslator.Token> parameter
+                    : SqlDialectTranslator.splitArguments(tokens, open + 1, close)) {
+                SqlDialectTranslator.Token first = parameter.isEmpty() ? null : parameter.getFirst();
+                if (first != null && (first.kind == SqlDialectTranslator.Kind.IDENT
+                        || first.kind == SqlDialectTranslator.Kind.QIDENT)) {
+                    parameters.add(first.identifierText().toLowerCase(Locale.ROOT));
+                }
+            }
+            if (!parameters.isEmpty()) {
+                localNames.add(new ScriptNameResolution.LocalName(parameters, open, functionBodyEnd(tokens, close)));
+            }
+        }
+    }
+
+    /**
+     * The parenthesis that closes the body of a function declaration, or the end of its statement when
+     * there is none to find.
+     */
+    private static int functionBodyEnd(List<SqlDialectTranslator.Token> tokens, int parametersClose) {
+        for (int index = nextSignificantToken(tokens, parametersClose + 1); index >= 0 && index < tokens.size();
+                index = nextSignificantToken(tokens, index + 1)) {
+            if (tokens.get(index).isPunct(";")) {
+                break;
+            }
+            if (!tokens.get(index).isKeyword("AS")) {
+                continue;
+            }
+            int body = nextSignificantToken(tokens, index + 1);
+            if (body >= 0 && tokens.get(body).isPunct("(")) {
+                return matchingParenthesis(tokens, body);
+            }
+            break;
+        }
+        int depth = 0;
+        for (int index = parametersClose + 1; index < tokens.size(); index++) {
+            SqlDialectTranslator.Token token = tokens.get(index);
+            if (token.isPunct("(")) {
+                depth++;
+            } else if (token.isPunct(")")) {
+                depth--;
+            } else if (depth == 0 && token.isPunct(";")) {
+                return index - 1;
+            }
+        }
+        return tokens.size() - 1;
+    }
+
+    private static ScriptNameResolution scriptNameResolution(List<SqlDialectTranslator.Token> tokens,
+                                                             ScriptColumns columns) {
+        Set<Integer> selectItemStarts = new LinkedHashSet<>();
+        List<ScriptNameResolution.HiddenName> hiddenNames = new ArrayList<>();
+        List<ScriptNameResolution.LocalName> localNames = new ArrayList<>();
+        addFunctionParameterNames(tokens, localNames);
+        List<CteColumnScope> cteColumnScopes = new ArrayList<>();
+        List<String> clauses = new ArrayList<>();
+        clauses.add(null);
+        List<Boolean> withClauses = new ArrayList<>();
+        withClauses.add(false);
+        QueryStructure structure = queryStructure(tokens);
+        String[] clauseByToken = new String[tokens.size()];
+        Map<String, Set<Integer>> aliasDepths = new LinkedHashMap<>();
+        List<Boolean> parenQueries = new ArrayList<>();
+        parenQueries.add(true);
+        for (int index = 0; index < tokens.size(); index++) {
+            SqlDialectTranslator.Token token = tokens.get(index);
+            if (token.kind == SqlDialectTranslator.Kind.PUNCT) {
+                if (token.isPunct("(") || token.isPunct("[") || token.isPunct("{")) {
+                    // A parenthesis that opens a query is a scope of its own; one that groups an expression
+                    // keeps the clause and the alias scope around it.
+                    boolean query = token.isPunct("(") && startsQuery(tokens, index);
+                    if (token.isPunct("(")) {
+                        addDerivedTableColumns(tokens, index, clauses.getLast(), structure, hiddenNames);
+                    }
+                    clauses.add(query ? null : clauses.getLast());
+                    withClauses.add(false);
+                    parenQueries.add(query);
+                } else if ((token.isPunct(")") || token.isPunct("]") || token.isPunct("}"))
+                        && clauses.size() > 1) {
+                    clauses.removeLast();
+                    withClauses.removeLast();
+                    parenQueries.removeLast();
+                }
+                continue;
+            }
+            if (token.kind != SqlDialectTranslator.Kind.IDENT) {
+                continue;
+            }
+            int depth = clauses.size() - 1;
+            boolean withClause = withClauses.get(depth);
+            String upper = token.upper();
+            int previous = previousSignificantToken(tokens, index - 1);
+            int next = nextSignificantToken(tokens, index + 1);
+            if ("WITH".equals(upper)) {
+                withClauses.set(depth, true);
+            } else if (SCRIPT_CLAUSE_KEYWORDS.contains(upper) || "SELECT".equals(upper)) {
+                clauses.set(depth, upper);
+                // A WITH clause collects CTE names; the query that follows it does not.
+                withClauses.set(depth, false);
+            }
+            // Only a query's own select list names its columns. A function call's arguments or a
+            // grouped expression inherit the clause they sit in, but declare nothing there.
+            boolean selectList = parenQueries.get(depth) && "SELECT".equals(clauses.get(depth));
+            String name = token.text.toLowerCase(Locale.ROOT);
+            clauseByToken[index] = clauses.get(depth);
+            if (previous >= 0 && tokens.get(previous).isKeyword("AS") && selectList) {
+                aliasDepths.computeIfAbsent(name, key -> new LinkedHashSet<>()).add(structure.depths()[index]);
+            }
+            if (withClause && next >= 0 && tokens.get(next).isKeyword("AS")) {
+                int open = nextSignificantToken(tokens, next + 1);
+                if (open >= 0 && tokens.get(open).isPunct("(")) {
+                    int close = matchingParenthesis(tokens, open);
+                    // The name a CTE declares is visible outside its own definition.
+                    hiddenNames.add(new ScriptNameResolution.HiddenName(Set.of(name), open, close,
+                            structure.scopes()[index]));
+                    // So are the columns its select list exposes, wherever the statement reads the CTE.
+                    Set<String> cteColumns = selectListColumnNames(tokens, open, close);
+                    if (!cteColumns.isEmpty()) {
+                        cteColumnScopes.add(new CteColumnScope(name, cteColumns, close, structure.scopes()[index]));
+                    }
+                    continue;
+                }
+            }
+            if ("FROM".equals(clauses.get(depth)) && previous >= 0 && tokens.get(previous).isKeyword("AS")) {
+                // The alias of a table, UNNEST or derived table names a column scope of its own, which is
+                // visible in the query that declares it and in a query nested inside it.
+                hiddenNames.add(new ScriptNameResolution.HiddenName(Set.of(name), -1, -1,
+                        structure.scopes()[index]));
+                continue;
+            }
+            if (selectList && startsSelectItem(tokens, previous)) {
+                selectItemStarts.add(index);
+            }
+        }
+        for (CteColumnScope cte : cteColumnScopes) {
+            for (int readScope : cteReadScopes(tokens, cte, structure, cteColumnScopes)) {
+                // The columns are visible from the CTE's definition on, in the query that reads the CTE and
+                // in the queries nested inside it: the body that declares them, and a sibling query of the
+                // one that reads them, still bind the variable.
+                hiddenNames.add(new ScriptNameResolution.HiddenName(cte.columns(), -1, cte.definitionEnd(),
+                        readScope));
+            }
+        }
+        return new ScriptNameResolution(selectItemStarts, hiddenNames, localNames, structure, clauseByToken,
+                aliasDepths, columns);
+    }
+
+    /**
+     * Adds the columns a derived table in a FROM clause exposes: the aliases of its select list and the
+     * names its bare select items carry. A name hides a variable outside the item, where BigQuery
+     * resolves the derived table's column first.
+     */
+    private static void addDerivedTableColumns(List<SqlDialectTranslator.Token> tokens, int open, String clause,
+                                               QueryStructure structure,
+                                               List<ScriptNameResolution.HiddenName> hiddenNames) {
+        int previous = previousSignificantToken(tokens, open - 1);
+        boolean fromItem = "FROM".equals(clause) && previous >= 0
+                && (tokens.get(previous).isKeyword("FROM") || tokens.get(previous).isKeyword("JOIN")
+                        || tokens.get(previous).isPunct(","));
+        if (!fromItem) {
+            return;
+        }
+        int close = matchingParenthesis(tokens, open);
+        Set<String> names = selectListColumnNames(tokens, open, close);
+        if (!names.isEmpty()) {
+            // A derived table exposes its columns to the query that reads it, and to a query nested inside
+            // that one, but not to a sibling query or to a name the query around a nested read writes.
+            hiddenNames.add(new ScriptNameResolution.HiddenName(names, open, close, structure.scopes()[previous]));
+        }
+    }
+
+    /**
+     * The column names the query between {@code open} and {@code close} exposes: the alias of a select
+     * item, and the name a bare select item carries.
+     */
+    private static Set<String> selectListColumnNames(List<SqlDialectTranslator.Token> tokens, int open, int close) {
+        Set<String> names = new LinkedHashSet<>();
+        List<String> innerClauses = new ArrayList<>();
+        innerClauses.add(null);
+        for (int index = open + 1; index < close; index++) {
+            SqlDialectTranslator.Token token = tokens.get(index);
+            if (token.kind == SqlDialectTranslator.Kind.PUNCT) {
+                if (token.isPunct("(") || token.isPunct("[") || token.isPunct("{")) {
+                    innerClauses.add(null);
+                } else if ((token.isPunct(")") || token.isPunct("]") || token.isPunct("}"))
+                        && innerClauses.size() > 1) {
+                    innerClauses.removeLast();
+                }
+                continue;
+            }
+            if (token.kind != SqlDialectTranslator.Kind.IDENT) {
+                continue;
+            }
+            int depth = innerClauses.size() - 1;
+            String upper = token.upper();
+            if (SCRIPT_CLAUSE_KEYWORDS.contains(upper) || "SELECT".equals(upper) || "WITH".equals(upper)) {
+                innerClauses.set(depth, upper);
+                continue;
+            }
+            if (!"SELECT".equals(innerClauses.get(depth))) {
+                continue;
+            }
+            int itemStart = previousSignificantToken(tokens, index - 1);
+            if (itemStart >= 0 && tokens.get(itemStart).isKeyword("AS")
+                    || startsSelectItem(tokens, itemStart) && endsSelectListItem(tokens, index)) {
+                names.add(token.text.toLowerCase(Locale.ROOT));
+            }
+        }
+        return names;
+    }
+
+    /** Whether the parenthesis at {@code open} opens a query rather than grouping an expression. */
+    private static boolean startsQuery(List<SqlDialectTranslator.Token> tokens, int open) {
+        int next = nextSignificantToken(tokens, open + 1);
+        return next >= 0 && (tokens.get(next).isPunct("(") || tokens.get(next).isKeyword("SELECT")
+                || tokens.get(next).isKeyword("WITH"));
+    }
+
+    /** The first token of a select item, skipping the {@code DISTINCT} or {@code ALL} that may precede it. */
+    private static boolean startsSelectItem(List<SqlDialectTranslator.Token> tokens, int previous) {
+        int at = previous;
+        while (at >= 0 && (tokens.get(at).isKeyword("DISTINCT") || tokens.get(at).isKeyword("ALL"))) {
+            at = previousSignificantToken(tokens, at - 1);
+        }
+        return at >= 0 && (tokens.get(at).isKeyword("SELECT") || tokens.get(at).isPunct(","));
+    }
+
+    /** Whether the select item that starts earlier ends at {@code index}. */
+    private static boolean endsSelectListItem(List<SqlDialectTranslator.Token> tokens, int index) {
+        int next = nextSignificantToken(tokens, index + 1);
+        return next < 0 || tokens.get(next).isPunct(",") || tokens.get(next).isPunct(")")
+                || tokens.get(next).isPunct(";")
+                || tokens.get(next).kind == SqlDialectTranslator.Kind.IDENT
+                        && SCRIPT_CLAUSE_KEYWORDS.contains(tokens.get(next).upper());
+    }
+
+    private static int matchingParenthesis(List<SqlDialectTranslator.Token> tokens, int open) {
+        int depth = 0;
+        for (int index = open; index < tokens.size(); index++) {
+            SqlDialectTranslator.Token token = tokens.get(index);
+            if (token.kind != SqlDialectTranslator.Kind.PUNCT) {
+                continue;
+            }
+            if (token.isPunct("(") || token.isPunct("[") || token.isPunct("{")) {
+                depth++;
+            } else if (token.isPunct(")") || token.isPunct("]") || token.isPunct("}")) {
+                depth--;
+                if (depth == 0) {
+                    return index;
+                }
+            }
+        }
+        return tokens.size() - 1;
+    }
+
+
+    private static int previousSignificantToken(List<SqlDialectTranslator.Token> tokens, int from) {
+        for (int index = from; index >= 0; index--) {
+            if (tokens.get(index).kind != SqlDialectTranslator.Kind.SPACE) {
+                return index;
+            }
+        }
+        return -1;
+    }
+
+    private static final Set<String> SCRIPT_CLAUSE_KEYWORDS = Set.of("FROM", "WHERE", "GROUP", "HAVING",
+            "QUALIFY", "WINDOW", "ORDER", "LIMIT", "OFFSET", "UNION", "INTERSECT", "EXCEPT");
+
+    /** The clauses where BigQuery resolves an unqualified name against the select-list aliases. */
+    private static final Set<String> ALIAS_CLAUSES = Set.of("GROUP", "ORDER", "HAVING", "QUALIFY", "WINDOW");
+
+    /** The keywords that put a name in a table position: a query reads the table, or a DML statement writes it. */
+    private static final Set<String> SCRIPT_TABLE_KEYWORDS = Set.of("FROM", "JOIN", "INTO", "UPDATE", "TABLE",
+            "USING");
+
+    /** The keywords that put a name in a table position a query reads. */
+    private static final Set<String> SCRIPT_SOURCE_KEYWORDS = Set.of("FROM", "JOIN", "USING");
+
+    /** The keywords that name a table or declare a column, where a script variable cannot stand. */
+    private static final Set<String> SCRIPT_DECLARATION_KEYWORDS = Set.of("FROM", "JOIN", "INTO", "UPDATE",
+            "TABLE", "AS");
+
+    private static int nextSignificantToken(List<SqlDialectTranslator.Token> tokens, int from) {
+        for (int index = from; index < tokens.size(); index++) {
+            if (tokens.get(index).kind != SqlDialectTranslator.Kind.SPACE) {
+                return index;
+            }
+        }
+        return -1;
+    }
+
+    private static String sqlVariableLiteral(Object value) {
+        if (value == null) {
+            return "NULL";
+        }
+        if (value instanceof Map<?, ?> fields) {
+            List<String> values = new ArrayList<>(fields.size());
+            for (Map.Entry<?, ?> entry : fields.entrySet()) {
+                if (!(entry.getKey() instanceof String name)) {
+                    throw QueryEngine.invalidQuery("STRUCT variable field names must be strings.");
+                }
+                values.add(sqlVariableLiteral(entry.getValue()) + " AS " + quoteScriptTypeField(name));
+            }
+            return "STRUCT(" + String.join(", ", values) + ")";
+        }
+        return sqlVariableLiteral(value, inferredScriptVariableTypeNode(value));
+    }
+
+    private static String sqlVariableLiteral(Object value, String type) {
+        if (value == null) {
+            return "STRUCT".equalsIgnoreCase(type) ? "NULL"
+                    : sqlVariableLiteral(null, new ScriptVariableTypeParser(type).parse());
+        }
+        if ("STRUCT".equalsIgnoreCase(type) && value instanceof Map<?, ?>) {
+            return sqlVariableLiteral(value);
+        }
+        return sqlVariableLiteral(value, new ScriptVariableTypeParser(type).parse());
+    }
+
+    private static String sqlVariableLiteral(Object value, ScriptVariableType type) {
+        if (value == null) {
+            // A NULL variable keeps its declared type, so `DECLARE s STRING; SELECT s` reports STRING
+            // and a null STRUCT still exposes its fields to `s.field`.
+            return "CAST(NULL AS " + scriptVariableTypeSql(type) + ")";
+        }
+        if (type.isArray()) {
+            if (!(value instanceof List<?> values)) {
+                throw QueryEngine.invalidQuery("Value cannot be represented as " + scriptVariableTypeSql(type) + ".");
+            }
+            String elements = values.stream().map(element -> sqlVariableLiteral(element, type.elementType()))
+                    .collect(Collectors.joining(", "));
+            return "CAST([" + elements + "] AS " + scriptVariableTypeSql(type) + ")";
+        }
+        if (type.isStruct()) {
+            if (!(value instanceof Map<?, ?> values)) {
+                throw QueryEngine.invalidQuery("Value cannot be represented as " + scriptVariableTypeSql(type) + ".");
+            }
+            List<Map.Entry<?, ?>> entries = new ArrayList<>(values.entrySet());
+            List<String> fields = new ArrayList<>(type.fields().size());
+            for (int index = 0; index < type.fields().size(); index++) {
+                ScriptVariableField field = type.fields().get(index);
+                Map.Entry<?, ?> entry = structFieldEntry(entries, field.name(), index);
+                if (entry == null) {
+                    throw QueryEngine.invalidQuery("STRUCT value does not match its declared type.");
+                }
+                String expression = sqlVariableLiteral(entry.getValue(), field.type());
+                fields.add(field.name() == null ? expression
+                        : expression + " AS " + quoteScriptTypeField(field.name()));
+            }
+            return "CAST(STRUCT(" + String.join(", ", fields) + ") AS " + scriptVariableTypeSql(type) + ")";
+        }
+        return switch (type.scalarType()) {
+            case "DATE" -> "DATE '" + coerceScriptDate(value) + "'";
+            case "TIMESTAMP" -> "TIMESTAMP '" + coerceScriptTimestamp(value) + "'";
+            case "DATETIME" -> "DATETIME '" + coerceScriptDateTime(value).toString().replace('T', ' ') + "'";
+            case "TIME" -> "TIME '" + coerceScriptTime(value) + "'";
+            case "BYTES" -> "FROM_BASE64('" + coerceScriptBytes(value) + "')";
+            case "JSON" -> "CAST(" + scriptStringLiteral(coerceScriptJson(value)) + " AS JSON)";
+            case "STRING" -> scriptStringLiteral(value.toString());
+            case "BOOL" -> value.toString();
+            case "INT64" -> value.toString();
+            // A FLOAT64 literal is a DOUBLE, so arithmetic over it stays floating point: DuckDB reads a
+            // bare decimal as NUMERIC, which would make `f + 0.2` a NUMERIC of a different value.
+            case "FLOAT64" -> "CAST(" + value + " AS DOUBLE)";
+            case "NUMERIC" -> "CAST('" + coerceScriptNumeric(value).toPlainString() + "' AS NUMERIC)";
+            default -> throw QueryEngine.invalidQuery(
+                    "Variable type " + type.scalarType() + " is not supported.");
+        };
+    }
+
+    /**
+     * A GoogleSQL string literal. The substitution result is lexed again for DuckDB, so a backslash
+     * has to be escaped or it would be read as the start of a character escape.
+     */
+    private static String scriptStringLiteral(String value) {
+        return '\'' + value.replace("\\", "\\\\").replace("'", "\\'") + '\'';
+    }
+
+    /** A directly evaluated condition: {@code resolved} is false when the SQL engine has to answer. */
+    private record ScriptCondition(boolean resolved, Boolean value) {
+
+        private static final ScriptCondition UNRESOLVED = new ScriptCondition(false, null);
+
+        private static ScriptCondition of(Boolean value) {
+            return new ScriptCondition(true, value);
+        }
+    }
+
+    private static ScriptCondition evaluateScriptCondition(String condition, ProceduralContext context) {
+        String expression = condition.trim();
+        if (expression.matches("(?i)TRUE|FALSE")) {
+            return ScriptCondition.of(Boolean.valueOf(expression));
+        }
+        if (expression.regionMatches(true, 0, "NOT ", 0, 4)) {
+            ScriptCondition nested = evaluateScriptCondition(expression.substring(4), context);
+            if (!nested.resolved()) {
+                return ScriptCondition.UNRESOLVED;
+            }
+            // NOT NULL is NULL, not TRUE: an unknown condition keeps its unknown value through negation.
+            return ScriptCondition.of(nested.value() == null ? null : !nested.value());
+        }
+        Matcher nullCheck = Pattern.compile("(?i)^(.+?)\\s+IS\\s+(NOT\\s+)?NULL$").matcher(expression);
+        if (nullCheck.matches()) {
+            try {
+                boolean isNull = scriptOperand(nullCheck.group(1), context) == null;
+                return ScriptCondition.of(nullCheck.group(2) != null ? !isNull : isNull);
+            } catch (GcpException e) {
+                return ScriptCondition.UNRESOLVED;
+            }
+        }
+        try {
+            Object value = scriptOperand(expression, context);
+            if (value == null) {
+                return ScriptCondition.of(null);
+            }
+            if (value instanceof Boolean booleanValue) {
+                return ScriptCondition.of(booleanValue);
+            }
+        } catch (GcpException ignored) {
+            // Non-scalar conditions are delegated to the configured SQL engine.
+        }
+        Matcher comparison = Pattern.compile("^(.+?)\\s*(<=|>=|!=|<>|=|<|>)\\s*(.+)$").matcher(expression);
+        if (!comparison.matches()) {
+            return ScriptCondition.UNRESOLVED;
+        }
+        Object left;
+        Object right;
+        try {
+            left = scriptOperand(comparison.group(1), context);
+            right = scriptOperand(comparison.group(3), context);
+        } catch (GcpException e) {
+            return ScriptCondition.UNRESOLVED;
+        }
+        if (left == null || right == null) {
+            // A comparison with NULL is NULL, which the caller treats as false only when choosing a branch.
+            return ScriptCondition.of(null);
+        }
+        int order;
+        if (left instanceof Number leftNumber && right instanceof Number rightNumber) {
+            order = compareScriptNumbers(leftNumber, rightNumber);
+        } else if (left instanceof String leftString && right instanceof String rightString) {
+            order = leftString.compareTo(rightString);
+        } else if (left instanceof Boolean leftBoolean && right instanceof Boolean rightBoolean) {
+            order = Boolean.compare(leftBoolean, rightBoolean);
+        } else {
+            return ScriptCondition.UNRESOLVED;
+        }
+        return ScriptCondition.of(switch (comparison.group(2)) {
+            case "=" -> order == 0;
+            case "!=", "<>" -> order != 0;
+            case "<" -> order < 0;
+            case "<=" -> order <= 0;
+            case ">" -> order > 0;
+            case ">=" -> order >= 0;
+            default -> null;
+        });
+    }
+
+    /**
+     * Integral operands compare exactly: routing INT64 through a double would report
+     * 9007199254740993 and 9007199254740992 as equal. A FLOAT64 operand makes BigQuery coerce both.
+     */
+    private static int compareScriptNumbers(Number left, Number right) {
+        if (left instanceof BigDecimal || right instanceof BigDecimal) {
+            return scriptDecimal(left).compareTo(scriptDecimal(right));
+        }
+        boolean integral = !(left instanceof Double || left instanceof Float)
+                && !(right instanceof Double || right instanceof Float);
+        return integral ? Long.compare(left.longValue(), right.longValue())
+                : Double.compare(left.doubleValue(), right.doubleValue());
+    }
+
+    private void executeProceduralFor(String projectId, String jobProjectId, SqlDialectTranslator.ForBlock loop,
+                                      QueryOptions options, StoredJob job, ProceduralContext context,
+                                      JobLocation jobLocation) {
+        String variable = loop.variable().toLowerCase(Locale.ROOT);
+        if (context.variables().containsKey(variable)) {
+            throw QueryEngine.invalidQuery("FOR loop variable " + loop.variable()
+                    + " conflicts with a variable in the current scope.");
+        }
+        BigQuerySqlEngine.Result rows = engine.execute(request(projectId, jobProjectId,
+                context.prependTo(expandScriptVariables(loop.query(), projectId, jobProjectId, options, context,
+                        jobLocation)),
+                options, false),
+                tables(projectId, jobLocation));
+        context.recordBytes(rows.totalBytesProcessed());
+        context.clearQueryResult();
+        // The row a FOR loop exposes is a struct of the query's fields, so a field keeps its type when
+        // the loop substitutes it or binds it as a dynamic parameter.
+        context.variableTypes().put(variable, scriptRowType(rows.schema()));
+        try {
+            for (int index = 0; index < Math.min(rows.rows().size(), 1000); index++) {
+                context.variables().put(variable, scriptResultRow(rows.rows().get(index), rows.schema()));
+                try {
+                    for (SqlDialectTranslator.ScriptItem nested : loop.items()) {
+                        executeProceduralItem(projectId, jobProjectId, nested, options, job, context, jobLocation);
+                    }
+                } catch (LoopControlSignal signal) {
+                    if (!handlesLoopSignal(signal, loop.label())) {
+                        throw signal;
+                    }
+                    if (!signal.continueLoop) {
+                        return;
+                    }
+                }
+            }
+            if (rows.rows().size() > 1000) {
+                throw QueryEngine.invalidQuery(
+                        "FOR loop exceeded the floci BigQuery emulator iteration limit of 1000.");
+            }
+        } finally {
+            context.variables().remove(variable);
+            context.variableTypes().remove(variable);
+        }
+    }
+
+    private void executeProceduralLoop(String projectId, String jobProjectId,
+                                        List<SqlDialectTranslator.ScriptItem> items,
+                                        String label, String condition, boolean postTest, QueryOptions options,
+                                        StoredJob job,
+                                        ProceduralContext context, JobLocation jobLocation) {
+        for (int iteration = 0; iteration < 1000; iteration++) {
+            if (condition != null && !postTest && !proceduralCondition(projectId, jobProjectId, condition, options, context,
+                    jobLocation)) {
+                return;
+            }
+            boolean broken = false;
+            try {
+                for (SqlDialectTranslator.ScriptItem nested : items) {
+                    executeProceduralItem(projectId, jobProjectId, nested, options, job, context, jobLocation);
+                }
+            } catch (LoopControlSignal signal) {
+                if (!handlesLoopSignal(signal, label)) {
+                    throw signal;
+                }
+                if (!signal.continueLoop) {
+                    broken = true;
+                }
+            }
+            if (broken) {
+                return;
+            }
+            if (condition != null && postTest && proceduralCondition(projectId, jobProjectId, condition, options, context,
+                    jobLocation)) {
+                return;
+            }
+        }
+        throw QueryEngine.invalidQuery("Loop exceeded the floci BigQuery emulator iteration limit of 1000.");
+    }
+
+    private boolean proceduralCondition(String projectId, String jobProjectId, String condition,
+                                        QueryOptions options, ProceduralContext context, JobLocation jobLocation) {
+        ScriptCondition directCondition = evaluateScriptCondition(condition, context);
+        if (directCondition.resolved()) {
+            return Boolean.TRUE.equals(directCondition.value());
+        }
+        BigQuerySqlEngine.Result result = engine.execute(request(projectId, jobProjectId,
+                context.prependTo("SELECT " + expandScriptExpressionVariables(condition, projectId, jobProjectId,
+                        options, context, jobLocation) + " AS _floci_condition"),
+                options, false), tables(projectId, jobLocation));
+        context.recordBytes(result.totalBytesProcessed());
+        List<TableFieldSchema> fields = result.schema() != null && result.schema().getFields() != null
+                ? result.schema().getFields() : List.of();
+        if (fields.size() != 1 || !"BOOLEAN".equalsIgnoreCase(fields.getFirst().getType())) {
+            throw QueryEngine.invalidQuery("Loop condition must be a BOOL expression");
+        }
+        boolean matches = !result.rows().isEmpty()
+                && Boolean.TRUE.equals(result.rows().getFirst().get("_floci_condition"));
+        return matches;
+    }
+
+    private void executeProceduralWhile(String projectId, String jobProjectId, SqlDialectTranslator.WhileBlock loop,
+                                         QueryOptions options, StoredJob job, ProceduralContext context,
+                                         JobLocation jobLocation) {
+        for (int iteration = 0; iteration < 1000; iteration++) {
+            ScriptCondition evaluatedCondition = evaluateScriptCondition(loop.condition(), context);
+            if (evaluatedCondition.resolved()) {
+                if (!Boolean.TRUE.equals(evaluatedCondition.value())) {
+                    return;
+                }
+                try {
+                    for (SqlDialectTranslator.ScriptItem nested : loop.items()) {
+                        executeProceduralItem(projectId, jobProjectId, nested, options, job, context, jobLocation);
+                    }
+                } catch (LoopControlSignal signal) {
+                    if (!handlesLoopSignal(signal, loop.label())) {
+                        throw signal;
+                    }
+                    if (!signal.continueLoop) {
+                        return;
+                    }
+                }
+                continue;
+            }
+            BigQuerySqlEngine.Result result = engine.execute(request(projectId, jobProjectId,
+                    context.prependTo("SELECT " + expandScriptExpressionVariables(loop.condition(), projectId,
+                            jobProjectId, options, context, jobLocation) + " AS _floci_condition"),
+                    options, false),
+                    tables(projectId, jobLocation));
+            context.recordBytes(result.totalBytesProcessed());
+            List<TableFieldSchema> fields = result.schema() != null && result.schema().getFields() != null
+                    ? result.schema().getFields() : List.of();
+            if (fields.size() != 1 || !"BOOLEAN".equalsIgnoreCase(fields.getFirst().getType())) {
+                throw QueryEngine.invalidQuery("WHILE condition must be a BOOL expression");
+            }
+            boolean matches = !result.rows().isEmpty()
+                    && Boolean.TRUE.equals(result.rows().getFirst().get("_floci_condition"));
+            if (!matches) {
+                return;
+            }
+            try {
+                for (SqlDialectTranslator.ScriptItem nested : loop.items()) {
+                    executeProceduralItem(projectId, jobProjectId, nested, options, job, context, jobLocation);
+                }
+            } catch (LoopControlSignal signal) {
+                if (!handlesLoopSignal(signal, loop.label())) {
+                    throw signal;
+                }
+                if (!signal.continueLoop) {
+                    return;
+                }
+            }
+        }
+        throw QueryEngine.invalidQuery("WHILE loop exceeded the floci BigQuery emulator iteration limit of 1000.");
+    }
+
+    private void executeProceduralItem(String projectId, String jobProjectId, SqlDialectTranslator.ScriptItem item,
+                                       QueryOptions options, StoredJob job, ProceduralContext context,
+                                       JobLocation jobLocation) {
+        clearStatementStatistics(job);
+        if (item instanceof SqlDialectTranslator.BeginBlock block) {
+            Map<String, Object> variables = new LinkedHashMap<>(context.variables());
+            Map<String, String> variableTypes = new LinkedHashMap<>(context.variableTypes());
+            try {
+                try {
+                    for (SqlDialectTranslator.ScriptItem nested : block.items()) {
+                        executeProceduralItem(projectId, jobProjectId, nested, options, job, context, jobLocation);
+                    }
+                } catch (LoopControlSignal signal) {
+                    if (block.label() == null || !block.label().equalsIgnoreCase(signal.label)
+                            || signal.continueLoop) {
+                        throw signal;
+                    }
+                }
+            } finally {
+                // A block scopes only the variables it declares. An assignment to a variable declared
+                // outside the block survives it, as it does in BigQuery.
+                context.variables().keySet().removeIf(name -> !variables.containsKey(name));
+                context.variableTypes().keySet().removeIf(name -> !variableTypes.containsKey(name));
+            }
+            return;
+        }
+        if (item instanceof SqlDialectTranslator.WhileBlock loop) {
+            executeProceduralWhile(projectId, jobProjectId, loop, options, job, context, jobLocation);
+            return;
+        }
+        if (item instanceof SqlDialectTranslator.LoopBlock loop) {
+            executeProceduralLoop(projectId, jobProjectId,
+                                        loop.items(), loop.label(), null, false,
+                    options, job, context, jobLocation);
+            return;
+        }
+        if (item instanceof SqlDialectTranslator.RepeatBlock loop) {
+            executeProceduralLoop(projectId, jobProjectId,
+                                        loop.items(), loop.label(), loop.condition(), true,
+                    options, job, context, jobLocation);
+            return;
+        }
+        if (item instanceof SqlDialectTranslator.ForBlock loop) {
+            executeProceduralFor(projectId, jobProjectId, loop, options, job, context, jobLocation);
+            return;
+        }
+        if (item instanceof SqlDialectTranslator.LoopControl control) {
+            throw new LoopControlSignal(control.continueLoop(), control.label());
+        }
+        if (item instanceof SqlDialectTranslator.CaseBlock caseBlock) {
+            for (SqlDialectTranslator.CaseWhen branch : caseBlock.branches()) {
+                if (proceduralCondition(projectId, jobProjectId, caseBlock.condition(branch), options, context, jobLocation)) {
+                    for (SqlDialectTranslator.ScriptItem nested : branch.items()) {
+                        executeProceduralItem(projectId, jobProjectId, nested, options, job, context, jobLocation);
+                    }
+                    return;
+                }
+            }
+            for (SqlDialectTranslator.ScriptItem nested : caseBlock.otherwise()) {
+                executeProceduralItem(projectId, jobProjectId, nested, options, job, context, jobLocation);
+            }
+            return;
+        }
+        if (item instanceof SqlDialectTranslator.SqlItem sqlItem) {
+            if (applyScriptVariableStatement(sqlItem.sql(), projectId, jobProjectId, options, context, jobLocation)) {
+                return;
+            }
+            if (isExecuteImmediateStatement(sqlItem.sql())) {
+                executeImmediate(projectId, jobProjectId, sqlItem.sql(), options, job, context, jobLocation);
+                return;
+            }
+            SqlDialectTranslator.SqlItem sql = new SqlDialectTranslator.SqlItem(
+                    expandScriptVariables(sqlItem.sql(), projectId, jobProjectId, options, context, jobLocation));
+            SqlDialectTranslator.TemporaryTableDefinition temporaryTable =
+                    SqlDialectTranslator.temporaryTableDefinition(sql.sql());
+            if (temporaryTable != null) {
+                if (temporaryTable.ifNotExists() && context.temporaryTables().contains(temporaryTable.name())) {
+                    context.clearQueryResult();
+                    return;
+                }
+                materializeTemporaryTable(projectId, jobProjectId, sql.sql(), temporaryTable.name(),
+                        temporaryTable.fields(), options, context, jobLocation, false);
+                return;
+            }
+            String truncatedTemporaryTable = SqlDialectTranslator.temporaryTruncateTarget(
+                    sql.sql(), context.temporaryTables());
+            if (truncatedTemporaryTable != null) {
+                long removed = context.truncateTemporaryTable(truncatedTemporaryTable);
+                job.setDmlStats(Map.of("deletedRowCount", String.valueOf(removed)));
+                return;
+            }
+            String temporaryTarget = SqlDialectTranslator.temporaryDmlTarget(sql.sql(), context.temporaryTables());
+            if (temporaryTarget != null) {
+                materializeTemporaryDml(projectId, jobProjectId, sql.sql(), temporaryTarget, options, context,
+                        jobLocation, job);
+                return;
+            }
+            validateTemporaryFunctionDeclaration(projectId, jobProjectId, sql.sql(), options, context);
+            if (context.applyTemporaryObjectChange(sql.sql(), projectId)) {
+                return;
+            }
+            SqlDialectTranslator.Statement statement = SqlDialectTranslator.parseStatement(sql.sql(), projectId,
+                    jobProjectId, options.defaultDatasetId());
+            QueryOptions leaf = leafOptions(context.prependTo(sql.sql()), options);
+            statement = withTemporarySetup(statement, context);
+            if (statement.kind() == SqlDialectTranslator.StatementKind.QUERY) {
+                BigQuerySqlEngine.Result result = engine.execute(
+                        request(projectId, jobProjectId, leaf.sql(), leaf, false), tables(projectId, jobLocation));
+                context.recordQueryResult(result);
+            } else {
+                job.setTotalBytesProcessed("0");
+                // A script statement writes in the job's location just like a lone statement does.
+                admitWrittenDataset(statement, jobLocation);
+                executeStatement(projectId, jobProjectId, statement, leaf, job, jobLocation);
+                context.recordBytes(Long.parseLong(job.getTotalBytesProcessed()));
+                context.clearQueryResult();
+            }
+            return;
+        }
+        SqlDialectTranslator.IfBlock conditional = (SqlDialectTranslator.IfBlock) item;
+        ScriptCondition directCondition = evaluateScriptCondition(conditional.condition(), context);
+        boolean matches;
+        if (directCondition.resolved()) {
+            matches = Boolean.TRUE.equals(directCondition.value());
+        } else {
+            BigQuerySqlEngine.Result result = engine.execute(request(projectId, jobProjectId,
+                    context.prependTo("SELECT " + expandScriptExpressionVariables(conditional.condition(),
+                            projectId, jobProjectId, options, context, jobLocation) + " AS _floci_condition"),
+                    options, false), tables(projectId, jobLocation));
+            context.recordBytes(result.totalBytesProcessed());
+            List<TableFieldSchema> conditionFields = result.schema() != null && result.schema().getFields() != null
+                    ? result.schema().getFields() : List.of();
+            if (conditionFields.size() != 1
+                    || !"BOOLEAN".equalsIgnoreCase(conditionFields.getFirst().getType())) {
+                throw QueryEngine.invalidQuery("IF condition must be a BOOL expression");
+            }
+            matches = !result.rows().isEmpty()
+                    && Boolean.TRUE.equals(result.rows().getFirst().get("_floci_condition"));
+        }
+        for (SqlDialectTranslator.ScriptItem branch : matches ? conditional.whenTrue() : conditional.whenFalse()) {
+            executeProceduralItem(projectId, jobProjectId, branch, options, job, context, jobLocation);
+        }
+    }
+
+    private static void validateTemporaryFunctionDeclaration(String projectId, String jobProjectId, String sql,
+                                                               QueryOptions options, ProceduralContext context) {
+        SqlDialectTranslator.validateTemporaryFunctionDeclaration(sql, projectId, jobProjectId,
+                options.defaultDatasetId(),
+                new SqlDialectTranslator.QueryParameters(options.queryParameters(), options.parameterMode()),
+                context.temporaryTables());
+    }
+
+    private void materializeTemporaryTable(String projectId, String jobProjectId, String sql, String name,
+                                           List<TableFieldSchema> declaredFields, QueryOptions options,
+                                           ProceduralContext context, JobLocation jobLocation, boolean dryRun) {
+        String snapshot = context.prependTo(sql + ";\nSELECT * FROM " + googleIdentifier(name));
+        QueryOptions leaf = leafOptions(snapshot, options);
+        BigQuerySqlEngine.Result result = engine.execute(request(projectId, jobProjectId, leaf.sql(), leaf, dryRun),
+                tables(projectId, jobLocation));
+        context.recordBytes(result.totalBytesProcessed());
+        if (!declaredFields.isEmpty()) {
+            result = new BigQuerySqlEngine.Result(new TableSchema(declaredFields), result.rows(),
+                    result.statementType(), result.totalBytesProcessed());
+        }
+        // "A REQUIRED field cannot store a NULL value": creating the table rejects the values an insert
+        // into it would reject.
+        RequiredFields.check(result.schema() != null ? result.schema().getFields() : List.of(), result.rows());
+        context.materializeTemporaryTable(name, result);
+    }
+
+    private void materializeTemporaryDml(String projectId, String jobProjectId, String sql, String name,
+                                         QueryOptions options, ProceduralContext context, JobLocation jobLocation,
+                                         StoredJob job) {
+        QueryOptions leaf = leafOptions(context.prependTo(sql), options);
+        BigQuerySqlEngine.Result existing = context.temporaryTableResult(name);
+        List<TableFieldSchema> targetFields = existing.schema() != null && existing.schema().getFields() != null
+                ? existing.schema().getFields() : List.of();
+        BigQuerySqlEngine.TemporaryDmlResult result = engine.executeTemporaryDml(
+                request(projectId, jobProjectId, leaf.sql(), leaf, false), tables(projectId, jobLocation), name,
+                targetFields);
+        BigQuerySqlEngine.DmlResult dml = result.dmlResult();
+        context.recordBytes(dml.totalBytesProcessed());
+        context.materializeTemporaryTable(name, new BigQuerySqlEngine.Result(result.schema(), dml.tableRows(),
+                "SELECT", dml.totalBytesProcessed()));
+        SqlDialectTranslator.Statement statement = SqlDialectTranslator.parseStatement(sql, projectId, jobProjectId,
+                options.defaultDatasetId() != null ? options.defaultDatasetId() : "_floci_temporary",
+                context.temporaryTables());
+        recordDmlStatistics(job, statement.kind(), dml);
+    }
+
+    private static SqlDialectTranslator.Statement withTemporarySetup(SqlDialectTranslator.Statement statement,
+                                                                     ProceduralContext context) {
+        if (statement.kind() == SqlDialectTranslator.StatementKind.CREATE_TABLE && statement.querySql() != null) {
+            return statement.withQuerySql(context.prependTo(statement.querySql()));
+        }
+        return statement;
+    }
+
+    private static String materializedTemporaryTable(String name, BigQuerySqlEngine.Result result) {
+        List<TableFieldSchema> fields = result.schema() != null && result.schema().getFields() != null
+                ? result.schema().getFields() : List.of();
+        StringBuilder sql = new StringBuilder("CREATE TEMP TABLE ").append(googleIdentifier(name)).append(" (");
+        for (int i = 0; i < fields.size(); i++) {
+            if (i > 0) {
+                sql.append(", ");
+            }
+            TableFieldSchema field = fields.get(i);
+            sql.append(googleIdentifier(field.getName())).append(' ').append(googleType(field));
+            if ("REQUIRED".equals(field.getMode())) {
+                sql.append(" NOT NULL");
+            }
+        }
+        sql.append(')');
+        if (result.rows().isEmpty()) {
+            return sql.toString();
+        }
+        sql.append(";\nINSERT INTO ").append(googleIdentifier(name)).append(" SELECT * FROM UNNEST([");
+        for (int rowIndex = 0; rowIndex < result.rows().size(); rowIndex++) {
+            if (rowIndex > 0) {
+                sql.append(", ");
+            }
+            Map<String, Object> row = result.rows().get(rowIndex);
+            sql.append("STRUCT(");
+            for (int fieldIndex = 0; fieldIndex < fields.size(); fieldIndex++) {
+                if (fieldIndex > 0) {
+                    sql.append(", ");
+                }
+                TableFieldSchema field = fields.get(fieldIndex);
+                sql.append(DuckTypes.storedLiteral(field, row.get(field.getName()))).append(" AS ")
+                        .append(googleIdentifier(field.getName()));
+            }
+            sql.append(')');
+        }
+        return sql.append("])").toString();
+    }
+
+    /** The type of a FOR loop's row: its query's fields, nested structs and arrays included. */
+    private static String scriptRowType(TableSchema schema) {
+        List<TableFieldSchema> fields = schema != null && schema.getFields() != null
+                ? schema.getFields() : List.of();
+        List<String> members = new ArrayList<>(fields.size());
+        try {
+            for (TableFieldSchema field : fields) {
+                members.add(quoteScriptTypeField(field.getName()) + " " + scriptVariableType(field));
+            }
+        } catch (GcpException e) {
+            // A field type a script variable cannot hold, such as GEOGRAPHY: the row stays a struct of
+            // values, which is what a loop over such a query resolved to before it kept types.
+            return "STRUCT";
+        }
+        return members.isEmpty() ? "STRUCT" : "STRUCT<" + String.join(", ", members) + ">";
+    }
+
+    private static String googleType(TableFieldSchema field) {
+        String scalar = switch (field.getType().toUpperCase(Locale.ROOT)) {
+            case "INTEGER" -> "INT64";
+            case "FLOAT" -> "FLOAT64";
+            case "BOOLEAN" -> "BOOL";
+            case "RECORD", "STRUCT" -> {
+                List<TableFieldSchema> children = field.getFields() != null ? field.getFields() : List.of();
+                List<String> members = new ArrayList<>();
+                for (TableFieldSchema child : children) {
+                    String member = googleIdentifier(child.getName()) + " " + googleType(child);
+                    if ("REQUIRED".equals(child.getMode())) {
+                        member += " NOT NULL";
+                    }
+                    members.add(member);
+                }
+                yield "STRUCT<" + String.join(", ", members) + ">";
+            }
+            default -> field.getType().toUpperCase(Locale.ROOT);
+        };
+        return "REPEATED".equals(field.getMode()) ? "ARRAY<" + scalar + ">" : scalar;
+    }
+
+    private static String googleIdentifier(String value) {
+        return '`' + value.replace("`", "\\`") + '`';
+    }
+
+    private static boolean handlesLoopSignal(LoopControlSignal signal, String label) {
+        return signal.label == null || label != null && label.equalsIgnoreCase(signal.label);
+    }
+
+    private static final class LoopControlSignal extends RuntimeException {
+        private final boolean continueLoop;
+        private final String label;
+
+        private LoopControlSignal(boolean continueLoop, String label) {
+            super(null, null, false, false);
+            this.continueLoop = continueLoop;
+            this.label = label;
+        }
+    }
+
+    /** Request-local objects are replayed before each selected procedural leaf because every
+     * sidecar call owns a fresh in-memory DuckDB connection. */
+    private static final class ProceduralContext {
+        private final Map<String, String> setupObjects = new LinkedHashMap<>();
+        private final Map<String, Object> variables = new LinkedHashMap<>();
+        private final Map<String, String> variableTypes = new LinkedHashMap<>();
+        private final Set<String> temporaryTables = new LinkedHashSet<>();
+        private final Set<String> temporaryFunctions = new LinkedHashSet<>();
+        private final Map<String, BigQuerySqlEngine.Result> temporaryTableResults = new LinkedHashMap<>();
+        private long totalBytesProcessed;
+        private BigQuerySqlEngine.Result lastQueryResult;
+        private boolean dynamicSqlExecution;
+
+        private ProceduralContext dynamicSqlChild() {
+            ProceduralContext child = new ProceduralContext();
+            child.setupObjects.putAll(setupObjects);
+            child.temporaryTables.addAll(temporaryTables);
+            child.temporaryFunctions.addAll(temporaryFunctions);
+            child.temporaryTableResults.putAll(temporaryTableResults);
+            child.dynamicSqlExecution = true;
+            return child;
+        }
+
+        private void mergeDynamicSqlContext(ProceduralContext child) {
+            setupObjects.clear();
+            setupObjects.putAll(child.setupObjects);
+            temporaryTables.clear();
+            temporaryTables.addAll(child.temporaryTables);
+            temporaryFunctions.clear();
+            temporaryFunctions.addAll(child.temporaryFunctions);
+            temporaryTableResults.clear();
+            temporaryTableResults.putAll(child.temporaryTableResults);
+            totalBytesProcessed += child.totalBytesProcessed;
+            lastQueryResult = child.lastQueryResult;
+        }
+
+        private boolean dynamicSqlExecution() {
+            return dynamicSqlExecution;
+        }
+
+        private boolean applyTemporaryObjectChange(String sql, String projectId) {
+            SqlDialectTranslator.TemporaryFunctionDefinition function =
+                    SqlDialectTranslator.temporaryFunctionDefinition(sql);
+            if (function != null) {
+                String normalized = function.name().toLowerCase(Locale.ROOT);
+                if (temporaryFunctions.contains(normalized)) {
+                    if (function.ifNotExists()) {
+                        clearQueryResult();
+                        return true;
+                    }
+                    if (!function.orReplace()) {
+                        throw QueryEngine.invalidQuery("Already Exists: Function " + function.name());
+                    }
+                    setupObjects.remove("function:" + normalized);
+                }
+                temporaryFunctions.add(normalized);
+                setupObjects.put("function:" + normalized, sql);
+                clearQueryResult();
+                return true;
+            }
+            SqlDialectTranslator.TemporaryTableDrop drop = SqlDialectTranslator.temporaryTableDrop(sql);
+            if (drop != null && temporaryTables.contains(drop.name())) {
+                temporaryTables.remove(drop.name());
+                setupObjects.remove("table:" + drop.name());
+                temporaryTableResults.remove(drop.name());
+                clearQueryResult();
+                return true;
+            }
+            if (drop != null && drop.sessionQualified()) {
+                if (!drop.ifExists()) {
+                    throw GcpException.notFound("Not found: Dataset " + projectId
+                            + ":_SESSION was not found");
+                }
+                clearQueryResult();
+                return true;
+            }
+            return false;
+        }
+
+        private void materializeTemporaryTable(String name, BigQuerySqlEngine.Result result) {
+            temporaryTables.add(name);
+            temporaryTableResults.put(name, result);
+            setupObjects.put("table:" + name, BigQueryService.materializedTemporaryTable(name, result));
+            clearQueryResult();
+        }
+
+        private long truncateTemporaryTable(String name) {
+            BigQuerySqlEngine.Result existing = temporaryTableResults.get(name);
+            if (existing == null) {
+                throw new IllegalStateException("Temporary table was not materialized: " + name);
+            }
+            long removed = existing.rows().size();
+            materializeTemporaryTable(name, new BigQuerySqlEngine.Result(
+                    existing.schema(), List.of(), existing.statementType(), existing.totalBytesProcessed()));
+            return removed;
+        }
+
+        private void recordQueryResult(BigQuerySqlEngine.Result result) {
+            recordBytes(result.totalBytesProcessed());
+            lastQueryResult = result;
+        }
+
+        private void recordBytes(long bytes) {
+            totalBytesProcessed += bytes;
+        }
+
+        private void clearQueryResult() {
+            lastQueryResult = null;
+        }
+
+        private BigQuerySqlEngine.Result lastQueryResult() {
+            return lastQueryResult;
+        }
+
+        private long totalBytesProcessed() {
+            return totalBytesProcessed;
+        }
+
+        private Set<String> temporaryTables() {
+            return temporaryTables;
+        }
+
+        private Map<String, Object> variables() {
+            return variables;
+        }
+
+        private Map<String, String> variableTypes() {
+            return variableTypes;
+        }
+
+        private BigQuerySqlEngine.Result temporaryTableResult(String name) {
+            BigQuerySqlEngine.Result result = temporaryTableResults.get(name);
+            if (result == null) {
+                throw new IllegalStateException("Temporary table was not materialized: " + name);
+            }
+            return result;
+        }
+
+        private List<TableFieldSchema> temporaryTableColumns(String name) {
+            BigQuerySqlEngine.Result result = temporaryTableResults.get(name);
+            return result != null && result.schema() != null && result.schema().getFields() != null
+                    ? result.schema().getFields() : List.of();
+        }
+
+        private String prependTo(String sql) {
+            return setupObjects.isEmpty() ? sql : String.join(";\n", setupObjects.values()) + ";\n" + sql;
+        }
+    }
+
+    private static QueryOptions leafOptions(String sql, QueryOptions parent) {
+        return new QueryOptions(sql, parent.defaultDatasetId(), parent.queryParameters(), parent.parameterMode(),
+                parent.dryRun(), parent.useLegacySql());
     }
 
     /** A CREATE TABLE or CREATE VIEW derives its schema, so BigQuery rejects a repeated select name. */
@@ -1107,9 +4726,7 @@ public class BigQueryService {
         if (parameters == null || parameters.isEmpty()) {
             return options;
         }
-        boolean positional = "POSITIONAL".equalsIgnoreCase(options.parameterMode())
-                || parameters.getFirst().get("name") == null;
-        if (!positional) {
+        if (!options.positionalParameters()) {
             return options;
         }
         int from = Math.min(expression.firstParameter(), parameters.size());
@@ -1117,7 +4734,8 @@ public class BigQueryService {
         return new QueryOptions(options.sql(), options.defaultDatasetId(), parameters.subList(from, to),
                 options.parameterMode(), options.dryRun(), options.useLegacySql(), options.destinationTable(),
                 options.writeDisposition(), options.createDisposition(), options.schemaUpdateOptions(),
-                options.timePartitioning(), options.rangePartitioning(), options.defaultProjectId());
+                options.timePartitioning(), options.rangePartitioning(), options.defaultProjectId(),
+                options.scriptIncompatibleOptions());
     }
 
     private static void applyTableOptions(Table table, Map<String, Object> options) {
@@ -1153,22 +4771,7 @@ public class BigQueryService {
                 BigQuerySqlEngine.DmlResult result = engine.executeDml(request(projectId, jobProjectId,
                         options.sql(), options, false), tables(projectId, jobLocation));
                 replaceRows(projectId, target, result.tableRows());
-                job.setTotalBytesProcessed(String.valueOf(result.totalBytesProcessed()));
-                job.setNumDmlAffectedRows(String.valueOf(result.affectedRows()));
-                Map<String, String> stats = new LinkedHashMap<>();
-                if (statement.kind() == SqlDialectTranslator.StatementKind.INSERT
-                        || statement.kind() == SqlDialectTranslator.StatementKind.MERGE) {
-                    stats.put("insertedRowCount", String.valueOf(result.insertedRows()));
-                }
-                if (statement.kind() == SqlDialectTranslator.StatementKind.UPDATE
-                        || statement.kind() == SqlDialectTranslator.StatementKind.MERGE) {
-                    stats.put("updatedRowCount", String.valueOf(result.updatedRows()));
-                }
-                if (statement.kind() == SqlDialectTranslator.StatementKind.DELETE
-                        || statement.kind() == SqlDialectTranslator.StatementKind.MERGE) {
-                    stats.put("deletedRowCount", String.valueOf(result.deletedRows()));
-                }
-                job.setDmlStats(stats);
+                recordDmlStatistics(job, statement.kind(), result);
             }
             case TRUNCATE -> {
                 Table table = getTable(projectId, target.datasetId(), target.tableId());
@@ -1232,6 +4835,31 @@ public class BigQueryService {
             }
             default -> throw QueryEngine.invalidQuery("Unsupported statement " + statement.statementType());
         }
+    }
+
+    private static void clearStatementStatistics(StoredJob job) {
+        job.setNumDmlAffectedRows(null);
+        job.setDmlStats(null);
+        job.setDdlOperationPerformed(null);
+        job.setDdlTargetTable(null);
+        job.setDdlTargetDataset(null);
+    }
+
+    private static void recordDmlStatistics(StoredJob job, SqlDialectTranslator.StatementKind kind,
+                                            BigQuerySqlEngine.DmlResult result) {
+        job.setTotalBytesProcessed(String.valueOf(result.totalBytesProcessed()));
+        job.setNumDmlAffectedRows(String.valueOf(result.affectedRows()));
+        Map<String, String> stats = new LinkedHashMap<>();
+        if (kind == SqlDialectTranslator.StatementKind.INSERT || kind == SqlDialectTranslator.StatementKind.MERGE) {
+            stats.put("insertedRowCount", String.valueOf(result.insertedRows()));
+        }
+        if (kind == SqlDialectTranslator.StatementKind.UPDATE || kind == SqlDialectTranslator.StatementKind.MERGE) {
+            stats.put("updatedRowCount", String.valueOf(result.updatedRows()));
+        }
+        if (kind == SqlDialectTranslator.StatementKind.DELETE || kind == SqlDialectTranslator.StatementKind.MERGE) {
+            stats.put("deletedRowCount", String.valueOf(result.deletedRows()));
+        }
+        job.setDmlStats(stats);
     }
 
     private void createFromStatement(String projectId, String jobProjectId, SqlDialectTranslator.Statement statement,

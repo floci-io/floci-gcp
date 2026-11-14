@@ -62,6 +62,335 @@ class SqlDialectTranslatorTest {
         return e;
     }
 
+    // ── Scripts ──────────────────────────────────────────────────────────────
+
+    @Test
+    void scriptCreatesTemporaryObjectsBeforeTheFinalQuery() {
+        SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript("""
+                CREATE TEMP TABLE values_table AS SELECT 1 AS value;
+                CREATE TEMP FUNCTION add_one(value INT64) RETURNS INT64 AS (value + 1);
+                SELECT add_one(value) AS answer FROM values_table;
+                """, "test-project", null, SqlDialectTranslator.QueryParameters.none());
+
+        assertTrue(script.setupSql().contains("CREATE TEMP TABLE \"values_table\" AS (SELECT 1 AS value);"),
+                script.setupSql());
+        assertTrue(script.setupSql().contains("CREATE TEMP MACRO \"add_one\"(\"_floci_udf_arg_0\")"),
+                script.setupSql());
+        assertEquals("SELECT add_one(value) AS answer FROM \"values_table\"", script.sql());
+        assertTrue(script.tables().isEmpty());
+        assertEquals(SqlDialectTranslator.StatementKind.QUERY, script.finalStatement().kind());
+    }
+
+    @Test
+    void scriptTemporaryTableDmlRemainsRequestLocal() {
+        SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript("""
+                CREATE TEMP TABLE working AS SELECT 1 AS id;
+                INSERT INTO working VALUES (2);
+                SELECT id FROM working ORDER BY id;
+                """, "test-project", "ds", SqlDialectTranslator.QueryParameters.none());
+
+        assertTrue(script.setupSql().contains("INSERT INTO \"working\" VALUES (2);"), script.setupSql());
+        assertEquals("SELECT id FROM \"working\" ORDER BY id", script.sql());
+        assertFalse(script.tables().contains(new SqlDialectTranslator.TableRef("ds", "working")));
+    }
+
+    @Test
+    void scriptQueriesResolvePhysicalColumnsBeforeCorrelatedRangeVariables() {
+        SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript(
+                "SELECT (SELECT item.x FROM ds.local) AS x"
+                        + " FROM UNNEST([STRUCT(1 AS x)]) item WITH OFFSET AS pos",
+                "test-project", null, SqlDialectTranslator.QueryParameters.none(), ref -> Set.of("item"));
+
+        assertTrue(script.sql().contains("SELECT item.x FROM"), script.sql());
+    }
+
+    @Test
+    void proceduralBeginBlocksCanNestAndContainIfStatements() {
+        SqlDialectTranslator.ProceduralScript script = SqlDialectTranslator.proceduralScript("""
+                BEGIN
+                  SELECT 1;
+                  BEGIN
+                    IF TRUE THEN SELECT 2; END IF;
+                  END;
+                END;
+                """);
+
+        SqlDialectTranslator.BeginBlock outer = (SqlDialectTranslator.BeginBlock) script.items().getFirst();
+        SqlDialectTranslator.BeginBlock inner = (SqlDialectTranslator.BeginBlock) outer.items().get(1);
+        assertEquals(2, outer.items().size());
+        assertTrue(inner.items().getFirst() instanceof SqlDialectTranslator.IfBlock);
+    }
+
+    @Test
+    void proceduralBlockNestingIsLimitedToFiftyLevels() {
+        StringBuilder allowed = new StringBuilder();
+        for (int level = 0; level < 50; level++) {
+            allowed.append("BEGIN ");
+        }
+        allowed.append("SELECT * FROM ds1.t1;");
+        for (int level = 0; level < 50; level++) {
+            allowed.append(" END;");
+        }
+        SqlDialectTranslator.proceduralScript(allowed.toString());
+
+        StringBuilder rejected = new StringBuilder("BEGIN ").append(allowed);
+        rejected.append(" END;");
+        GcpException error = assertThrows(GcpException.class,
+                () -> SqlDialectTranslator.proceduralScript(rejected.toString()));
+        assertTrue(error.getMessage().contains("50 levels"));
+    }
+
+    @Test
+    void proceduralSimpleCaseParsesTheSearchExpression() {
+        SqlDialectTranslator.ProceduralScript script = SqlDialectTranslator.proceduralScript("""
+                CASE target_age
+                  WHEN 24 THEN SELECT 1;
+                  WHEN 25 THEN SELECT 2;
+                END CASE;
+                """);
+
+        SqlDialectTranslator.CaseBlock caseBlock = (SqlDialectTranslator.CaseBlock) script.items().getFirst();
+        assertEquals("target_age", caseBlock.expression());
+        assertEquals("target_age = 25", caseBlock.condition(caseBlock.branches().get(1)));
+    }
+
+    @Test
+    void proceduralSimpleCaseGroupsTheWhenOperandBeforeComparing() {
+        // Live BigQuery returns the ELSE branch here: a simple CASE compares the whole WHEN operand,
+        // so FALSE = (FALSE OR TRUE) is false, not FALSE = FALSE OR TRUE.
+        SqlDialectTranslator.ProceduralScript script = SqlDialectTranslator.proceduralScript("""
+                CASE FALSE
+                  WHEN FALSE OR TRUE THEN SELECT 1;
+                  ELSE SELECT 2;
+                END CASE;
+                """);
+
+        SqlDialectTranslator.CaseBlock caseBlock = (SqlDialectTranslator.CaseBlock) script.items().getFirst();
+        assertEquals("FALSE = (FALSE OR TRUE)", caseBlock.condition(caseBlock.branches().getFirst()));
+    }
+
+    @Test
+    void proceduralCaseParsesWhenBranchesAndOptionalElse() {
+        SqlDialectTranslator.ProceduralScript script = SqlDialectTranslator.proceduralScript("""
+                CASE
+                  WHEN TRUE THEN SELECT 1;
+                  WHEN FALSE THEN SELECT 2;
+                  ELSE SELECT 3;
+                END CASE;
+                """);
+
+        SqlDialectTranslator.CaseBlock caseBlock = (SqlDialectTranslator.CaseBlock) script.items().getFirst();
+        assertEquals(2, caseBlock.branches().size());
+        assertEquals("TRUE", caseBlock.branches().getFirst().condition());
+        assertEquals(1, caseBlock.otherwise().size());
+    }
+
+    @Test
+    void proceduralLabelsAttachToLoopsAndLabeledControlStatements() {
+        SqlDialectTranslator.ProceduralScript script = SqlDialectTranslator.proceduralScript("""
+                `outer.loop`: LOOP
+                  WHILE TRUE DO
+                    BREAK `outer.loop`;
+                  END WHILE;
+                END LOOP `outer.loop`;
+                """);
+
+        SqlDialectTranslator.LoopBlock loop = (SqlDialectTranslator.LoopBlock) script.items().getFirst();
+        SqlDialectTranslator.WhileBlock nested = (SqlDialectTranslator.WhileBlock) loop.items().getFirst();
+        SqlDialectTranslator.LoopControl control = (SqlDialectTranslator.LoopControl) nested.items().getFirst();
+        assertEquals("outer.loop", loop.label());
+        assertEquals("outer.loop", control.label());
+    }
+
+    @Test
+    void proceduralForParsesQueryAndLoopBody() {
+        SqlDialectTranslator.ProceduralScript script = SqlDialectTranslator.proceduralScript("""
+                FOR row_record IN (SELECT age FROM ds1.t1) DO
+                  SELECT * FROM ds1.t1 WHERE age = row_record.age;
+                END FOR;
+                """);
+
+        SqlDialectTranslator.ForBlock loop = (SqlDialectTranslator.ForBlock) script.items().getFirst();
+        assertEquals("row_record", loop.variable());
+        assertEquals("SELECT age FROM ds1.t1", loop.query());
+        assertEquals(1, loop.items().size());
+    }
+
+    @Test
+    void proceduralRepeatParsesUntilConditionAndLoopTerminator() {
+        SqlDialectTranslator.ProceduralScript script = SqlDialectTranslator.proceduralScript("""
+                REPEAT
+                  SET counter = counter + 1;
+                UNTIL counter >= 3
+                END REPEAT;
+                """);
+
+        SqlDialectTranslator.RepeatBlock loop = (SqlDialectTranslator.RepeatBlock) script.items().getFirst();
+        assertEquals("counter >= 3", loop.condition());
+        assertEquals(1, loop.items().size());
+    }
+
+    @Test
+    void proceduralWhileParsesLoopControlLabels() {
+        SqlDialectTranslator.ProceduralScript script = SqlDialectTranslator.proceduralScript("""
+                WHILE TRUE DO
+                  CONTINUE;
+                  BREAK;
+                END WHILE;
+                """);
+        SqlDialectTranslator.WhileBlock loop = (SqlDialectTranslator.WhileBlock) script.items().getFirst();
+        assertTrue(((SqlDialectTranslator.LoopControl) loop.items().getFirst()).continueLoop());
+        SqlDialectTranslator.LoopControl breakStatement =
+                (SqlDialectTranslator.LoopControl) loop.items().get(1);
+        assertFalse(breakStatement.continueLoop());
+        SqlDialectTranslator.ProceduralScript labeled = SqlDialectTranslator.proceduralScript(
+                "outer_loop: WHILE TRUE DO BREAK outer_loop; END WHILE outer_loop;");
+        SqlDialectTranslator.WhileBlock labeledLoop = (SqlDialectTranslator.WhileBlock) labeled.items().getFirst();
+        assertEquals("outer_loop", ((SqlDialectTranslator.LoopControl) labeledLoop.items().getFirst()).label());
+    }
+
+    @Test
+    void proceduralBeginBlocksRejectMissingEndAndTransactions() {
+        assertThrows(GcpException.class, () -> SqlDialectTranslator.proceduralScript("BEGIN SELECT 1;"));
+        GcpException transaction = assertThrows(GcpException.class,
+                () -> SqlDialectTranslator.proceduralScript("BEGIN TRANSACTION; SELECT 1; END;"));
+        assertEquals("invalidQuery", transaction.getReason());
+    }
+
+    @Test
+    void proceduralElseIfPreservesNestedControlFlow() {
+        SqlDialectTranslator.ProceduralScript script = SqlDialectTranslator.proceduralScript("""
+                IF first_condition THEN
+                  SELECT 1;
+                ELSEIF CASE WHEN TRUE THEN second_condition ELSE FALSE END THEN
+                  SELECT 2;
+                ELSE
+                  SELECT 3;
+                END IF;
+                """);
+
+        SqlDialectTranslator.IfBlock first = (SqlDialectTranslator.IfBlock) script.items().getFirst();
+        SqlDialectTranslator.IfBlock second = (SqlDialectTranslator.IfBlock) first.whenFalse().getFirst();
+        assertEquals("first_condition", first.condition());
+        assertTrue(second.condition().contains("CASE WHEN TRUE"));
+        assertEquals(1, second.whenFalse().size());
+    }
+
+    @Test
+    void temporaryTruncateRecognizesOnlyRequestLocalNames() {
+        Set<String> temporaryTables = Set.of("working");
+        assertEquals("working", SqlDialectTranslator.temporaryTruncateTarget(
+                "TRUNCATE TABLE working", temporaryTables));
+        assertEquals("working", SqlDialectTranslator.temporaryTruncateTarget(
+                "TRUNCATE TABLE _SESSION.working", temporaryTables));
+        assertNull(SqlDialectTranslator.temporaryTruncateTarget("TRUNCATE TABLE ds.working", temporaryTables));
+    }
+
+    @Test
+    void temporaryTablesPreserveDeclaredSchemasAndSessionQualification() {
+        SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript("""
+                CREATE TEMP TABLE _SESSION.working (renamed INT64 NOT NULL) AS SELECT 1 AS original;
+                INSERT INTO _SESSION.working VALUES (2);
+                SELECT renamed FROM _SESSION.working ORDER BY renamed;
+                """, "test-project", null, SqlDialectTranslator.QueryParameters.none());
+
+        assertTrue(script.setupSql().contains("CREATE TEMP TABLE \"working\" (\"renamed\" BIGINT NOT NULL);"),
+                script.setupSql());
+        assertTrue(script.setupSql().contains("INSERT INTO \"working\" SELECT 1 AS original;"), script.setupSql());
+        assertTrue(script.setupSql().contains("INSERT INTO \"working\" VALUES (2);"), script.setupSql());
+        assertEquals("SELECT renamed FROM \"working\" ORDER BY renamed", script.sql());
+    }
+
+    @Test
+    void schemaOnlyTemporaryTablesAreAccepted() {
+        SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript("""
+                CREATE TEMP TABLE empty_table (id INT64, payload BYTES);
+                SELECT * FROM empty_table;
+                """, "test-project", null, SqlDialectTranslator.QueryParameters.none());
+
+        assertTrue(script.setupSql().contains(
+                "CREATE TEMP TABLE \"empty_table\" (\"id\" BIGINT, \"payload\" BLOB);"), script.setupSql());
+    }
+
+    @Test
+    void sessionQualifiedTemporaryDmlCanEndAScript() {
+        SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript("""
+                CREATE TEMP TABLE working (id INT64);
+                INSERT INTO _SESSION.working VALUES (1);
+                """, "test-project", null, SqlDialectTranslator.QueryParameters.none());
+
+        assertEquals("INSERT INTO \"working\" VALUES (1)", script.sql());
+        assertEquals(SqlDialectTranslator.StatementKind.INSERT, script.finalStatement().kind());
+    }
+
+    @Test
+    void missingSessionTemporaryTableDoesNotFallBackToAPhysicalDataset() {
+        GcpException e = assertThrows(GcpException.class, () -> SqlDialectTranslator.translateScript(
+                "SELECT * FROM _SESSION.missing", "test-project", "ds",
+                SqlDialectTranslator.QueryParameters.none()));
+        // BigQuery answers with a not-found dataset, not with a query error; the JSON reason is
+        // derived from the status.
+        assertEquals(404, e.getHttpStatus());
+        assertEquals("NOT_FOUND", e.getGcpStatus());
+        assertEquals("Not found: Dataset test-project:_SESSION was not found", e.getMessage());
+    }
+
+    @Test
+    void temporaryFunctionPreambleIsNotAMultiStatementScript() {
+        assertFalse(SqlDialectTranslator.multiStatementScript("""
+                CREATE TEMP FUNCTION add_one(x INT64) AS (x + 1);
+                SELECT add_one(1);
+                """));
+        assertTrue(SqlDialectTranslator.multiStatementScript("SELECT 1; SELECT 2"));
+    }
+
+    @Test
+    void aRequestOfOneProceduralStatementIsAScript() {
+        // BigQuery runs a lone declaration, assignment or block as a script and answers with no rows;
+        // a lone query, or DDL that needs a session, stays an ordinary statement.
+        assertTrue(SqlDialectTranslator.singleStatementScript("DECLARE x INT64;"));
+        assertTrue(SqlDialectTranslator.singleStatementScript("SET x = 1;"));
+        assertTrue(SqlDialectTranslator.singleStatementScript("BREAK;"));
+        // A block spans several statements, which the multi-statement check already routes.
+        assertTrue(SqlDialectTranslator.multiStatementScript("WHILE FALSE DO SET x = 1; END WHILE;"));
+        assertFalse(SqlDialectTranslator.singleStatementScript("SELECT 1"));
+        assertFalse(SqlDialectTranslator.singleStatementScript("SELECT 1; SELECT 2"));
+        assertFalse(SqlDialectTranslator.singleStatementScript("CREATE TEMP TABLE t (x INT64);"));
+    }
+
+    @Test
+    void aPositionalParameterInOneDynamicStatementBindsThroughPrependedTemporarySetup() {
+        List<Map<String, Object>> parameters = List.of(Map.of(
+                "parameterType", Map.of("type", "INT64"),
+                "parameterValue", Map.of("value", "1")));
+
+        SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript("""
+                CREATE TEMP TABLE working (id INT64);
+                SELECT ? AS value;
+                """, "test-project", null, new SqlDialectTranslator.QueryParameters(parameters, "POSITIONAL"));
+
+        assertTrue(script.sql().contains("CAST(1 AS BIGINT)"), script.sql());
+    }
+
+    @Test
+    void scriptsRejectEmptyStatementsButAllowOneTrailingDelimiter() {
+        assertTrue(SqlDialectTranslator.multiStatementScript("SELECT 1; SELECT 2;"));
+        assertThrows(GcpException.class,
+                () -> SqlDialectTranslator.multiStatementScript("SELECT 1;; SELECT 2"));
+        assertThrows(GcpException.class,
+                () -> SqlDialectTranslator.proceduralScript("IF TRUE THEN ; SELECT 1; END IF;"));
+    }
+
+    @Test
+    void sessionQualifiedTemporaryDropRetainsIfExistsIntent() {
+        SqlDialectTranslator.TemporaryTableDrop drop =
+                SqlDialectTranslator.temporaryTableDrop("DROP TABLE IF EXISTS _SESSION.missing");
+
+        assertEquals("missing", drop.name());
+        assertTrue(drop.ifExists());
+        assertTrue(drop.sessionQualified());
+    }
+
     @Test
     void createTableCopyCapturesItsSource() {
         SqlDialectTranslator.Statement statement = SqlDialectTranslator.parseStatement(
@@ -94,6 +423,189 @@ class SqlDialectTranslatorTest {
                     "CREATE TABLE ds.destination COPY ds.source " + suffix, "test-project", null));
             assertEquals("invalidQuery", error.getReason());
         }
+    }
+
+    @Test
+    void scriptsKeepTemporaryObjectsInSourceOrder() {
+        SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript("""
+                CREATE TEMP TABLE first_round AS SELECT id FROM source_rows;
+                SELECT COUNT(*) FROM first_round;
+                CREATE OR REPLACE TEMP TABLE first_round AS SELECT id + 1 AS id FROM first_round;
+                CREATE TEMP FUNCTION add_one(value ANY TYPE) AS (value + 1);
+                CREATE TEMP TABLE second_round AS SELECT add_one(id) AS id FROM first_round;
+                DROP TABLE second_round;
+                SELECT id FROM first_round;
+                """, "test-project", "ds", SqlDialectTranslator.QueryParameters.none());
+
+        assertEquals("SELECT id FROM \"first_round\"", script.sql());
+        assertTrue(script.setupSql().contains(
+                "CREATE TEMP TABLE \"first_round\" AS (SELECT id FROM \"ds\".\"source_rows\");"),
+                script.setupSql());
+        assertTrue(script.setupSql().contains("CREATE OR REPLACE TEMP TABLE \"first_round\" AS "
+                + "(SELECT id + 1 AS id FROM \"first_round\");"), script.setupSql());
+        assertTrue(script.setupSql().contains("CREATE TEMP MACRO \"add_one\"(\"_floci_udf_arg_0\")"
+                + " AS (\"_floci_udf_arg_0\" + 1)"),
+                script.setupSql());
+        assertTrue(script.setupSql().contains("CREATE TEMP TABLE \"second_round\" AS "
+                + "(SELECT add_one(id) AS id FROM \"first_round\");\nDROP TABLE \"second_round\";"),
+                script.setupSql());
+        assertEquals(Set.of(new SqlDialectTranslator.TableRef("ds", "source_rows")), script.tables());
+    }
+
+    @Test
+    void qualifiedPhysicalTablesDoNotResolveToTemporaryTables() {
+        SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript("""
+                CREATE TEMP TABLE t AS SELECT 1 AS id;
+                SELECT '"ds"."t"' AS label, id FROM ds.t;
+                """, "test-project", "ds", SqlDialectTranslator.QueryParameters.none());
+
+        assertTrue(script.sql().contains("FROM \"ds\".\"t\""), script.sql());
+        assertTrue(script.sql().contains("'\"ds\".\"t\"'"), script.sql());
+        assertEquals(Set.of(new SqlDialectTranslator.TableRef("ds", "t")), script.tables());
+    }
+
+    @Test
+    void temporaryFunctionLogicalOperatorsPreservePrecedenceAndThreeValuedLogic() {
+        SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript("""
+                CREATE TEMP FUNCTION predicate(a BOOL, b BOOL, c BOOL) AS (a OR b AND c);
+                SELECT predicate(TRUE, FALSE, FALSE);
+                """, "test-project", null, SqlDialectTranslator.QueryParameters.none());
+
+        assertTrue(script.setupSql().contains(
+                "CASE (CAST(\"_floci_udf_arg_0\" AS BOOLEAN)) WHEN TRUE THEN TRUE"), script.setupSql());
+        assertTrue(script.setupSql().contains(
+                "CASE (CAST(\"_floci_udf_arg_1\" AS BOOLEAN)) WHEN FALSE THEN FALSE"), script.setupSql());
+    }
+
+    @Test
+    void temporaryFunctionTranslatesStructsAndDeclaredTypes() {
+        SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript("""
+                CREATE TEMP FUNCTION pick(id STRING, name STRING) RETURNS
+                  STRUCT<id STRING, display_name STRING> AS (
+                  SELECT AS STRUCT id, name || '_display' display_name
+                );
+                SELECT pick('id1', 'name1') AS value;
+                """, "test-project", null, SqlDialectTranslator.QueryParameters.none());
+
+        assertTrue(script.setupSql().contains(
+                "SELECT {'id': CAST(\"_floci_udf_arg_0\" AS VARCHAR), 'display_name': "
+                        + "CAST(\"_floci_udf_arg_1\" AS VARCHAR) || '_display'}"), script.setupSql());
+        assertTrue(script.setupSql().contains(
+                "AS STRUCT(\"id\" VARCHAR, \"display_name\" VARCHAR)"),
+                script.setupSql());
+    }
+
+    @Test
+    void temporaryFunctionCtesRemainInScope() {
+        SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript("""
+                CREATE TEMP FUNCTION normalize(items ARRAY<STRING>) AS ((
+                  WITH unnested AS (SELECT value FROM UNNEST(items) value)
+                  SELECT ARRAY_AGG(value) FROM unnested
+                ));
+                SELECT normalize(['value']) AS result;
+                """, "test-project", null, SqlDialectTranslator.QueryParameters.none());
+
+        assertTrue(script.setupSql().contains("FROM \"unnested\""), script.setupSql());
+    }
+
+    @Test
+    void temporaryFunctionSubqueryAliasesShadowParameters() {
+        SqlDialectTranslator.ScriptTranslation explicit = SqlDialectTranslator.translateScript("""
+                CREATE TEMP FUNCTION f(x INT64) AS ((SELECT x FROM UNNEST([2]) AS x));
+                SELECT f(1) AS value;
+                """, "test-project", null, SqlDialectTranslator.QueryParameters.none());
+        assertTrue(explicit.setupSql().contains("SELECT x FROM UNNEST([2]) AS"), explicit.setupSql());
+        assertFalse(explicit.setupSql().contains("SELECT CAST(\"_floci_udf_arg_0\" AS BIGINT) FROM"),
+                explicit.setupSql());
+
+        SqlDialectTranslator.ScriptTranslation implicit = SqlDialectTranslator.translateScript("""
+                CREATE TEMP FUNCTION f(x INT64) AS ((SELECT x FROM UNNEST([2]) x));
+                SELECT f(1) AS value;
+                """, "test-project", null, SqlDialectTranslator.QueryParameters.none());
+        assertTrue(implicit.setupSql().contains("SELECT x FROM UNNEST([2]) AS"), implicit.setupSql());
+        assertFalse(implicit.setupSql().contains("SELECT CAST(\"_floci_udf_arg_0\" AS BIGINT) FROM"),
+                implicit.setupSql());
+    }
+
+    @Test
+    void temporaryFunctionTableColumnsShadowArguments() {
+        SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript("""
+                CREATE TEMP TABLE input_rows AS SELECT 2 AS x;
+                CREATE TEMP FUNCTION f(x INT64) AS ((SELECT x FROM input_rows));
+                SELECT f(1) AS value;
+                """, "test-project", null, SqlDialectTranslator.QueryParameters.none());
+
+        assertTrue(script.setupSql().contains("SELECT x FROM \"input_rows\""), script.setupSql());
+        assertTrue(script.setupSql().contains(
+                "VALUES (CAST(\"_floci_udf_arg_0\" AS BIGINT))"), script.setupSql());
+        assertTrue(script.setupSql().contains("\"_floci_udf_parameters\"(\"x\")"), script.setupSql());
+    }
+
+    @Test
+    void temporaryFunctionArgumentFieldCanMatchParameterName() {
+        SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript("""
+                CREATE TEMP FUNCTION classify(category STRING) AS (
+                  CASE WHEN STARTS_WITH(category, 'known') THEN 'recognized' ELSE 'other' END
+                );
+                SELECT classify(item.category)
+                FROM UNNEST([STRUCT('known-value' AS category)]) item;
+                """, "test-project", null, SqlDialectTranslator.QueryParameters.none());
+
+        assertTrue(script.setupSql().contains(
+                "STARTS_WITH(CAST(\"_floci_udf_arg_0\" AS VARCHAR), 'known')"), script.setupSql());
+        assertFalse(script.setupSql().contains("_floci_udf_parameters"), script.setupSql());
+    }
+
+    @Test
+    void nestedTemporaryFunctionsAvoidCorrelatedParameterRelations() {
+        SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript("""
+                CREATE TEMP FUNCTION classify(category STRING) AS (
+                  CASE WHEN STARTS_WITH(category, 'known') THEN 'recognized' ELSE 'other' END
+                );
+                CREATE TEMP FUNCTION bucket_entries(entries ARRAY<STRUCT<category STRING, enabled BOOL>>)
+                RETURNS ARRAY<STRUCT<key STRING, value INT64>> AS (ARRAY(
+                  SELECT STRUCT(
+                    ARRAY_TO_STRING([classify(item.category), CAST(item.enabled AS STRING)], ':') AS key,
+                    COUNT(1) AS value)
+                  FROM UNNEST(entries) item
+                  GROUP BY classify(item.category), item.category, item.enabled
+                ));
+                CREATE TEMP FUNCTION combine_entries(entries ARRAY<STRUCT<category STRING, enabled BOOL>>)
+                RETURNS ARRAY<STRUCT<key STRING, value INT64>> AS (bucket_entries(entries));
+                WITH source AS (
+                  SELECT [STRUCT('known-value' AS category, TRUE AS enabled)] AS entries
+                )
+                SELECT key, SUM(value)
+                FROM source, UNNEST(combine_entries(source.entries))
+                GROUP BY key;
+                """, "test-project", null, SqlDialectTranslator.QueryParameters.none());
+
+        assertFalse(script.setupSql().contains("_floci_udf_parameters"), script.setupSql());
+        assertTrue(script.setupSql().contains(
+                "UNNEST(CAST(\"_floci_udf_arg_0\" AS STRUCT(\"category\" VARCHAR, \"enabled\" BOOLEAN)[]))"),
+                script.setupSql());
+    }
+
+    @Test
+    void temporaryFunctionParametersDoNotReplaceDateParts() {
+        SqlDialectTranslator.ScriptTranslation extract = SqlDialectTranslator.translateScript("""
+                CREATE TEMP FUNCTION f(day INT64, ts TIMESTAMP)
+                AS (EXTRACT(DAY FROM TIMESTAMP_TRUNC(ts, DAY)) + day);
+                SELECT f(1, TIMESTAMP '2026-10-01 00:00:00+00');
+                """, "test-project", null, SqlDialectTranslator.QueryParameters.none());
+        assertTrue(extract.setupSql().contains(
+                "date_trunc('day', timezone('UTC', CAST(\"_floci_udf_arg_1\" AS TIMESTAMPTZ)))"), extract.setupSql());
+        assertTrue(extract.setupSql().contains(
+                "+ CAST(\"_floci_udf_arg_0\" AS BIGINT)"), extract.setupSql());
+
+        SqlDialectTranslator.ScriptTranslation interval = SqlDialectTranslator.translateScript("""
+                CREATE TEMP FUNCTION f(day INT64, d DATE)
+                AS (UNIX_DATE(DATE_ADD(d, INTERVAL 1 DAY)) + day);
+                SELECT f(1, DATE '2026-10-01');
+                """, "test-project", null, SqlDialectTranslator.QueryParameters.none());
+        assertTrue(interval.setupSql().contains("INTERVAL 1 DAY"), interval.setupSql());
+        assertTrue(interval.setupSql().contains(
+                "+ CAST(\"_floci_udf_arg_0\" AS BIGINT)"), interval.setupSql());
     }
 
     // ── Table references ─────────────────────────────────────────────────────
@@ -3131,6 +3643,20 @@ class SqlDialectTranslatorTest {
                 ref -> ref.equals(source) ? Set.of("id", "name", "_partitiondate", "_partitiontime") : null).sql();
 
         assertTrue(translated.contains("EXCLUDE (\"_PARTITIONDATE\", \"_PARTITIONTIME\", \"id\")"), translated);
+    }
+
+    @Test
+    void temporaryTableCorrelatedStructStarHidesPartitionPseudoColumns() {
+        SqlDialectTranslator.TableRef source = new SqlDialectTranslator.TableRef("ds", "partitioned");
+        SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript("""
+                CREATE TEMP TABLE filtered AS
+                  SELECT (SELECT AS STRUCT input.* EXCEPT(id)) AS original FROM ds.partitioned input;
+                SELECT * FROM filtered;
+                """, "test-project", null, SqlDialectTranslator.QueryParameters.none(),
+                ref -> ref.equals(source) ? Set.of("id", "name", "_partitiondate", "_partitiontime") : null);
+
+        assertTrue(script.setupSql().contains("EXCLUDE (\"_PARTITIONDATE\", \"_PARTITIONTIME\", \"id\")"),
+                script.setupSql());
     }
 
     @Test

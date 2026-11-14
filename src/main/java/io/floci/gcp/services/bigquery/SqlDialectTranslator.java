@@ -68,11 +68,53 @@ final class SqlDialectTranslator {
      */
     record OrderByFieldPaths(String sqlWithoutOrderBy, List<List<String>> paths) {}
 
+    /**
+     * A supported script translated for one DuckDB session. {@code setupSql} holds temporary
+     * macros and statements whose results BigQuery discards; {@code sql} is the final query or DML.
+     */
+    record ScriptTranslation(String sql, String setupSql, Set<TableRef> tables,
+                             Set<InformationSchema.Ref> informationSchema, boolean needsUnicodeCaseFold,
+                             List<String> duplicateOutputNames, Statement finalStatement,
+                             List<MissingStructField> missingStructFields, OrderByFieldPaths orderByFieldPaths) {}
+
+    sealed interface ScriptItem permits SqlItem, IfBlock, BeginBlock, WhileBlock, LoopBlock, RepeatBlock,
+            ForBlock, CaseBlock, LoopControl {}
+    record SqlItem(String sql) implements ScriptItem {}
+    record IfBlock(String condition, List<ScriptItem> whenTrue, List<ScriptItem> whenFalse) implements ScriptItem {}
+    record BeginBlock(String label, List<ScriptItem> items) implements ScriptItem {}
+    record WhileBlock(String label, String condition, List<ScriptItem> items) implements ScriptItem {}
+    record LoopBlock(String label, List<ScriptItem> items) implements ScriptItem {}
+    record RepeatBlock(String label, String condition, List<ScriptItem> items) implements ScriptItem {}
+    record ForBlock(String label, String variable, String query, List<ScriptItem> items) implements ScriptItem {}
+    record CaseWhen(String condition, List<ScriptItem> items) {}
+    record CaseBlock(String expression, List<CaseWhen> branches, List<ScriptItem> otherwise) implements ScriptItem {
+        private static final Pattern SINGLE_OPERAND = Pattern.compile(
+                "(?i)[A-Za-z_][A-Za-z0-9_.]*|[-+]?[0-9]+(?:\\.[0-9]+)?|'(?:[^']|'')*'");
+
+        String condition(CaseWhen branch) {
+            return expression != null
+                    ? groupedOperand(expression) + " = " + groupedOperand(branch.condition())
+                    : branch.condition();
+        }
+
+        /** BigQuery compares the whole WHEN operand, so an expression needs its own parentheses. */
+        private static String groupedOperand(String operand) {
+            String trimmed = operand.trim();
+            return SINGLE_OPERAND.matcher(trimmed).matches() ? trimmed : "(" + trimmed + ")";
+        }
+    }
+    record LoopControl(boolean continueLoop, String label) implements ScriptItem {}
+    record ProceduralScript(List<ScriptItem> items) {}
+
     private record UnnestOffset(String name, int nextToken) {}
 
     private static final Set<String> CLAUSE_END_KEYWORDS = Set.of(
             "WHERE", "GROUP", "HAVING", "QUALIFY", "WINDOW", "ORDER", "LIMIT", "OFFSET",
             "UNION", "INTERSECT", "EXCEPT", "SELECT");
+
+    /** Statements BigQuery runs as a script even when the request holds only that statement. */
+    private static final Set<String> SCRIPT_STATEMENT_KEYWORDS = Set.of("DECLARE", "SET", "BEGIN", "IF", "WHILE",
+            "LOOP", "REPEAT", "FOR", "CASE", "BREAK", "LEAVE", "CONTINUE", "ITERATE");
 
     private static final Set<String> NON_ALIAS_KEYWORDS = Set.of(
             "WHERE", "GROUP", "HAVING", "QUALIFY", "WINDOW", "ORDER", "LIMIT", "OFFSET", "UNION",
@@ -139,6 +181,8 @@ final class SqlDialectTranslator {
     private final String jobProjectId;
     private final String defaultDatasetId;
     private final QueryParameters parameters;
+    /** Names bound by a preceding CREATE TEMP TABLE in the current script. */
+    private final Set<String> temporaryTables;
     private final List<CteScope> cteScopes = new ArrayList<>();
     /** Names a generated projection may not take, including expanded fields and sibling outputs. */
     private final Set<String> structStarTakenNames = new HashSet<>();
@@ -161,6 +205,9 @@ final class SqlDialectTranslator {
      */
     private final Map<Map<String, List<Token>>, Set<List<String>>> anonymousStructFields = new IdentityHashMap<>();
     private boolean queryResult;
+    private boolean scalarUdfBody;
+    private boolean scalarUdfNamedTableSource;
+    private Map<String, String> scalarUdfParameterAliases = Map.of();
 
     private List<Token> tokens;
     /** The {@code UNNEST} token of an unaliased MERGE source, rendered with {@link #mergeUnnestName} as its name. */
@@ -191,16 +238,36 @@ final class SqlDialectTranslator {
 
     private record CteScope(String name, Token start, Token end) {}
 
+    /** The project {@code _SESSION} belongs to, as BigQuery names it in a not-found error. */
+    private String sessionDatasetProject() {
+        return projectId != null && !projectId.isBlank() ? projectId : jobProjectId;
+    }
+
+    private SqlDialectTranslator(String projectId, String defaultDatasetId, QueryParameters parameters) {
+        this(projectId, projectId, defaultDatasetId, parameters, Set.of());
+    }
+
+    private SqlDialectTranslator(String projectId, String defaultDatasetId, QueryParameters parameters,
+                                 Set<String> temporaryTables) {
+        this(projectId, projectId, defaultDatasetId, parameters, temporaryTables);
+    }
+
     /**
      * {@code projectId} holds the tables the statement can reach, the default dataset among them;
      * {@code jobProjectId} is the project the job runs in, which dataset-qualified names resolve to.
      */
     private SqlDialectTranslator(String projectId, String jobProjectId, String defaultDatasetId,
                                  QueryParameters parameters) {
+        this(projectId, jobProjectId, defaultDatasetId, parameters, Set.of());
+    }
+
+    private SqlDialectTranslator(String projectId, String jobProjectId, String defaultDatasetId,
+                                 QueryParameters parameters, Set<String> temporaryTables) {
         this.projectId = projectId;
         this.jobProjectId = jobProjectId;
         this.defaultDatasetId = defaultDatasetId;
         this.parameters = parameters;
+        this.temporaryTables = Set.copyOf(temporaryTables);
     }
 
     static Translation translate(String sql, String projectId, String defaultDatasetId,
@@ -232,6 +299,1283 @@ final class SqlDialectTranslator {
         translator.columnsOf = columnsOf;
         translator.fieldsOf = fieldsOf;
         return translator.run(sql);
+    }
+
+    /** Translates one statement, treating {@code temporaryTables} as request-local names. */
+    static Translation translateStatement(String sql, String projectId, String jobProjectId, String defaultDatasetId,
+                                          QueryParameters parameters, Collection<String> temporaryTables) {
+        return translateWithTemporaryTables(sql, projectId, jobProjectId, defaultDatasetId, parameters,
+                Set.copyOf(temporaryTables));
+    }
+
+    private static Translation translateWithTemporaryTables(String sql, String projectId, String jobProjectId,
+                                                            String defaultDatasetId, QueryParameters parameters,
+                                                            Set<String> temporaryTables) {
+        return translateWithTemporaryTables(sql, projectId, jobProjectId, defaultDatasetId, parameters,
+                temporaryTables, ref -> null);
+    }
+
+    private static Translation translateWithTemporaryTables(String sql, String projectId, String jobProjectId,
+                                                            String defaultDatasetId, QueryParameters parameters,
+                                                            Set<String> temporaryTables,
+                                                            Function<TableRef, Set<String>> columnsOf) {
+        return translateWithTemporaryTables(sql, projectId, jobProjectId, defaultDatasetId, parameters,
+                temporaryTables, columnsOf, ref -> null);
+    }
+
+    private static Translation translateWithTemporaryTables(String sql, String projectId, String jobProjectId,
+                                                            String defaultDatasetId, QueryParameters parameters,
+                                                            Set<String> temporaryTables,
+                                                            Function<TableRef, Set<String>> columnsOf,
+                                                            Function<TableRef, List<TableFieldSchema>> fieldsOf) {
+        SqlDialectTranslator translator = new SqlDialectTranslator(projectId, jobProjectId, defaultDatasetId,
+                parameters, temporaryTables);
+        translator.columnsOf = columnsOf;
+        translator.fieldsOf = fieldsOf;
+        return translator.run(sql);
+    }
+
+    private static Translation translateDmlWithTemporaryTables(String sql, String projectId, String jobProjectId,
+                                                               String defaultDatasetId, QueryParameters parameters,
+                                                               Set<String> temporaryTables) {
+        return translateDmlWithTemporaryTables(sql, projectId, jobProjectId, defaultDatasetId, parameters,
+                temporaryTables, ref -> null);
+    }
+
+    private static Translation translateDmlWithTemporaryTables(String sql, String projectId, String jobProjectId,
+                                                               String defaultDatasetId, QueryParameters parameters,
+                                                               Set<String> temporaryTables,
+                                                               Function<TableRef, Set<String>> columnsOf) {
+        return translateDmlWithTemporaryTables(sql, projectId, jobProjectId, defaultDatasetId, parameters,
+                temporaryTables, columnsOf, ref -> null);
+    }
+
+    private static Translation translateDmlWithTemporaryTables(String sql, String projectId, String jobProjectId,
+                                                               String defaultDatasetId, QueryParameters parameters,
+                                                               Set<String> temporaryTables,
+                                                               Function<TableRef, Set<String>> columnsOf,
+                                                               Function<TableRef, List<TableFieldSchema>> fieldsOf) {
+        SqlDialectTranslator translator = new SqlDialectTranslator(projectId, jobProjectId, defaultDatasetId,
+                parameters, temporaryTables);
+        translator.columnsOf = columnsOf;
+        translator.fieldsOf = fieldsOf;
+        return translator.runDml(sql);
+    }
+
+    /**
+     * Translates the request-local portion of a BigQuery script. Statements are kept in source
+     * order: temporary functions and tables, and result-discarding queries, can be interleaved in
+     * any order before the final query or DML. Temporary objects disappear with DuckDB's request
+     * session, just as they do with a BigQuery script job.
+     *
+     * <p>Intermediate persistent DML/DDL is intentionally excluded. Applying it would require
+     * atomically committing every changed staged table back to the emulator; the Duck sidecar
+     * protocol presently returns only one follow-up result.</p>
+     */
+    static ScriptTranslation translateScript(String sql, String projectId, String defaultDatasetId,
+                                             QueryParameters parameters) {
+        return translateScript(sql, projectId, projectId, defaultDatasetId, parameters, ref -> null);
+    }
+
+    static ScriptTranslation translateScript(String sql, String projectId, String defaultDatasetId,
+                                             QueryParameters parameters,
+                                             Function<TableRef, Set<String>> columnsOf) {
+        return translateScript(sql, projectId, projectId, defaultDatasetId, parameters, columnsOf);
+    }
+
+    static ScriptTranslation translateScript(String sql, String projectId, String jobProjectId,
+                                             String defaultDatasetId, QueryParameters parameters) {
+        return translateScript(sql, projectId, jobProjectId, defaultDatasetId, parameters, ref -> null);
+    }
+
+    static ScriptTranslation translateScript(String sql, String projectId, String jobProjectId,
+                                             String defaultDatasetId, QueryParameters parameters,
+                                             Function<TableRef, Set<String>> columnsOf) {
+        return translateScript(sql, projectId, jobProjectId, defaultDatasetId, parameters, columnsOf, ref -> null);
+    }
+
+    static ScriptTranslation translateScript(String sql, String projectId, String jobProjectId,
+                                             String defaultDatasetId, QueryParameters parameters,
+                                             Function<TableRef, Set<String>> columnsOf,
+                                             Function<TableRef, List<TableFieldSchema>> fieldsOf) {
+        List<String> statements = splitScript(sql);
+        if (statements.isEmpty()) {
+            throw invalidQuery("Syntax error: Unexpected end of script");
+        }
+        // A request-level multi-statement script never reaches here with positional parameters:
+        // BigQueryService.query rejects it, because control flow may run statements in another order
+        // than the parameters were supplied. The SQL here can still be multi-statement when the
+        // service prepends request-local temporary objects to one dynamic statement, and that
+        // statement's own positional parameters are bound in source order.
+        Set<TableRef> tables = new LinkedHashSet<>();
+        Set<InformationSchema.Ref> informationSchema = new LinkedHashSet<>();
+        Set<String> temporaryTables = new LinkedHashSet<>();
+        Set<String> temporaryFunctions = new LinkedHashSet<>();
+        StringBuilder setup = new StringBuilder();
+        boolean needsUnicodeCaseFold = false;
+        for (int i = 0; i < statements.size(); i++) {
+            String statement = statements.get(i);
+            boolean last = i == statements.size() - 1;
+            if (temporaryFunction(statement)) {
+                if (last) {
+                    throw invalidQuery("A script must end with a query or DML statement.");
+                }
+                TemporaryFunctionDefinition definition = temporaryFunctionDefinition(statement);
+                Translation macro = translateTemporaryFunction(statement, projectId, jobProjectId, defaultDatasetId,
+                        parameters, temporaryTables, temporaryFunctions);
+                setup.append(macro.sql()).append(";\n");
+                temporaryFunctions.add(definition.name().toLowerCase(Locale.ROOT));
+                tables.addAll(macro.tables());
+                informationSchema.addAll(macro.informationSchema());
+                needsUnicodeCaseFold |= macro.needsUnicodeCaseFold();
+                continue;
+            }
+            if (temporaryTable(statement)) {
+                if (last) {
+                    throw invalidQuery("A script must end with a query or DML statement.");
+                }
+                TemporaryTableTranslation temporary = translateTemporaryTable(statement, projectId, jobProjectId,
+                        defaultDatasetId, parameters, temporaryTables, columnsOf, fieldsOf);
+                Translation table = temporary.translation();
+                setup.append(table.sql()).append(";\n");
+                tables.addAll(table.tables());
+                informationSchema.addAll(table.informationSchema());
+                needsUnicodeCaseFold |= table.needsUnicodeCaseFold();
+                temporaryTables.add(temporary.name());
+                continue;
+            }
+            String droppedTemporaryTable = droppedTemporaryTable(statement, temporaryTables);
+            if (droppedTemporaryTable != null) {
+                if (last) {
+                    throw invalidQuery("A script must end with a query or DML statement.");
+                }
+                setup.append("DROP TABLE ").append(DuckTypes.quoteIdentifier(droppedTemporaryTable)).append(";\n");
+                temporaryTables.remove(droppedTemporaryTable);
+                continue;
+            }
+            if (!last) {
+                String temporaryTarget = temporaryDmlTarget(statement, temporaryTables);
+                if (temporaryTarget != null) {
+                    Translation mutation = translateDmlWithTemporaryTables(statement, projectId, jobProjectId,
+                            defaultDatasetId, parameters, temporaryTables, columnsOf, fieldsOf);
+                    setup.append(mutation.sql()).append(";\n");
+                    tables.addAll(mutation.tables());
+                    informationSchema.addAll(mutation.informationSchema());
+                    needsUnicodeCaseFold |= mutation.needsUnicodeCaseFold();
+                    continue;
+                }
+                Statement intermediate = parseStatement(statement, projectId, jobProjectId, defaultDatasetId);
+                if (intermediate.kind() != StatementKind.QUERY) {
+                    throw invalidQuery("An intermediate script statement must be CREATE TEMP FUNCTION, CREATE TEMP "
+                            + "TABLE, DROP TABLE for a temporary table, or a query. Intermediate persistent DML "
+                            + "and DDL are not supported by the floci BigQuery emulator yet.");
+                }
+                Translation query = translateWithTemporaryTables(statement, projectId, jobProjectId,
+                        defaultDatasetId, parameters, temporaryTables, columnsOf, fieldsOf);
+                setup.append(query.sql()).append(";\n");
+                tables.addAll(query.tables());
+                informationSchema.addAll(query.informationSchema());
+                needsUnicodeCaseFold |= query.needsUnicodeCaseFold();
+                continue;
+            }
+            String temporaryTarget = temporaryDmlTarget(statement, temporaryTables);
+            Statement finalStatement = parseStatement(statement, projectId, jobProjectId,
+                    temporaryTarget != null ? "_floci_temporary" : defaultDatasetId, temporaryTables);
+            Translation query = finalStatement.isDml()
+                    ? translateDmlWithTemporaryTables(statement, projectId, jobProjectId, defaultDatasetId, parameters,
+                            temporaryTables, columnsOf, fieldsOf)
+                    : translateWithTemporaryTables(statement, projectId, jobProjectId, defaultDatasetId, parameters,
+                            temporaryTables, columnsOf, fieldsOf);
+            return new ScriptTranslation(query.sql(), setup.toString(), tablesWith(tables, query.tables()),
+                    informationSchemaWith(informationSchema, query.informationSchema()),
+                    needsUnicodeCaseFold || query.needsUnicodeCaseFold(), query.duplicateOutputNames(),
+                    finalStatement, query.missingStructFields(), query.orderByFieldPaths());
+        }
+        throw invalidQuery("A script must end with a query or DML statement.");
+    }
+
+    static Statement scriptFinalStatement(String sql, String projectId, String defaultDatasetId) {
+        return scriptFinalStatement(sql, projectId, projectId, defaultDatasetId);
+    }
+
+    static Statement scriptFinalStatement(String sql, String projectId, String jobProjectId, String defaultDatasetId) {
+        List<String> statements = splitScript(sql);
+        if (statements.isEmpty()) {
+            throw invalidQuery("Syntax error: Unexpected end of script");
+        }
+        return parseStatement(statements.getLast(), projectId, jobProjectId, defaultDatasetId);
+    }
+
+    /**
+     * A request of one statement that only a script can run: a declaration, an assignment, control flow
+     * or a loop-control statement. BigQuery runs such a request as a script, so it returns no rows when
+     * no statement produces a result.
+     */
+    static boolean singleStatementScript(String sql) {
+        List<String> statements = splitScript(sql);
+        if (statements.size() != 1) {
+            return false;
+        }
+        List<Token> tokens = significant(new Lexer(statements.getFirst()).tokenize());
+        return !tokens.isEmpty() && SCRIPT_STATEMENT_KEYWORDS.stream().anyMatch(tokens.getFirst()::isKeyword);
+    }
+
+    static boolean multiStatementScript(String sql) {
+        List<String> statements = splitScript(sql);
+        if (statements.size() <= 1) {
+            return false;
+        }
+        for (int i = 0; i < statements.size() - 1; i++) {
+            if (!temporaryFunction(statements.get(i))) {
+                return true;
+            }
+        }
+        List<Token> finalTokens = significant(new Lexer(statements.getLast()).tokenize());
+        return finalTokens.isEmpty() || !(finalTokens.getFirst().isKeyword("SELECT")
+                || finalTokens.getFirst().isKeyword("WITH") || finalTokens.getFirst().isPunct("("));
+    }
+
+    /** Parses BigQuery script statements and nested IF blocks without prescribing their contents. */
+    static ProceduralScript proceduralScript(String sql) {
+        ScriptParser parser = new ScriptParser(sql);
+        return new ProceduralScript(parser.parseBlock(false));
+    }
+
+    private static final class ScriptParser {
+        private final List<Token> tokens;
+        private int at;
+        private int blockDepth;
+
+        ScriptParser(String sql) {
+            tokens = new Lexer(sql).tokenize();
+        }
+
+        List<ScriptItem> parseBlock(boolean stopAtControl) {
+            blockDepth++;
+            if (blockDepth > 51) {
+                blockDepth--;
+                throw invalidQuery("Procedural scripts may not nest blocks and conditionals more than 50 levels.");
+            }
+            try {
+                return parseBlockContents(stopAtControl);
+            } finally {
+                blockDepth--;
+            }
+        }
+
+        private List<ScriptItem> parseBlockContents(boolean stopAtControl) {
+            List<ScriptItem> items = new ArrayList<>();
+            while (true) {
+                skipTrivia();
+                if (at >= tokens.size() || stopAtControl && controlAt(at)) {
+                    return items;
+                }
+                if (tokens.get(at).isPunct(";")) {
+                    throw invalidQuery("Empty statements are not allowed in a multi-statement query.");
+                }
+                String label = consumeLabel();
+                if (tokens.get(at).isKeyword("IF")) {
+                    if (label != null) {
+                        throw invalidQuery("Labels are supported only on BEGIN blocks and loops.");
+                    }
+                    items.add(parseIf());
+                    continue;
+                }
+                if (tokens.get(at).isKeyword("CASE")) {
+                    if (label != null) {
+                        throw invalidQuery("Labels are supported only on BEGIN blocks and loops.");
+                    }
+                    items.add(parseCase());
+                    continue;
+                }
+                if (tokens.get(at).isKeyword("BEGIN")) {
+                    items.add(parseBegin(label));
+                    continue;
+                }
+                if (tokens.get(at).isKeyword("WHILE")) {
+                    items.add(parseWhile(label));
+                    continue;
+                }
+                if (tokens.get(at).isKeyword("LOOP")) {
+                    items.add(parseLoop(label));
+                    continue;
+                }
+                if (tokens.get(at).isKeyword("REPEAT")) {
+                    items.add(parseRepeat(label));
+                    continue;
+                }
+                if (tokens.get(at).isKeyword("FOR")) {
+                    items.add(parseFor(label));
+                    continue;
+                }
+                if (label != null) {
+                    throw invalidQuery("A label must precede a BEGIN block or loop.");
+                }
+                if (tokens.get(at).isKeyword("BREAK") || tokens.get(at).isKeyword("LEAVE")
+                        || tokens.get(at).isKeyword("CONTINUE") || tokens.get(at).isKeyword("ITERATE")) {
+                    items.add(parseLoopControl());
+                    continue;
+                }
+                int start = at;
+                int depth = 0;
+                while (at < tokens.size()) {
+                    Token token = tokens.get(at++);
+                    if (token.isPunct("(")) {
+                        depth++;
+                    } else if (token.isPunct(")")) {
+                        depth--;
+                    } else if (token.isPunct(";") && depth == 0) {
+                        break;
+                    }
+                }
+                String statement = text(tokens, start, at).replaceFirst(";\\s*$", "").trim();
+                if (!statement.isEmpty()) {
+                    items.add(new SqlItem(statement));
+                }
+            }
+        }
+
+        private ForBlock parseFor(String label) {
+            at++;
+            skipTrivia();
+            if (at >= tokens.size() || tokens.get(at).kind != Kind.IDENT) {
+                throw invalidQuery("FOR loop requires a loop variable.");
+            }
+            String variable = tokens.get(at++).text;
+            skipTrivia();
+            if (at >= tokens.size() || !tokens.get(at).isKeyword("IN")) {
+                throw invalidQuery("FOR loop requires IN.");
+            }
+            at++;
+            skipTrivia();
+            if (at >= tokens.size() || !tokens.get(at).isPunct("(")) {
+                throw invalidQuery("FOR loop requires a parenthesized table expression.");
+            }
+            int queryStart = ++at;
+            int depth = 1;
+            while (at < tokens.size() && depth > 0) {
+                if (tokens.get(at).isPunct("(")) {
+                    depth++;
+                } else if (tokens.get(at).isPunct(")")) {
+                    depth--;
+                }
+                at++;
+            }
+            if (depth != 0) {
+                throw invalidQuery("FOR loop table expression is missing a closing parenthesis.");
+            }
+            String query = text(tokens, queryStart, at - 1).trim();
+            int doIndex = findControl("DO");
+            at = doIndex + 1;
+            List<ScriptItem> items = parseBlock(true);
+            skipTrivia();
+            if (at >= tokens.size() || !tokens.get(at).isKeyword("END")) {
+                throw invalidQuery("FOR loop requires END FOR.");
+            }
+            at++;
+            skipTrivia();
+            if (at >= tokens.size() || !tokens.get(at).isKeyword("FOR")) {
+                throw invalidQuery("END must be followed by FOR.");
+            }
+            at++;
+            consumeClosingLabel(label, "FOR");
+            consumeOptionalSemicolon();
+            return new ForBlock(label, variable, query, items);
+        }
+
+        private LoopBlock parseLoop(String label) {
+            at++;
+            List<ScriptItem> items = parseBlock(true);
+            skipTrivia();
+            if (at >= tokens.size() || !tokens.get(at).isKeyword("END")) {
+                throw invalidQuery("LOOP requires END LOOP.");
+            }
+            at++;
+            skipTrivia();
+            if (at >= tokens.size() || !tokens.get(at).isKeyword("LOOP")) {
+                throw invalidQuery("END must be followed by LOOP.");
+            }
+            at++;
+            consumeClosingLabel(label, "LOOP");
+            consumeOptionalSemicolon();
+            return new LoopBlock(label, items);
+        }
+
+        private RepeatBlock parseRepeat(String label) {
+            at++;
+            List<ScriptItem> items = parseBlock(true);
+            skipTrivia();
+            if (at >= tokens.size() || !tokens.get(at).isKeyword("UNTIL")) {
+                throw invalidQuery("REPEAT loop requires UNTIL.");
+            }
+            at++;
+            int conditionStart = at;
+            int depth = 0;
+            int caseDepth = 0;
+            while (at < tokens.size()) {
+                Token token = tokens.get(at);
+                if (token.isPunct("(")) {
+                    depth++;
+                } else if (token.isPunct(")")) {
+                    depth--;
+                } else if (token.isKeyword("CASE")) {
+                    caseDepth++;
+                } else if (token.isKeyword("END") && caseDepth > 0) {
+                    caseDepth--;
+                } else if (depth == 0 && caseDepth == 0 && token.isKeyword("END")) {
+                    break;
+                }
+                at++;
+            }
+            String condition = text(tokens, conditionStart, at).trim();
+            skipTrivia();
+            if (at >= tokens.size() || !tokens.get(at).isKeyword("END")) {
+                throw invalidQuery("REPEAT loop requires END REPEAT.");
+            }
+            at++;
+            skipTrivia();
+            if (at >= tokens.size() || !tokens.get(at).isKeyword("REPEAT")) {
+                throw invalidQuery("END must be followed by REPEAT.");
+            }
+            at++;
+            consumeClosingLabel(label, "REPEAT");
+            consumeOptionalSemicolon();
+            return new RepeatBlock(label, condition, items);
+        }
+
+        private String consumeLabel() {
+            if (at >= tokens.size() || (tokens.get(at).kind != Kind.IDENT && tokens.get(at).kind != Kind.QIDENT)) {
+                return null;
+            }
+            int colon = nextSignificant(at + 1);
+            if (colon < 0 || !tokens.get(colon).isPunct(":")) {
+                return null;
+            }
+            String label = identifier(tokens.get(at));
+            at = colon + 1;
+            skipTrivia();
+            return label;
+        }
+
+        private int nextSignificant(int from) {
+            for (int index = from; index < tokens.size(); index++) {
+                if (tokens.get(index).kind != Kind.SPACE) {
+                    return index;
+                }
+            }
+            return -1;
+        }
+
+        private void consumeClosingLabel(String openingLabel, String construct) {
+            skipTrivia();
+            if (at >= tokens.size() || (tokens.get(at).kind != Kind.IDENT && tokens.get(at).kind != Kind.QIDENT)) {
+                return;
+            }
+            String closingLabel = identifier(tokens.get(at++));
+            if (openingLabel == null || !openingLabel.equalsIgnoreCase(closingLabel)) {
+                throw invalidQuery("Closing " + construct + " label does not match its opening label.");
+            }
+            skipTrivia();
+        }
+
+        private static String identifier(Token token) {
+            return token.kind == Kind.QIDENT ? token.value : token.text;
+        }
+
+        private void consumeOptionalSemicolon() {
+            skipTrivia();
+            if (at < tokens.size() && tokens.get(at).isPunct(";")) {
+                at++;
+            }
+        }
+
+        private LoopControl parseLoopControl() {
+            boolean continueLoop = tokens.get(at).isKeyword("CONTINUE") || tokens.get(at).isKeyword("ITERATE");
+            String keyword = tokens.get(at++).upper();
+            skipTrivia();
+            String label = null;
+            if (at < tokens.size() && (tokens.get(at).kind == Kind.IDENT || tokens.get(at).kind == Kind.QIDENT)) {
+                label = identifier(tokens.get(at++));
+                skipTrivia();
+            }
+            if (at < tokens.size() && tokens.get(at).isPunct(";")) {
+                at++;
+            } else {
+                throw invalidQuery(keyword + " statement requires a semicolon.");
+            }
+            return new LoopControl(continueLoop, label);
+        }
+
+        private WhileBlock parseWhile(String label) {
+            int whileIndex = at++;
+            int doIndex = findControl("DO");
+            String condition = text(tokens, whileIndex + 1, doIndex).trim();
+            at = doIndex + 1;
+            List<ScriptItem> items = parseBlock(true);
+            skipTrivia();
+            if (at >= tokens.size() || !tokens.get(at).isKeyword("END")) {
+                throw invalidQuery("WHILE loop requires END WHILE.");
+            }
+            at++;
+            skipTrivia();
+            if (at >= tokens.size() || !tokens.get(at).isKeyword("WHILE")) {
+                throw invalidQuery("END must be followed by WHILE in a procedural WHILE loop.");
+            }
+            at++;
+            skipTrivia();
+            consumeClosingLabel(label, "WHILE");
+            consumeOptionalSemicolon();
+            return new WhileBlock(label, condition, items);
+        }
+
+        private BeginBlock parseBegin(String label) {
+            at++;
+            skipTrivia();
+            if (at < tokens.size() && tokens.get(at).isKeyword("TRANSACTION")) {
+                throw invalidQuery("Transactions are not supported in procedural scripts.");
+            }
+            List<ScriptItem> items = parseBlock(true);
+            skipTrivia();
+            if (at >= tokens.size() || !tokens.get(at).isKeyword("END")) {
+                throw invalidQuery("BEGIN block requires END.");
+            }
+            at++;
+            skipTrivia();
+            consumeClosingLabel(label, "BEGIN");
+            consumeOptionalSemicolon();
+            return new BeginBlock(label, items);
+        }
+
+        private CaseBlock parseCase() {
+            at++;
+            skipTrivia();
+            String expression = null;
+            if (at >= tokens.size()) {
+                throw invalidQuery("CASE statement requires at least one WHEN clause.");
+            }
+            if (!tokens.get(at).isKeyword("WHEN")) {
+                int firstWhen = findControl("WHEN");
+                expression = text(tokens, at, firstWhen).trim();
+                at = firstWhen;
+            }
+            List<CaseWhen> branches = new ArrayList<>();
+            while (at < tokens.size() && tokens.get(at).isKeyword("WHEN")) {
+                int whenIndex = at++;
+                int thenIndex = findControl("THEN");
+                String condition = text(tokens, whenIndex + 1, thenIndex).trim();
+                at = thenIndex + 1;
+                branches.add(new CaseWhen(condition, parseBlock(true)));
+                skipTrivia();
+            }
+            List<ScriptItem> otherwise = List.of();
+            if (at < tokens.size() && tokens.get(at).isKeyword("ELSE")) {
+                at++;
+                otherwise = parseBlock(true);
+                skipTrivia();
+            }
+            if (at >= tokens.size() || !tokens.get(at).isKeyword("END")) {
+                throw invalidQuery("CASE statement requires END CASE.");
+            }
+            at++;
+            skipTrivia();
+            if (at >= tokens.size() || !tokens.get(at).isKeyword("CASE")) {
+                throw invalidQuery("END must be followed by CASE in a procedural CASE statement.");
+            }
+            at++;
+            consumeOptionalSemicolon();
+            return new CaseBlock(expression, branches, otherwise);
+        }
+
+        private IfBlock parseIf() {
+            int ifIndex = at++;
+            int then = findControl("THEN");
+            String condition = text(tokens, ifIndex + 1, then).trim();
+            at = then + 1;
+            List<ScriptItem> whenTrue = parseBlock(true);
+            List<ScriptItem> whenFalse = List.of();
+            skipTrivia();
+            if (at < tokens.size() && tokens.get(at).isKeyword("ELSE")) {
+                at++;
+                whenFalse = parseBlock(true);
+            } else if (at < tokens.size() && tokens.get(at).upper().equals("ELSEIF")) {
+                tokens.set(at, new Token(Kind.IDENT, "IF", "IF"));
+                return new IfBlock(condition, whenTrue, List.of(parseIf()));
+            }
+            skipTrivia();
+            if (at >= tokens.size() || !tokens.get(at).isKeyword("END")) {
+                throw invalidQuery("IF statement requires END IF.");
+            }
+            at++;
+            skipTrivia();
+            if (at >= tokens.size() || !tokens.get(at).isKeyword("IF")) {
+                throw invalidQuery("END must be followed by IF in a procedural IF statement.");
+            }
+            at++;
+            skipTrivia();
+            if (at < tokens.size() && tokens.get(at).isPunct(";")) {
+                at++;
+            }
+            return new IfBlock(condition, whenTrue, whenFalse);
+        }
+
+        private int findControl(String keyword) {
+            int depth = 0;
+            int caseDepth = 0;
+            for (int i = at; i < tokens.size(); i++) {
+                Token token = tokens.get(i);
+                if (token.isPunct("(")) {
+                    depth++;
+                } else if (token.isPunct(")")) {
+                    depth--;
+                } else if (token.isKeyword("CASE")) {
+                    caseDepth++;
+                } else if (token.isKeyword("END") && caseDepth > 0) {
+                    caseDepth--;
+                } else if (depth == 0 && caseDepth == 0 && token.isKeyword(keyword)) {
+                    return i;
+                }
+            }
+            throw invalidQuery("IF statement requires THEN.");
+        }
+
+        private boolean controlAt(int index) {
+            return tokens.get(index).isKeyword("ELSE") || tokens.get(index).isKeyword("END")
+                    || tokens.get(index).isKeyword("WHEN") || tokens.get(index).isKeyword("UNTIL")
+                    || tokens.get(index).upper().equals("ELSEIF");
+        }
+
+        private void skipTrivia() {
+            while (at < tokens.size() && (tokens.get(at).kind == Kind.SPACE || tokens.get(at).kind == Kind.RAW)) {
+                at++;
+            }
+        }
+    }
+
+    private static String text(List<Token> tokens, int from, int to) {
+        StringBuilder result = new StringBuilder();
+        for (int i = from; i < to; i++) {
+            result.append(tokens.get(i).text);
+        }
+        return result.toString();
+    }
+
+    private static Set<TableRef> tablesWith(Set<TableRef> current, Set<TableRef> additional) {
+        Set<TableRef> all = new LinkedHashSet<>(current);
+        all.addAll(additional);
+        return all;
+    }
+
+    private static Set<InformationSchema.Ref> informationSchemaWith(Set<InformationSchema.Ref> current,
+                                                                    Set<InformationSchema.Ref> additional) {
+        Set<InformationSchema.Ref> all = new LinkedHashSet<>(current);
+        all.addAll(additional);
+        return all;
+    }
+
+    private record TemporaryDeclaration(List<Token> significant, int object, int name,
+                                        boolean orReplace, boolean ifNotExists) {}
+
+    record TemporaryTableDefinition(String name, List<TableFieldSchema> fields,
+                                    boolean orReplace, boolean ifNotExists) {}
+
+    record TemporaryFunctionDefinition(String name, boolean orReplace, boolean ifNotExists) {}
+
+    record TemporaryTableDrop(String name, boolean ifExists, boolean sessionQualified) {}
+
+    private static TemporaryDeclaration temporaryDeclaration(String sql, String objectName) {
+        List<Token> significant = significant(new Lexer(sql).tokenize());
+        if (significant.isEmpty() || !significant.getFirst().isKeyword("CREATE")) {
+            return null;
+        }
+        int at = 1;
+        boolean orReplace = at + 1 < significant.size() && significant.get(at).isKeyword("OR")
+                && significant.get(at + 1).isKeyword("REPLACE");
+        if (orReplace) {
+            at += 2;
+        }
+        if (at >= significant.size() || !(significant.get(at).isKeyword("TEMP")
+                || significant.get(at).isKeyword("TEMPORARY"))) {
+            return null;
+        }
+        at++;
+        if (at >= significant.size() || !significant.get(at).isKeyword(objectName)) {
+            return null;
+        }
+        at++;
+        boolean ifNotExists = at + 2 < significant.size() && significant.get(at).isKeyword("IF")
+                && significant.get(at + 1).isKeyword("NOT") && significant.get(at + 2).isKeyword("EXISTS");
+        if (ifNotExists) {
+            at += 3;
+        }
+        if (at < significant.size() && significant.get(at).isKeyword("OR")) {
+            // BigQuery's grammar takes OR REPLACE before TEMP, so after the object name it is a syntax error.
+            throw invalidQuery("Syntax error: Unexpected keyword OR");
+        }
+        return at < significant.size()
+                ? new TemporaryDeclaration(significant, at - 1, at, orReplace, ifNotExists) : null;
+    }
+
+    private static boolean temporaryFunction(String sql) {
+        return temporaryDeclaration(sql, "FUNCTION") != null;
+    }
+
+    static TemporaryFunctionDefinition temporaryFunctionDefinition(String sql) {
+        TemporaryDeclaration declaration = temporaryDeclaration(sql, "FUNCTION");
+        if (declaration == null) {
+            return null;
+        }
+        if (declaration.orReplace() || declaration.ifNotExists()) {
+            // BigQuery rejects every clause of the statement, OR REPLACE and IF NOT EXISTS alike.
+            throw invalidQuery("Clauses such as IF NOT EXISTS are not yet supported with CREATE TEMP FUNCTION");
+        }
+        Token name = declaration.significant().get(declaration.name());
+        return new TemporaryFunctionDefinition(name.identifierText(), declaration.orReplace(),
+                declaration.ifNotExists());
+    }
+
+    private record TemporaryTableTranslation(String name, Translation translation) {}
+
+    private static boolean temporaryTable(String sql) {
+        return temporaryDeclaration(sql, "TABLE") != null;
+    }
+
+    static void validateTemporaryFunctionDeclaration(String sql, String projectId, String defaultDatasetId,
+                                                       QueryParameters parameters,
+                                                       Collection<String> temporaryTables) {
+        validateTemporaryFunctionDeclaration(sql, projectId, projectId, defaultDatasetId, parameters,
+                temporaryTables);
+    }
+
+    static void validateTemporaryFunctionDeclaration(String sql, String projectId, String jobProjectId,
+                                                       String defaultDatasetId, QueryParameters parameters,
+                                                       Collection<String> temporaryTables) {
+        if (temporaryFunction(sql)) {
+            translateTemporaryFunction(sql, projectId, jobProjectId, defaultDatasetId, parameters,
+                    Set.copyOf(temporaryTables), Set.of());
+        }
+    }
+
+    static String declaredTemporaryTable(String sql) {
+        TemporaryTableDefinition definition = temporaryTableDefinition(sql);
+        return definition != null ? definition.name() : null;
+    }
+
+    static TemporaryTableDefinition temporaryTableDefinition(String sql) {
+        TemporaryDeclaration declaration = temporaryDeclaration(sql, "TABLE");
+        if (declaration == null) {
+            return null;
+        }
+        if (declaration.orReplace() && declaration.ifNotExists()) {
+            throw invalidQuery("CREATE TEMP TABLE cannot combine OR REPLACE and IF NOT EXISTS");
+        }
+        SqlDialectTranslator translator = new SqlDialectTranslator("", null, QueryParameters.none());
+        translator.tokens = new Lexer(sql).tokenize();
+        Path path = translator.pathAt(translator.significantIndexes(), declaration.name());
+        String name = temporaryTableName(path.segments());
+        if (name == null) {
+            throw invalidQuery("CREATE TEMP TABLE requires an unqualified name or the _SESSION qualifier.");
+        }
+        int schemaOpen = translator.nextSignificant(path.end(), translator.tokens.size());
+        int schemaClose = schemaOpen >= 0 && translator.tokens.get(schemaOpen).isPunct("(")
+                ? translator.matchingParen(schemaOpen) : -1;
+        List<TableFieldSchema> fields = schemaClose >= 0
+                ? translator.columnDefinitions(schemaOpen, schemaClose) : List.of();
+        return new TemporaryTableDefinition(name, fields, declaration.orReplace(), declaration.ifNotExists());
+    }
+
+    static String droppedTemporaryTable(String sql, Collection<String> temporaryTables) {
+        return droppedTemporaryTable(sql, Set.copyOf(temporaryTables));
+    }
+
+    /**
+     * A named query parameter may appear in any statement of a script (BigQuery binds it wherever
+     * it is written), so the caller's parameters are substituted during validation too instead of
+     * reporting every placeholder as missing.
+     */
+    static void validateProceduralStatement(String sql, String projectId, String jobProjectId,
+                                            String defaultDatasetId, Collection<String> temporaryTables,
+                                            QueryParameters parameters) {
+        Set<String> names = new LinkedHashSet<>(temporaryTables);
+        names.addAll(sessionTableNames(sql));
+        String validationDataset = defaultDatasetId != null && !defaultDatasetId.isBlank()
+                ? defaultDatasetId : "_floci_validation";
+        if (temporaryFunction(sql)) {
+            translateTemporaryFunction(sql, projectId, jobProjectId, validationDataset, parameters,
+                    names, Set.of());
+            return;
+        }
+        if (temporaryTable(sql)) {
+            translateTemporaryTable(sql, projectId, jobProjectId, validationDataset, parameters, names,
+                    ref -> null, ref -> null);
+            return;
+        }
+        Statement statement = parseStatement(sql, projectId, jobProjectId, validationDataset, names);
+        if (statement.kind() == StatementKind.QUERY) {
+            translateWithTemporaryTables(sql, projectId, jobProjectId, validationDataset, parameters,
+                    names);
+        }
+    }
+
+    private static Set<String> sessionTableNames(String sql) {
+        List<Token> tokens = significant(new Lexer(sql).tokenize());
+        Set<String> names = new LinkedHashSet<>();
+        for (int i = 0; i + 2 < tokens.size(); i++) {
+            if ((tokens.get(i).kind == Kind.IDENT || tokens.get(i).kind == Kind.QIDENT)
+                    && tokens.get(i).identifierText().equalsIgnoreCase("_SESSION")
+                    && tokens.get(i + 1).isPunct(".")
+                    && (tokens.get(i + 2).kind == Kind.IDENT || tokens.get(i + 2).kind == Kind.QIDENT)) {
+                names.add(tokens.get(i + 2).identifierText());
+            }
+        }
+        return names;
+    }
+
+    static String temporaryDmlTarget(String sql, Collection<String> temporaryTables) {
+        Set<String> names = Set.copyOf(temporaryTables);
+        SqlDialectTranslator translator = new SqlDialectTranslator("", null, QueryParameters.none(), names);
+        translator.prepare(sql);
+        List<Integer> significant = translator.significantIndexes();
+        if (significant.isEmpty()) {
+            return null;
+        }
+        String first = translator.tokens.get(significant.getFirst()).upper();
+        if (!Set.of("INSERT", "UPDATE", "DELETE", "MERGE").contains(first)) {
+            return null;
+        }
+        int at = 1;
+        if (at < significant.size() && ((first.equals("INSERT") || first.equals("MERGE"))
+                && translator.keywordAt(significant, at, "INTO")
+                || first.equals("DELETE") && translator.keywordAt(significant, at, "FROM"))) {
+            at++;
+        }
+        Path path = translator.pathAt(significant, at);
+        String name = temporaryTableName(path.segments());
+        return name != null && names.contains(name) ? name : null;
+    }
+
+    static String temporaryTruncateTarget(String sql, Collection<String> temporaryTables) {
+        Set<String> names = Set.copyOf(temporaryTables);
+        SqlDialectTranslator translator = new SqlDialectTranslator("", null, QueryParameters.none(), names);
+        translator.prepare(sql);
+        List<Integer> significant = translator.significantIndexes();
+        if (significant.size() < 3 || !translator.keywordAt(significant, 0, "TRUNCATE")
+                || !translator.keywordAt(significant, 1, "TABLE")) {
+            return null;
+        }
+        Path path = translator.pathAt(significant, 2);
+        String name = temporaryTableName(path.segments());
+        return name != null && names.contains(name) ? name : null;
+    }
+
+    private static TemporaryTableTranslation translateTemporaryTable(String sql, String projectId,
+                                                                      String jobProjectId, String defaultDatasetId,
+                                                                      QueryParameters parameters,
+                                                                      Set<String> temporaryTables,
+                                                                      Function<TableRef, Set<String>> columnsOf,
+                                                                      Function<TableRef, List<TableFieldSchema>> fieldsOf) {
+        SqlDialectTranslator translator = new SqlDialectTranslator(projectId, jobProjectId, defaultDatasetId,
+                parameters);
+        translator.tokens = new Lexer(sql).tokenize();
+        List<Integer> significant = translator.significantIndexes();
+        TemporaryDeclaration declaration = temporaryDeclaration(sql, "TABLE");
+        Path path = translator.pathAt(significant, declaration.name());
+        String name = temporaryTableName(path.segments());
+        if (name == null) {
+            throw invalidQuery("CREATE TEMP TABLE requires an unqualified name or the _SESSION qualifier.");
+        }
+        int schemaOpen = translator.nextSignificant(path.end(), translator.tokens.size());
+        int schemaClose = schemaOpen >= 0 && translator.tokens.get(schemaOpen).isPunct("(")
+                ? translator.matchingParen(schemaOpen) : -1;
+        List<TableFieldSchema> fields = schemaClose >= 0
+                ? translator.columnDefinitions(schemaOpen, schemaClose) : List.of();
+        int as = translator.topLevelKeyword(path.end(), translator.tokens.size(), "AS");
+        if (fields.isEmpty() && as < 0) {
+            throw invalidQuery("CREATE TEMP TABLE needs a column list or AS followed by a query.");
+        }
+        String prefix = "CREATE " + (declaration.orReplace() ? "OR REPLACE " : "") + "TEMP TABLE "
+                + (declaration.ifNotExists() ? "IF NOT EXISTS " : "");
+        StringBuilder translated = new StringBuilder(prefix).append(DuckTypes.quoteIdentifier(name));
+        if (!fields.isEmpty()) {
+            translated.append(" (");
+            for (int i = 0; i < fields.size(); i++) {
+                if (i > 0) {
+                    translated.append(", ");
+                }
+                TableFieldSchema field = fields.get(i);
+                translated.append(DuckTypes.quoteIdentifier(field.getName())).append(' ')
+                        .append(DuckTypes.duckType(field));
+                if ("REQUIRED".equals(field.getMode())) {
+                    translated.append(" NOT NULL");
+                }
+            }
+            translated.append(')');
+        }
+        if (as < 0) {
+            return new TemporaryTableTranslation(name,
+                    new Translation(translated.toString(), Set.of(), Set.of(), false));
+        }
+        int queryStart = translator.nextSignificant(as + 1, translator.tokens.size());
+        if (queryStart < 0) {
+            throw invalidQuery("CREATE TEMP TABLE requires a query after AS.");
+        }
+        int queryEnd = translator.tokens.size();
+        if (translator.tokens.get(queryStart).isPunct("(")) {
+            int close = translator.matchingParen(queryStart);
+            if (translator.nextSignificant(close + 1, translator.tokens.size()) >= 0) {
+                throw invalidQuery("Syntax error: Unexpected tokens after CREATE TEMP TABLE query.");
+            }
+            queryStart++;
+            queryEnd = close;
+        }
+        Translation query = translateWithTemporaryTables(translator.text(queryStart, queryEnd), projectId,
+                jobProjectId, defaultDatasetId, parameters, temporaryTables, columnsOf, fieldsOf);
+        if (fields.isEmpty()) {
+            translated.append(" AS (").append(query.sql()).append(')');
+        } else {
+            translated.append(";\nINSERT INTO ").append(DuckTypes.quoteIdentifier(name)).append(' ')
+                    .append(query.sql());
+        }
+        return new TemporaryTableTranslation(name,
+                new Translation(translated.toString(), query.tables(), query.informationSchema(),
+                        query.needsUnicodeCaseFold()));
+    }
+
+    private static String droppedTemporaryTable(String sql, Set<String> temporaryTables) {
+        TemporaryTableDrop drop = temporaryTableDrop(sql);
+        return drop != null && temporaryTables.contains(drop.name()) ? drop.name() : null;
+    }
+
+    static TemporaryTableDrop temporaryTableDrop(String sql) {
+        SqlDialectTranslator translator = new SqlDialectTranslator("", null, QueryParameters.none());
+        translator.tokens = new Lexer(sql).tokenize();
+        List<Integer> significant = translator.significantIndexes();
+        int at = 0;
+        if (significant.size() < 3 || !translator.tokens.get(significant.get(at++)).isKeyword("DROP")
+                || !translator.tokens.get(significant.get(at++)).isKeyword("TABLE")) {
+            return null;
+        }
+        boolean ifExists = at + 2 < significant.size() && translator.keywordAt(significant, at, "IF")
+                && translator.keywordAt(significant, at + 1, "EXISTS");
+        if (ifExists) {
+            at += 2;
+        }
+        Path path = translator.pathAt(significant, at);
+        if (translator.nextSignificant(path.end(), translator.tokens.size()) >= 0) {
+            return null;
+        }
+        String name = temporaryTableName(path.segments());
+        if (name == null) {
+            return null;
+        }
+        boolean sessionQualified = path.segments().size() == 2
+                && path.segments().getFirst().equalsIgnoreCase("_SESSION");
+        return new TemporaryTableDrop(name, ifExists, sessionQualified);
+    }
+
+    private static String temporaryTableName(List<String> segments) {
+        if (segments.size() == 1) {
+            return segments.getFirst();
+        }
+        return segments.size() == 2 && segments.getFirst().equalsIgnoreCase("_SESSION")
+                ? segments.get(1) : null;
+    }
+
+    private static Translation translateTemporaryFunction(String sql, String projectId, String jobProjectId,
+                                                           String defaultDatasetId, QueryParameters parameters,
+                                                           Set<String> temporaryTables,
+                                                           Set<String> temporaryFunctions) {
+        SqlDialectTranslator translator = new SqlDialectTranslator(projectId, jobProjectId, defaultDatasetId,
+                parameters, temporaryTables);
+        translator.tokens = new Lexer(sql).tokenize();
+        List<Integer> significant = translator.significantIndexes();
+        TemporaryDeclaration declaration = temporaryDeclaration(sql, "FUNCTION");
+        if (declaration == null) {
+            throw invalidQuery("CREATE TEMP FUNCTION requires a name, parameters and AS expression.");
+        }
+        int name = significant.get(declaration.name());
+        Token function = translator.tokens.get(name);
+        if (function.kind != Kind.IDENT && function.kind != Kind.QIDENT) {
+            throw invalidQuery("CREATE TEMP FUNCTION requires a function name.");
+        }
+        int open = translator.nextSignificant(name + 1, translator.tokens.size());
+        if (open < 0 || !translator.tokens.get(open).isPunct("(")) {
+            throw invalidQuery("CREATE TEMP FUNCTION requires a parameter list.");
+        }
+        int close = translator.matchingParen(open);
+        int as = translator.nextSignificant(close + 1, translator.tokens.size());
+        while (as >= 0 && !translator.tokens.get(as).isKeyword("AS")) {
+            as = translator.nextSignificant(as + 1, translator.tokens.size());
+        }
+        if (as < 0) {
+            throw invalidQuery("CREATE TEMP FUNCTION requires AS followed by an expression.");
+        }
+        int bodyOpen = translator.nextSignificant(as + 1, translator.tokens.size());
+        if (bodyOpen < 0 || !translator.tokens.get(bodyOpen).isPunct("(")) {
+            throw invalidQuery("CREATE TEMP FUNCTION requires an expression in parentheses.");
+        }
+        int bodyClose = translator.matchingParen(bodyOpen);
+        if (translator.nextSignificant(bodyClose + 1, translator.tokens.size()) >= 0) {
+            throw invalidQuery("Syntax error: Unexpected tokens after CREATE TEMP FUNCTION expression.");
+        }
+        String body = translator.text(bodyOpen + 1, bodyClose);
+        List<List<Token>> arguments = splitArguments(translator.tokens, open + 1, close);
+        int returns = translator.nextSignificant(close + 1, as);
+        String returnType = returns >= 0 && translator.tokens.get(returns).isKeyword("RETURNS")
+                ? translateType(translator.significant(returns + 1, as)) : null;
+        StringBuilder macro = new StringBuilder("CREATE ")
+                .append(declaration.orReplace() ? "OR REPLACE " : "")
+                .append("TEMP MACRO ")
+                .append(declaration.ifNotExists() ? "IF NOT EXISTS " : "")
+                .append(DuckTypes.quoteIdentifier(function.identifierText())).append('(');
+        Map<String, String> parameterReferences = new HashMap<>();
+        List<String> parameterValues = new ArrayList<>();
+        List<String> parameterNames = new ArrayList<>();
+        for (int i = 0; i < arguments.size(); i++) {
+            List<Token> argument = arguments.get(i);
+            if (argument.isEmpty() || (argument.getFirst().kind != Kind.IDENT
+                    && argument.getFirst().kind != Kind.QIDENT)) {
+                throw invalidQuery("CREATE TEMP FUNCTION parameter " + (i + 1) + " requires a name.");
+            }
+            if (i > 0) {
+                macro.append(", ");
+            }
+            String parameterAlias = "_floci_udf_arg_" + i;
+            String quotedParameterAlias = DuckTypes.quoteIdentifier(parameterAlias);
+            macro.append(quotedParameterAlias);
+            boolean anyType = argument.size() == 3 && argument.get(1).isKeyword("ANY")
+                    && argument.get(2).isKeyword("TYPE");
+            if (argument.size() < 2) {
+                throw invalidQuery("CREATE TEMP FUNCTION parameter " + (i + 1) + " requires a type.");
+            }
+            String reference = anyType ? quotedParameterAlias : "CAST(" + quotedParameterAlias + " AS "
+                    + translateType(argument.subList(1, argument.size())) + ")";
+            parameterReferences.put(argument.getFirst().identifierText().toLowerCase(Locale.ROOT), reference);
+            parameterValues.add(reference);
+            parameterNames.add(DuckTypes.quoteIdentifier(argument.getFirst().identifierText()));
+        }
+        translator.scalarUdfParameterAliases = Map.copyOf(parameterReferences);
+        Translation expression = translator.translateExpression(body);
+        boolean relationBinding = translator.scalarUdfNamedTableSource
+                || referencesTemporaryFunctionWithConcat(body, temporaryFunctions);
+        if (relationBinding) {
+            // Bind scalar parameters in one-row relation scope. This keeps nested expressions composable and lets
+            // DuckDB apply BigQuery's column-over-argument precedence when a named source exposes the same name.
+            translator = new SqlDialectTranslator(projectId, defaultDatasetId, parameters, temporaryTables);
+            expression = translator.translateExpression(body);
+        }
+        String typedExpression = returnType == null ? expression.sql()
+                : "CAST((" + expression.sql() + ") AS " + returnType + ")";
+        if (relationBinding && !parameterValues.isEmpty()) {
+            typedExpression = "SELECT (" + typedExpression + ") FROM (VALUES ("
+                    + String.join(", ", parameterValues) + ")) AS "
+                    + DuckTypes.quoteIdentifier("_floci_udf_parameters") + "("
+                    + String.join(", ", parameterNames) + ")";
+        }
+        return new Translation(macro.append(") AS (").append(typedExpression).append(')').toString(),
+                expression.tables(), expression.informationSchema(), expression.needsUnicodeCaseFold());
+    }
+
+    private static boolean referencesTemporaryFunctionWithConcat(String body, Set<String> temporaryFunctions) {
+        if (temporaryFunctions.isEmpty()) {
+            return false;
+        }
+        List<Token> bodyTokens = significant(new Lexer(body).tokenize());
+        boolean containsConcat = false;
+        for (int index = 0; index < bodyTokens.size(); index++) {
+            Token token = bodyTokens.get(index);
+            if ((token.kind == Kind.IDENT || token.kind == Kind.QIDENT)
+                    && token.identifierText().equalsIgnoreCase("CONCAT")) {
+                int next = index + 1;
+                if (next < bodyTokens.size() && bodyTokens.get(next).isPunct("(")) {
+                    containsConcat = true;
+                    break;
+                }
+            }
+        }
+        if (!containsConcat) {
+            return false;
+        }
+        for (int index = 0; index + 1 < bodyTokens.size(); index++) {
+            Token token = bodyTokens.get(index);
+            if ((token.kind == Kind.IDENT || token.kind == Kind.QIDENT)
+                    && temporaryFunctions.contains(token.identifierText().toLowerCase(Locale.ROOT))
+                    && bodyTokens.get(index + 1).isPunct("(")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private Translation translateExpression(String expression) {
+        if (expression.isBlank()) {
+            throw invalidQuery("CREATE TEMP FUNCTION expression cannot be empty.");
+        }
+        scalarUdfBody = true;
+        tokens = new Lexer(expression).tokenize();
+        rejectScripts();
+        collectCteNames();
+        rewriteTypedArrayLiterals();
+        rewriteArraySubscripts();
+        rewriteSelectAsStruct();
+        rewriteIndexedStructWildcards();
+        rewritePivotSyntax();
+        quoteImplicitSelectAliases();
+        expandHavingStructAliasFields();
+        quoteOffsetIdentifiers();
+        parenthesizeIntervalValues();
+        return new Translation(renderShortCircuitLogical(0, tokens.size()), tables, informationSchema,
+                needsUnicodeCaseFold);
+    }
+
+    private String renderShortCircuitLogical(int start, int end) {
+        if (isQuery(start, end)) {
+            return render(start, end).trim();
+        }
+        int or = rootLogicalOperator(start, end, "OR");
+        if (or >= 0) {
+            String left = renderShortCircuitLogical(start, or);
+            String right = renderShortCircuitLogical(or + 1, end);
+            return "CASE (" + left + ") WHEN TRUE THEN TRUE WHEN FALSE THEN (" + right
+                    + ") ELSE CASE (" + right + ") WHEN TRUE THEN TRUE ELSE NULL END END";
+        }
+        int and = rootLogicalOperator(start, end, "AND");
+        if (and >= 0) {
+            String left = renderShortCircuitLogical(start, and);
+            String right = renderShortCircuitLogical(and + 1, end);
+            return "CASE (" + left + ") WHEN FALSE THEN FALSE WHEN TRUE THEN (" + right
+                    + ") ELSE CASE (" + right + ") WHEN FALSE THEN FALSE ELSE NULL END END";
+        }
+        int first = nextSignificant(start, end);
+        int last = previousSignificant(end - 1);
+        if (first >= 0 && last >= first && tokens.get(first).isPunct("(") && matchingParen(first) == last) {
+            return "(" + renderShortCircuitLogical(first + 1, last) + ")";
+        }
+        return render(start, end).trim();
+    }
+
+    private int rootLogicalOperator(int start, int end, String operator) {
+        int parentheses = 0;
+        int brackets = 0;
+        int caseDepth = 0;
+        int pendingBetween = 0;
+        int found = -1;
+        for (int i = start; i < end; i++) {
+            Token token = tokens.get(i);
+            if (token.kind == Kind.SPACE) {
+                continue;
+            }
+            if (token.isPunct("(")) {
+                parentheses++;
+                continue;
+            }
+            if (token.isPunct(")")) {
+                parentheses--;
+                continue;
+            }
+            if (token.isPunct("[")) {
+                brackets++;
+                continue;
+            }
+            if (token.isPunct("]")) {
+                brackets--;
+                continue;
+            }
+            if (parentheses != 0 || brackets != 0) {
+                continue;
+            }
+            if (token.isKeyword("CASE")) {
+                caseDepth++;
+                continue;
+            }
+            if (token.isKeyword("END") && caseDepth > 0) {
+                caseDepth--;
+                continue;
+            }
+            if (caseDepth != 0) {
+                continue;
+            }
+            if (token.isKeyword("BETWEEN")) {
+                pendingBetween++;
+                continue;
+            }
+            if (token.isKeyword("AND") && pendingBetween > 0) {
+                pendingBetween--;
+                continue;
+            }
+            if (token.isKeyword(operator)) {
+                found = i;
+            }
+        }
+        return found;
+    }
+
+    private static List<String> splitScript(String sql) {
+        if (sql == null || sql.isBlank()) {
+            return List.of();
+        }
+        List<String> statements = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        int parentheses = 0;
+        boolean hasSignificantToken = false;
+        for (Token token : new Lexer(sql).tokenize()) {
+            if (token.isPunct("(")) {
+                parentheses++;
+            } else if (token.isPunct(")")) {
+                parentheses--;
+            }
+            if (token.isPunct(";") && parentheses == 0) {
+                if (!hasSignificantToken) {
+                    throw invalidQuery("Empty statements are not allowed in a multi-statement query.");
+                }
+                statements.add(current.toString().trim());
+                current.setLength(0);
+                hasSignificantToken = false;
+            } else {
+                current.append(token.text);
+                if (token.kind != Kind.SPACE && token.kind != Kind.RAW) {
+                    hasSignificantToken = true;
+                }
+            }
+        }
+        if (hasSignificantToken) {
+            statements.add(current.toString().trim());
+        }
+        return statements;
+    }
+
+    static List<List<Token>> splitArguments(List<Token> tokens, int from, int to) {
+        List<List<Token>> arguments = new ArrayList<>();
+        List<Token> current = new ArrayList<>();
+        int parentheses = 0;
+        int angleBrackets = 0;
+        for (int i = from; i < to; i++) {
+            Token token = tokens.get(i);
+            if (token.isPunct("(")) {
+                parentheses++;
+            } else if (token.isPunct(")")) {
+                parentheses--;
+            } else if (token.isPunct("<")) {
+                angleBrackets++;
+            } else if (token.isPunct(">")) {
+                angleBrackets--;
+            } else if (token.isPunct(">>")) {
+                angleBrackets -= 2;
+            }
+            if (token.isPunct(",") && parentheses == 0 && angleBrackets == 0) {
+                arguments.add(significant(current));
+                current.clear();
+            } else {
+                current.add(token);
+            }
+        }
+        if (!current.isEmpty()) {
+            arguments.add(significant(current));
+        }
+        return arguments;
+    }
+
+    private static List<Token> significant(List<Token> tokens) {
+        return tokens.stream().filter(token -> token.kind != Kind.SPACE && token.kind != Kind.RAW).toList();
     }
 
     /** Converts BigQuery's {@code FROM source PIVOT (aggregate FOR column IN (...))} clause to DuckDB syntax. */
@@ -449,6 +1793,12 @@ final class SqlDialectTranslator {
                     || kind == StatementKind.MERGE;
         }
 
+        Statement withQuerySql(String sql) {
+            return new Statement(kind, statementType, target, datasetTarget, orReplace, ifNotExists, ifExists,
+                    cascade, materialized, sql, columns, copySource, timePartitioning, rangePartitioning,
+                    partitionExpression);
+        }
+
     }
 
     /** Classifies a statement and resolves its target, without translating it to DuckDB. */
@@ -460,6 +1810,18 @@ final class SqlDialectTranslator {
     static Statement parseStatement(String sql, String projectId, String jobProjectId, String defaultDatasetId) {
         SqlDialectTranslator translator = new SqlDialectTranslator(projectId, jobProjectId, defaultDatasetId,
                 QueryParameters.none());
+        return translator.classify(sql);
+    }
+
+    static Statement parseStatement(String sql, String projectId, String defaultDatasetId,
+                                    Collection<String> temporaryTables) {
+        return parseStatement(sql, projectId, projectId, defaultDatasetId, temporaryTables);
+    }
+
+    static Statement parseStatement(String sql, String projectId, String jobProjectId, String defaultDatasetId,
+                                    Collection<String> temporaryTables) {
+        SqlDialectTranslator translator = new SqlDialectTranslator(projectId, jobProjectId, defaultDatasetId,
+                QueryParameters.none(), Set.copyOf(temporaryTables));
         return translator.classify(sql);
     }
 
@@ -1410,9 +2772,14 @@ final class SqlDialectTranslator {
         }
         Path path = pathAt(sig, at);
         TableRef target = resolveTable(path.segments());
-        tables.add(target);
-        String targetSql = DuckTypes.quoteIdentifier(target.datasetId()) + "."
-                + DuckTypes.quoteIdentifier(target.tableId());
+        String targetSql;
+        if (target == null) {
+            targetSql = DuckTypes.quoteIdentifier(path.segments().getLast());
+        } else {
+            tables.add(target);
+            targetSql = DuckTypes.quoteIdentifier(target.datasetId()) + "."
+                    + DuckTypes.quoteIdentifier(target.tableId());
+        }
         String head = switch (first) {
             case "INSERT" -> "INSERT INTO ";
             case "DELETE" -> "DELETE FROM ";
@@ -1420,7 +2787,7 @@ final class SqlDialectTranslator {
             default -> "UPDATE ";
         };
         StringBuilder out = new StringBuilder(head).append(targetSql);
-        String targetAlias = target.tableId();
+        String targetAlias = target != null ? target.tableId() : path.segments().getLast();
         int rest = path.end();
         int next = nextSignificant(rest, tokens.size());
         // UPDATE/DELETE/MERGE target alias: "t", "AS t"
@@ -1464,7 +2831,7 @@ final class SqlDialectTranslator {
         if (correlationSource == null) {
             return;
         }
-        Set<String> targetColumns = columnsOf.apply(target);
+        Set<String> targetColumns = target != null ? columnsOf.apply(target) : null;
         Set<String> sourceColumns = mergeSource == null ? null : columnsOf.apply(mergeSource);
         Set<String> outerColumns = null;
         if (targetColumns != null || sourceColumns != null) {
@@ -1472,9 +2839,12 @@ final class SqlDialectTranslator {
             outerColumns.addAll(targetColumns != null ? targetColumns : Set.of());
             outerColumns.addAll(sourceColumns != null ? sourceColumns : Set.of());
         }
-        mergeScope = new MergeScope(new HashSet<>(List.of(correlationSource.toLowerCase(Locale.ROOT),
-                targetAlias.toLowerCase(Locale.ROOT), target.tableId().toLowerCase(Locale.ROOT))), outerColumns,
-                targetColumns != null && sourceColumns != null);
+        Set<String> scopeNames = new HashSet<>(List.of(correlationSource.toLowerCase(Locale.ROOT),
+                targetAlias.toLowerCase(Locale.ROOT)));
+        if (target != null) {
+            scopeNames.add(target.tableId().toLowerCase(Locale.ROOT));
+        }
+        mergeScope = new MergeScope(scopeNames, outerColumns, targetColumns != null && sourceColumns != null);
         List<Integer> columns = new ArrayList<>();
         int depth = 0;
         int caseDepth = 0;
@@ -11241,6 +12611,13 @@ final class SqlDialectTranslator {
                 continue;
             }
 
+            String parameterReference = scalarUdfParameterAlias(t, i, start, end);
+            if (parameterReference != null) {
+                out.append(parameterReference);
+                i++;
+                continue;
+            }
+
             String record = unnestRangeValue(i);
             if (record != null) {
                 out.append(record);
@@ -11363,33 +12740,121 @@ final class SqlDialectTranslator {
         return k >= 0 && tokens.get(k).isKeyword("CURRENT");
     }
 
-    private boolean unnestHasJoinCondition(int unnest, int end) {
-        int open = nextSignificant(unnest + 1, end);
-        if (open < 0 || !tokens.get(open).isPunct("(")) {
-            return false;
+    private String scalarUdfParameterAlias(Token token, int index, int start, int end) {
+        if (scalarUdfParameterAliases.isEmpty() || token.kind != Kind.IDENT && token.kind != Kind.QIDENT) {
+            return null;
         }
-        int close = matchingParen(open);
+        String name = token.identifierText().toLowerCase(Locale.ROOT);
+        String alias = scalarUdfParameterAliases.get(name);
+        if (alias == null || scalarUdfSubqueryAliases(start, end, index).contains(name)) {
+            return null;
+        }
+        int previous = previousSignificant(index - 1);
+        int next = nextSignificant(index + 1, end);
+        if (previous >= 0 && (tokens.get(previous).isPunct(".") || tokens.get(previous).isKeyword("AS"))) {
+            return null;
+        }
+        if ((next >= 0 && tokens.get(next).isPunct("(")) || isDatePartSyntax(index, end)
+                || isIntervalPartSyntax(index)) {
+            return null;
+        }
+        return alias;
+    }
+
+    /** FROM aliases in a scalar subquery shadow parameters declared by the enclosing SQL UDF. */
+    private Set<String> scalarUdfSubqueryAliases(int start, int end, int index) {
+        if (!scalarUdfBody || !isQuery(start, end)) {
+            return Set.of();
+        }
+        int segmentStart = start;
+        int segmentEnd = end;
         int depth = 0;
-        for (int i = close + 1; i < end; i++) {
+        for (int i = start; i < end; i++) {
             Token token = tokens.get(i);
             if (token.isPunct("(")) {
                 depth++;
             } else if (token.isPunct(")")) {
-                if (depth == 0) {
-                    return false;
-                }
                 depth--;
-            } else if (depth == 0 && (token.isKeyword("ON") || token.isKeyword("USING"))) {
-                return true;
-            } else if (depth == 0 && (token.isPunct(",") || token.isKeyword("JOIN")
-                    || token.isKeyword("WHERE") || token.isKeyword("GROUP") || token.isKeyword("HAVING")
-                    || token.isKeyword("QUALIFY") || token.isKeyword("WINDOW") || token.isKeyword("ORDER")
-                    || token.isKeyword("LIMIT") || token.isKeyword("UNION") || token.isKeyword("INTERSECT")
+            } else if (depth == 0 && (token.isKeyword("UNION") || token.isKeyword("INTERSECT")
                     || token.isKeyword("EXCEPT"))) {
-                return false;
+                if (i < index) {
+                    segmentStart = i + 1;
+                } else {
+                    segmentEnd = i;
+                    break;
+                }
             }
         }
-        return false;
+
+        Set<String> aliases = new HashSet<>();
+        boolean inFrom = false;
+        depth = 0;
+        for (int i = segmentStart; i < segmentEnd; i++) {
+            Token token = tokens.get(i);
+            if (token.isPunct("(")) {
+                depth++;
+                continue;
+            }
+            if (token.isPunct(")")) {
+                depth--;
+                continue;
+            }
+            if (depth != 0 || token.kind == Kind.SPACE) {
+                continue;
+            }
+            if (token.isKeyword("FROM")) {
+                inFrom = true;
+                continue;
+            }
+            if (inFrom && token.kind == Kind.IDENT && CLAUSE_END_KEYWORDS.contains(token.upper())) {
+                inFrom = false;
+                continue;
+            }
+            if (inFrom && token.isKeyword("AS")) {
+                int alias = nextSignificant(i + 1, segmentEnd);
+                if (alias >= 0 && (tokens.get(alias).kind == Kind.IDENT
+                        || tokens.get(alias).kind == Kind.QIDENT)) {
+                    aliases.add(tokens.get(alias).identifierText().toLowerCase(Locale.ROOT));
+                }
+                continue;
+            }
+            if (inFrom && (token.kind == Kind.IDENT || token.kind == Kind.QIDENT)
+                    && (token.kind == Kind.QIDENT || !NON_ALIAS_KEYWORDS.contains(token.upper()))) {
+                int previous = previousSignificant(i - 1);
+                boolean followsParenthesizedSource = false;
+                if (previous >= segmentStart && tokens.get(previous).isPunct(")")) {
+                    int open = matchingOpen(previous, "(", ")");
+                    int callee = previousSignificant(open - 1);
+                    followsParenthesizedSource = open >= segmentStart
+                            && (isQuery(open + 1, previous)
+                            || callee >= segmentStart && tokens.get(callee).isKeyword("UNNEST"));
+                }
+                boolean followsTableName = scalarUdfTableSourceEndsAt(previous, segmentStart);
+                if (followsParenthesizedSource || followsTableName) {
+                    aliases.add(token.identifierText().toLowerCase(Locale.ROOT));
+                }
+            }
+        }
+        return aliases;
+    }
+
+    private boolean scalarUdfTableSourceEndsAt(int last, int start) {
+        if (last < start || tokens.get(last).kind != Kind.IDENT && tokens.get(last).kind != Kind.QIDENT) {
+            return false;
+        }
+        int first = last;
+        while (true) {
+            int dot = previousSignificant(first - 1);
+            int segment = previousSignificant(dot - 1);
+            if (dot < start || segment < start || !tokens.get(dot).isPunct(".")
+                    || tokens.get(segment).kind != Kind.IDENT && tokens.get(segment).kind != Kind.QIDENT) {
+                break;
+            }
+            first = segment;
+        }
+        int introducer = previousSignificant(first - 1);
+        return introducer >= start && (tokens.get(introducer).isKeyword("FROM")
+                || tokens.get(introducer).isKeyword("JOIN") || tokens.get(introducer).isPunct(","));
     }
 
     private boolean isIntervalPartSyntax(int index) {
@@ -11473,6 +12938,35 @@ final class SqlDialectTranslator {
             }
         }
         return argument;
+    }
+
+    private boolean unnestHasJoinCondition(int unnest, int end) {
+        int open = nextSignificant(unnest + 1, end);
+        if (open < 0 || !tokens.get(open).isPunct("(")) {
+            return false;
+        }
+        int close = matchingParen(open);
+        int depth = 0;
+        for (int i = close + 1; i < end; i++) {
+            Token token = tokens.get(i);
+            if (token.isPunct("(")) {
+                depth++;
+            } else if (token.isPunct(")")) {
+                if (depth == 0) {
+                    return false;
+                }
+                depth--;
+            } else if (depth == 0 && (token.isKeyword("ON") || token.isKeyword("USING"))) {
+                return true;
+            } else if (depth == 0 && (token.isPunct(",") || token.isKeyword("JOIN")
+                    || token.isKeyword("WHERE") || token.isKeyword("GROUP") || token.isKeyword("HAVING")
+                    || token.isKeyword("QUALIFY") || token.isKeyword("WINDOW") || token.isKeyword("ORDER")
+                    || token.isKeyword("LIMIT") || token.isKeyword("UNION") || token.isKeyword("INTERSECT")
+                    || token.isKeyword("EXCEPT"))) {
+                return false;
+            }
+        }
+        return false;
     }
 
     private String starExclusionPattern(int star, int open, int close) {
@@ -12120,7 +13614,10 @@ final class SqlDialectTranslator {
             break;
         }
         SourceAlias alias = sourceAlias(end, segments.getLast());
-        boolean direct = segments.size() > 1 || !cteVisibleAt(segments.getFirst(), source);
+        boolean temporary = segments.size() == 1 && temporaryTables.contains(segments.getFirst())
+                || segments.size() == 2 && segments.getFirst().equalsIgnoreCase("_SESSION")
+                && temporaryTables.contains(segments.getLast());
+        boolean direct = !temporary && (segments.size() > 1 || !cteVisibleAt(segments.getFirst(), source));
         boolean wildcard = direct && segments.getLast().endsWith("*");
         return new ProjectionSource(alias.name(), direct, wildcard, false, alias.nextToken(), null, source);
     }
@@ -12224,6 +13721,9 @@ final class SqlDialectTranslator {
 
     /** Renders a table path in a FROM/JOIN position plus its optional alias. */
     private int renderTablePath(int i, int end, StringBuilder out, Set<String> rangeVariables) {
+        if (scalarUdfBody) {
+            scalarUdfNamedTableSource = true;
+        }
         List<String> segments = new ArrayList<>();
         int k = i;
         while (k < end) {
@@ -12301,8 +13801,9 @@ final class SqlDialectTranslator {
         }
         TableRef ref = resolveTable(segments, i);
         if (ref == null) {
-            out.append(DuckTypes.quoteIdentifier(first));
-            rangeVariables.add(first.toLowerCase(Locale.ROOT));
+            String name = segments.getLast();
+            out.append(DuckTypes.quoteIdentifier(name));
+            rangeVariables.add(name.toLowerCase(Locale.ROOT));
         } else {
             tables.add(ref);
             out.append(DuckTypes.quoteIdentifier(ref.datasetId())).append('.')
@@ -12557,6 +14058,9 @@ final class SqlDialectTranslator {
             if (position >= 0 && cteVisibleAt(name, position)) {
                 return null;
             }
+            if (temporaryTables.contains(name)) {
+                return null;
+            }
             if (defaultDatasetId == null || defaultDatasetId.isBlank()) {
                 throw invalidQuery("Table name \"" + name
                         + "\" missing dataset while no default dataset is set in the request.");
@@ -12564,6 +14068,14 @@ final class SqlDialectTranslator {
             return new TableRef(defaultDatasetId, name);
         }
         if (segments.size() == 2) {
+            if (segments.getFirst().equalsIgnoreCase("_SESSION")) {
+                String name = segments.get(1);
+                if (temporaryTables.contains(name)) {
+                    return null;
+                }
+                throw GcpException.notFound("Not found: Dataset " + sessionDatasetProject()
+                        + ":_SESSION was not found");
+            }
             if (!jobProjectId.equals(projectId)) {
                 throw invalidQuery("Cross-project queries are not supported by the floci BigQuery emulator: "
                         + jobProjectId + "." + String.join(".", segments));
@@ -14357,6 +15869,9 @@ final class SqlDialectTranslator {
         @SuppressWarnings("unchecked")
         static String literal(Map<String, Object> type, Map<String, Object> value) {
             String typeName = type.get("type") instanceof String s ? s.toUpperCase(Locale.ROOT) : "STRING";
+            if (value.containsKey("value") && value.get("value") == null) {
+                return "CAST(NULL AS " + duckTypeOf(type) + ")";
+            }
             if (typeName.equals("ARRAY")) {
                 Map<String, Object> elementType = asMap(type.get("arrayType"));
                 String duckElement = duckTypeOf(elementType);

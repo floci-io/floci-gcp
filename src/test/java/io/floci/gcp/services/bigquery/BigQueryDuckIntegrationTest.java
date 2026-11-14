@@ -1222,6 +1222,1026 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(2)
+    void proceduralVariablesAndLoopsExecuteOnDuck() {
+        query("""
+                {"query": "DECLARE target_id INT64 DEFAULT 0; WHILE target_id < 2 DO SET target_id = target_id + 1; END WHILE; SELECT name FROM shop.users WHERE id = target_id", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("jobComplete", equalTo(true))
+                .body("rows", hasSize(1))
+                .body("rows[0].f[0].v", equalTo("bo"));
+    }
+
+    @Test
+    @Order(2)
+    void dateTimestampAndArrayVariablesKeepTheirTypes() {
+        query(Map.of("query", """
+                BEGIN
+                  DECLARE run_date DATE DEFAULT DATE '2025-01-01';
+                  DECLARE run_at TIMESTAMP DEFAULT TIMESTAMP '2025-01-01 12:00:00+00';
+                  DECLARE run_dates ARRAY<DATE> DEFAULT [DATE '2025-01-01'];
+                  SET run_date = DATE '2025-01-02';
+                  SET run_at = TIMESTAMP '2025-01-02 12:00:00+00';
+                  SET run_dates = [DATE '2025-01-02', DATE '2025-01-03'];
+                  SELECT run_date, run_at, run_dates;
+                END;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of("DATE", "TIMESTAMP", "DATE")))
+                .body("schema.fields[2].mode", equalTo("REPEATED"))
+                .body("rows[0].f[0].v", equalTo("2025-01-02"))
+                .body("rows[0].f[1].v", notNullValue())
+                .body("rows[0].f[2].v.v", equalTo(List.of("2025-01-02", "2025-01-03")));
+    }
+
+    @Test
+    @Order(2)
+    void declaredStructsArraysOfStructsAndAdditionalTypesRunOnDuck() {
+        query(Map.of("query", """
+                BEGIN
+                  DECLARE item STRUCT<id INT64, label STRING>
+                    DEFAULT STRUCT(1 AS id, 'first' AS label);
+                  DECLARE items ARRAY<STRUCT<id INT64, label STRING>>
+                    DEFAULT [STRUCT(1 AS id, 'first' AS label)];
+                  DECLARE payload BYTES DEFAULT b'first';
+                  DECLARE date_time DATETIME DEFAULT DATETIME '2025-02-03 12:00:00';
+                  DECLARE time_value TIME DEFAULT TIME '12:00:00';
+                  DECLARE document JSON DEFAULT JSON '{"value":"first"}';
+                  SET item = STRUCT(2 AS id, 'second' AS label);
+                  SET items = [STRUCT(2 AS id, 'second' AS label), STRUCT(3 AS id, 'third' AS label)];
+                  SET payload = b'second';
+                  SET date_time = DATETIME '2025-02-03 14:00:00';
+                  SET time_value = TIME '14:00:00';
+                  SET document = JSON '{"value":"second"}';
+                  SELECT item.id, item.label, items, payload, date_time, time_value, document;
+                END;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of(
+                        "INTEGER", "STRING", "RECORD", "BYTES", "DATETIME", "TIME", "JSON")))
+                .body("schema.fields[2].mode", equalTo("REPEATED"))
+                .body("rows[0].f[0].v", equalTo("2"))
+                .body("rows[0].f[1].v", equalTo("second"))
+                .body("rows[0].f[2].v.v.f.v", equalTo(List.of(List.of("2", "second"), List.of("3", "third"))))
+                .body("rows[0].f[3].v", equalTo("c2Vjb25k"))
+                .body("rows[0].f[4].v", equalTo("2025-02-03T14:00:00"))
+                .body("rows[0].f[5].v", equalTo("14:00:00"))
+                .body("rows[0].f[6].v", notNullValue());
+    }
+
+    @Test
+    @Order(2)
+    void typedArrayLiteralsKeepTheirElementTypeOnDuck() {
+        // Live BigQuery: `ARRAY<FLOAT64>[]` and `ARRAY<FLOAT64>[1]` both return ARRAY<FLOAT64> when the
+        // declaration has no type of its own, the empty one included.
+        query(Map.of("query", """
+                DECLARE numbers DEFAULT ARRAY<FLOAT64>[1];
+                DECLARE empty DEFAULT ARRAY<FLOAT64>[];
+                SELECT numbers, empty, ARRAY_LENGTH(empty) AS empty_length;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of("FLOAT", "FLOAT", "INTEGER")))
+                .body("schema.fields[0].mode", equalTo("REPEATED"))
+                .body("schema.fields[1].mode", equalTo("REPEATED"))
+                .body("rows[0].f[0].v.v", equalTo(List.of("1.0")))
+                .body("rows[0].f[1].v.v", equalTo(List.of()))
+                .body("rows[0].f[2].v", equalTo("0"));
+    }
+
+    @Test
+    @Order(2)
+    void copiedVariablesKeepTheirDeclaredTypeOnDuck() {
+        // Live BigQuery: an empty ARRAY<FLOAT64> and a NULL STRING keep their declared type when
+        // another variable copies them.
+        query(Map.of("query", """
+                DECLARE empty DEFAULT ARRAY<FLOAT64>[];
+                DECLARE copy DEFAULT empty;
+                DECLARE a STRING;
+                DECLARE b DEFAULT a;
+                SELECT copy, b, ARRAY_LENGTH(copy) AS copy_length;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of("FLOAT", "STRING", "INTEGER")))
+                .body("schema.fields[0].mode", equalTo("REPEATED"))
+                .body("rows[0].f[0].v.v", equalTo(List.of()))
+                .body("rows[0].f[1].v", nullValue())
+                .body("rows[0].f[2].v", equalTo("0"));
+    }
+
+    @Test
+    @Order(2)
+    void structValuesAreAssignedByFieldPositionOnDuck() {
+        // Live BigQuery assigns a STRUCT by position: the default and the SET both keep source order,
+        // so the differently named `STRUCT(1 AS b, 2 AS a)` still reaches a=1, b=2.
+        query(Map.of("query", """
+                DECLARE by_default STRUCT<a INT64, b INT64> DEFAULT STRUCT(1 AS b, 2 AS a);
+                DECLARE by_set STRUCT<a INT64, b INT64>;
+                SET by_set = STRUCT(2 AS b, 1 AS a);
+                SELECT by_default.a AS default_a, by_default.b AS default_b,
+                       by_set.a AS set_a, by_set.b AS set_b;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("default_a", "default_b", "set_a", "set_b")))
+                .body("rows[0].f[0].v", equalTo("1"))
+                .body("rows[0].f[1].v", equalTo("2"))
+                .body("rows[0].f[2].v", equalTo("2"))
+                .body("rows[0].f[3].v", equalTo("1"));
+    }
+
+    @Test
+    @Order(2)
+    void temporaryTableColumnsWinOverSameNamedVariables() {
+        // Live BigQuery returns 1: a temporary table's column shadows the script variable.
+        query(Map.of("query", "DECLARE id INT64 DEFAULT 99; CREATE TEMP TABLE t AS SELECT 1 AS id; "
+                + "SELECT id FROM t;", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("id"))
+                .body("rows[0].f[0].v", equalTo("1"));
+        // Live BigQuery returns 99: an alias does not hide the variable it names.
+        query(Map.of("query", "DECLARE id INT64 DEFAULT 99; SELECT id AS id", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("id"))
+                .body("rows[0].f[0].v", equalTo("99"));
+    }
+
+    @Test
+    @Order(2)
+    void scriptVariablesLeaveDeclaredTemporaryColumnsAlone() {
+        // The declared schema and the INSERT column list name columns; the value a variable supplies
+        // in the same statement still substitutes, as in BigQuery.
+        query(Map.of("query", """
+                DECLARE id INT64 DEFAULT 99;
+                CREATE TEMP TABLE declared (id INT64);
+                INSERT INTO declared (id) VALUES (5);
+                SELECT id FROM declared;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("5"));
+        query(Map.of("query", """
+                DECLARE id INT64 DEFAULT 99;
+                CREATE TEMP TABLE declared (id INT64);
+                INSERT INTO declared (id) VALUES (id);
+                SELECT id FROM declared;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("99"));
+        // An UPDATE reads the target's columns, so the variable leaves them alone.
+        query(Map.of("query", """
+                DECLARE id INT64 DEFAULT 99;
+                CREATE TEMP TABLE updated AS SELECT 1 AS id;
+                UPDATE updated SET id = id + 1 WHERE id = 1;
+                SELECT id FROM updated;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("2"));
+    }
+
+    @Test
+    @Order(2)
+    void forLoopRowsKeepTheTypesOfTheirQuery() {
+        // Live BigQuery reports DATE here and returns 2025-01-01.
+        query(Map.of("query", """
+                FOR r IN (SELECT DATE '2025-01-01' AS d) DO
+                  SELECT r.d AS d;
+                END FOR;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].type", equalTo("DATE"))
+                .body("rows[0].f[0].v", equalTo("2025-01-01"));
+        // A TIMESTAMP field keeps its type too, in the select list and as a parameter.
+        query(Map.of("query", """
+                FOR r IN (SELECT TIMESTAMP '2025-01-01 00:00:00+00' AS t, DATE '2025-01-02' AS d) DO
+                  SELECT r.t AS t, r.d AS d;
+                END FOR;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of("TIMESTAMP", "DATE")))
+                .body("rows[0].f[0].v", equalTo("1735689600"))
+                .body("rows[0].f[1].v", equalTo("2025-01-02"));
+        // The row also binds as a struct parameter, keeping each field's type.
+        query(Map.of("query", """
+                FOR r IN (SELECT DATE '2025-01-01' AS d) DO
+                  EXECUTE IMMEDIATE "SELECT @row.d AS d" USING r AS row;
+                END FOR;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].type", equalTo("DATE"))
+                .body("rows[0].f[0].v", equalTo("2025-01-01"));
+        query(Map.of("query", """
+                FOR r IN (SELECT TIMESTAMP '2025-01-01 00:00:00+00' AS t) DO
+                  EXECUTE IMMEDIATE "SELECT @row.t AS t" USING r AS row;
+                END FOR;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].type", equalTo("TIMESTAMP"))
+                .body("rows[0].f[0].v", equalTo("1735689600"));
+    }
+
+    @Test
+    @Order(2)
+    void createdTemporaryTablesRejectNullsInRequiredFields() {
+        // Live BigQuery: "Required field item.id cannot be null; error in writing field item".
+        query(Map.of("query", """
+                CREATE TEMP TABLE required_fields (item STRUCT<id INT64 NOT NULL>)
+                  AS SELECT STRUCT(NULL AS id) AS item;
+                SELECT * FROM required_fields;
+                """, "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalidQuery"))
+                .body("error.message", containsString("required field item.id"));
+    }
+
+    @Test
+    @Order(2)
+    void scriptParametersBindByNameWhateverTheParameterMode() {
+        // BigQuery infers NAMED from the names, so a script without a parameterMode binds them.
+        query(Map.of("query", "SELECT @value AS a; SELECT @value AS b", "useLegacySql", false,
+                "queryParameters", List.of(Map.of("name", "value", "parameterType", Map.of("type", "INT64"),
+                        "parameterValue", Map.of("value", "7")))))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("b"))
+                .body("rows[0].f[0].v", equalTo("7"));
+    }
+
+    @Test
+    @Order(2)
+    void scriptsRejectPositionalParametersEvenWithoutAParameterMode() {
+        // BigQuery binds `?` across the statements of a script and returns 2 here; the emulator
+        // rejects positional parameters in scripts because each statement would rebind the first one.
+        Map<String, Object> first = Map.of("parameterType", Map.of("type", "INT64"),
+                "parameterValue", Map.of("value", "1"));
+        Map<String, Object> second = Map.of("parameterType", Map.of("type", "INT64"),
+                "parameterValue", Map.of("value", "2"));
+        query(Map.of("query", "SELECT ? AS a; SELECT ? AS b", "useLegacySql", false,
+                "queryParameters", List.of(first, second)))
+                .then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalidQuery"))
+                .body("error.message", containsString(
+                        "Positional query parameters are not supported in multi-statement scripts"));
+    }
+
+    @Test
+    @Order(2)
+    void scriptLoopsKeepTheLastQueryResult() {
+        // Live BigQuery returns 42: a loop's result is the last statement that produced one, so the
+        // terminating condition, which runs after the body, does not erase it.
+        query(Map.of("query", """
+                DECLARE n INT64 DEFAULT 0;
+                WHILE (n < 1) DO
+                  SET n = n + 1;
+                  SELECT 42 AS answer;
+                END WHILE;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("answer"))
+                .body("rows", hasSize(1))
+                .body("rows[0].f[0].v", equalTo("42"));
+        // Live BigQuery returns 2: each iteration replaces the previous result.
+        query(Map.of("query", """
+                DECLARE n INT64 DEFAULT 0;
+                WHILE (n < 2) DO
+                  SET n = n + 1;
+                  SELECT n AS v;
+                END WHILE;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(1))
+                .body("rows[0].f[0].v", equalTo("2"));
+        // Live BigQuery returns 42: REPEAT tests its condition after the body, like WHILE.
+        query(Map.of("query", """
+                DECLARE n INT64 DEFAULT 0;
+                REPEAT
+                  SET n = n + 1;
+                  SELECT 42 AS answer;
+                UNTIL n >= 1 END REPEAT;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(1))
+                .body("rows[0].f[0].v", equalTo("42"));
+        // Live BigQuery returns 9: a loop that produces no result leaves the earlier one in place.
+        query(Map.of("query", """
+                DECLARE n INT64 DEFAULT 0;
+                SELECT 9 AS a;
+                WHILE n < 1 DO SET n = n + 1; END WHILE;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(1))
+                .body("rows[0].f[0].v", equalTo("9"));
+    }
+
+    @Test
+    @Order(2)
+    void scriptArithmeticOverflowIsAnInvalidQuery() {
+        // Live BigQuery: "Integer Overflow at [2:9]", an invalid query rather than a server error.
+        query(Map.of("query", """
+                DECLARE x INT64 DEFAULT 9223372036854775807;
+                SET x = x + 1;
+                SELECT x;
+                """, "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalidQuery"))
+                .body("error.message", containsString("Integer Overflow"));
+        // jobs.insert reports the same failure in the job status, not as a server error.
+        given().contentType("application/json").body("""
+                {"configuration": {"query": {"query":
+                  "DECLARE x INT64 DEFAULT 9223372036854775807;\\nSET x = x + 1;\\nSELECT x;",
+                  "useLegacySql": false}}}
+                """).when().post(BASE + "/jobs")
+                .then().statusCode(200)
+                .body("status.state", equalTo("DONE"))
+                .body("status.errorResult.reason", equalTo("invalidQuery"))
+                .body("status.errorResult.message", containsString("Integer Overflow"));
+    }
+
+    @Test
+    @Order(2)
+    void simpleCaseComparesTheWholeWhenOperand() {
+        // Live BigQuery returns 'right': a simple CASE compares FALSE = (FALSE OR TRUE), so no WHEN matches.
+        query(Map.of("query", """
+                CASE FALSE
+                  WHEN FALSE OR TRUE THEN SELECT 'wrong' AS result;
+                  ELSE SELECT 'right' AS result;
+                END CASE;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("result"))
+                .body("rows[0].f[0].v", equalTo("right"));
+    }
+
+    @Test
+    @Order(2)
+    void executeImmediateUsingTakesAComparisonValueWithAnAlias() {
+        // Live BigQuery returns true: `1 < 2` is the USING value and `AS flag` names it.
+        query(Map.of("query", """
+                DECLARE flag BOOL DEFAULT FALSE;
+                EXECUTE IMMEDIATE 'SELECT @flag AS flag' USING 1 < 2 AS flag;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(1))
+                .body("rows[0].f[0].v", equalTo("true"));
+    }
+
+    @Test
+    @Order(2)
+    void singleProceduralStatementsRunAsScripts() {
+        // Live BigQuery accepts a request made only of declarations and returns no rows.
+        query(Map.of("query", "DECLARE x INT64;", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", anyOf(nullValue(), hasSize(0)));
+        query(Map.of("query", "DECLARE x INT64 DEFAULT 5;", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", anyOf(nullValue(), hasSize(0)));
+        // Live BigQuery returns 1: control flow is a script even when it is the whole request.
+        query(Map.of("query", "IF TRUE THEN SELECT 1 AS a; END IF;", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("a"))
+                .body("rows[0].f[0].v", equalTo("1"));
+        // Live BigQuery rejects an assignment to an undeclared variable.
+        query(Map.of("query", "SET x = 1;", "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalidQuery"))
+                .body("error.message", containsString("has not been declared"));
+    }
+
+    @Test
+    @Order(2)
+    void aSelectedVariableKeepsItsNameAsTheColumnName() {
+        // Live BigQuery names each column after the variable, so a client reads row.output_value.
+        query(Map.of("query", """
+                DECLARE input_value INT64 DEFAULT 7;
+                DECLARE output_value INT64;
+                EXECUTE IMMEDIATE "SELECT @value * 2 AS result" INTO output_value USING input_value AS value;
+                SELECT output_value;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("output_value"))
+                .body("rows[0].f[0].v", equalTo("14"));
+        query(Map.of("query", """
+                DECLARE x INT64 DEFAULT 1;
+                BEGIN SET x = 2; END;
+                SELECT x;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("x"))
+                .body("rows[0].f[0].v", equalTo("2"));
+        query(Map.of("query", """
+                DECLARE total INT64 DEFAULT 0;
+                FOR r IN (SELECT 1 AS n UNION ALL SELECT 2) DO
+                  SET total = total + r.n;
+                END FOR;
+                SELECT total;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("total"))
+                .body("rows[0].f[0].v", equalTo("3"));
+        // A tuple assignment names both of its columns.
+        query(Map.of("query", """
+                DECLARE a INT64;
+                DECLARE b INT64;
+                SET (a, b) = (1, 2);
+                SELECT a, b;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("a", "b")))
+                .body("rows[0].f[0].v", equalTo("1"))
+                .body("rows[0].f[1].v", equalTo("2"));
+        // A path over a struct variable is named after its last field.
+        query(Map.of("query", """
+                DECLARE item STRUCT<id INT64> DEFAULT STRUCT(1 AS id);
+                SELECT item.id;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("id"))
+                .body("rows[0].f[0].v", equalTo("1"));
+    }
+
+    @Test
+    @Order(2)
+    void scriptNumericVariablesKeepTheirDeclaredType() {
+        // A FLOAT64 literal stays floating point, so the sum is 0.30000000000000004 and not NUMERIC 0.3.
+        query(Map.of("query", "DECLARE f FLOAT64 DEFAULT 0.1; SELECT f + 0.2 AS v", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].type", equalTo("FLOAT"))
+                .body("rows[0].f[0].v", equalTo("0.30000000000000004"));
+        query(Map.of("query", "DECLARE f FLOAT64 DEFAULT 0.1; SELECT f", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].type", equalTo("FLOAT"))
+                .body("rows[0].f[0].v", equalTo("0.1"));
+        query(Map.of("query", "DECLARE n NUMERIC DEFAULT 1.5; SELECT n * 2 AS v", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].type", equalTo("NUMERIC"))
+                .body("rows[0].f[0].v", equalTo("3"));
+        query(Map.of("query", "DECLARE n NUMERIC DEFAULT 1.5; SELECT n", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].type", equalTo("NUMERIC"))
+                .body("rows[0].f[0].v", equalTo("1.5"));
+        query(Map.of("query", "DECLARE n NUMERIC DEFAULT 1.5; SET n = n * 2; SELECT n", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].type", equalTo("NUMERIC"))
+                .body("rows[0].f[0].v", equalTo("3"));
+        // An INT64 operand above 2^53 keeps every digit, as BigQuery's NUMERIC does.
+        query(Map.of("query", """
+                DECLARE n NUMERIC DEFAULT 0;
+                SET n = n + 9007199254740993;
+                SELECT n;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("9007199254740993"));
+        query(Map.of("query", """
+                DECLARE n NUMERIC DEFAULT 9007199254740993;
+                IF n = 9007199254740993 THEN SELECT 'equal' AS r; ELSE SELECT 'differs' AS r; END IF;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("equal"));
+    }
+
+    @Test
+    @Order(2)
+    void aScriptVariablesColumnsStayInTheQueryThatReadsThem() {
+        // Each branch of a set operation, and each sibling subquery, is a query of its own: the columns one
+        // reads leave the names another writes to the variable. Every value below is live BigQuery's.
+        query(Map.of("query", """
+                DECLARE v INT64 DEFAULT 1;
+                CREATE TEMP TABLE t AS SELECT 4 AS v;
+                SELECT COUNT(*) FROM t UNION ALL SELECT v;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(2))
+                .body("rows[0].f[0].v", equalTo("1"))
+                .body("rows[1].f[0].v", equalTo("1"));
+        query(Map.of("query", """
+                DECLARE v INT64 DEFAULT 1;
+                CREATE TEMP TABLE t AS SELECT 4 AS v;
+                SELECT (SELECT MAX(v) FROM t) AS a, (SELECT v) AS b;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("4"))
+                .body("rows[0].f[1].v", equalTo("1"));
+        // A CTE or a derived table a branch reads exposes its columns there, not in the branch beside it.
+        query(Map.of("query",
+                "DECLARE v INT64 DEFAULT 1; WITH t AS (SELECT 4 AS v) SELECT v FROM t UNION ALL SELECT v",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(2))
+                .body("rows[0].f[0].v", equalTo("4"))
+                .body("rows[1].f[0].v", equalTo("1"));
+        query(Map.of("query",
+                "DECLARE v INT64 DEFAULT 1; SELECT v FROM (SELECT 4 AS v) UNION ALL SELECT v",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(2))
+                .body("rows[0].f[0].v", equalTo("4"))
+                .body("rows[1].f[0].v", equalTo("1"));
+        query(Map.of("query", "DECLARE v INT64 DEFAULT 1; SELECT 4 AS v UNION ALL SELECT v",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(2))
+                .body("rows[0].f[0].v", equalTo("4"))
+                .body("rows[1].f[0].v", equalTo("1"));
+        // A WITH clause declares its CTE for every branch of the set operation, so a later branch that reads
+        // it resolves the column too, while a branch that does not still binds the variable: 0 and 4, then
+        // 0, 4 and 1.
+        query(Map.of("query", """
+                DECLARE v INT64 DEFAULT 1;
+                WITH t AS (SELECT 4 AS v) SELECT 0 UNION ALL SELECT v FROM t;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(2))
+                .body("rows[0].f[0].v", equalTo("0"))
+                .body("rows[1].f[0].v", equalTo("4"));
+        query(Map.of("query", """
+                DECLARE v INT64 DEFAULT 1;
+                WITH t AS (SELECT 4 AS v) SELECT 0 UNION ALL SELECT v FROM t UNION ALL SELECT v;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(3))
+                .body("rows[0].f[0].v", equalTo("0"))
+                .body("rows[1].f[0].v", equalTo("4"))
+                .body("rows[2].f[0].v", equalTo("1"));
+        // A nested WITH of the same name shadows the CTE of the query around it, so the column it exposes is
+        // the one that answers, and the variable where it exposes none: 0 and 1, then 0 and 2.
+        query(Map.of("query", """
+                DECLARE v INT64 DEFAULT 1;
+                WITH t AS (SELECT 4 AS v)
+                SELECT 0 UNION ALL
+                SELECT (WITH t AS (SELECT 2 AS w) SELECT v FROM t);
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(2))
+                .body("rows[0].f[0].v", equalTo("0"))
+                .body("rows[1].f[0].v", equalTo("1"));
+        query(Map.of("query", """
+                DECLARE v INT64 DEFAULT 1;
+                WITH t AS (SELECT 4 AS v)
+                SELECT 0 UNION ALL
+                SELECT (WITH t AS (SELECT 2 AS v) SELECT v FROM t);
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(2))
+                .body("rows[0].f[0].v", equalTo("0"))
+                .body("rows[1].f[0].v", equalTo("2"));
+        // A nested WITH of another name leaves the CTE around it in scope: 0 and 4.
+        query(Map.of("query", """
+                DECLARE v INT64 DEFAULT 1;
+                WITH t AS (SELECT 4 AS v)
+                SELECT 0 UNION ALL
+                SELECT (WITH u AS (SELECT 9 AS w) SELECT v FROM t);
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(2))
+                .body("rows[0].f[0].v", equalTo("0"))
+                .body("rows[1].f[0].v", equalTo("4"));
+        // A branch still reads the columns the query around the set operation reads: 4 + 2 = 6.
+        query(Map.of("query", """
+                DECLARE v INT64 DEFAULT 1;
+                CREATE TEMP TABLE t AS SELECT 4 AS v;
+                SELECT (SELECT SUM(x) FROM (SELECT (SELECT v) AS x UNION ALL SELECT 2)) AS s FROM t;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("6"));
+        // The select-star EXCEPT stays inside its query, so the table's columns still answer: 4, and
+        // EXCEPT DISTINCT really is a set operation: one row, 4.
+        query(Map.of("query", """
+                DECLARE v INT64 DEFAULT 1;
+                CREATE TEMP TABLE t AS SELECT 4 AS v, 2 AS w;
+                SELECT * EXCEPT(w) FROM t WHERE v > 0;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(1))
+                .body("rows[0].f[0].v", equalTo("4"));
+        query(Map.of("query", """
+                DECLARE v INT64 DEFAULT 1;
+                CREATE TEMP TABLE t AS SELECT 4 AS v;
+                SELECT v FROM t EXCEPT DISTINCT SELECT 9;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(1))
+                .body("rows[0].f[0].v", equalTo("4"));
+    }
+
+    @Test
+    @Order(2)
+    void aScriptVariablesArithmeticIsTypedByItsOperands() {
+        // The operands, not the declared type of the target, type the arithmetic: BigQuery subtracts these
+        // two INT64 literals exactly and then coerces the 1 to FLOAT64, and multiplies 3 by 4 in INT64.
+        query(Map.of("query", """
+                DECLARE f FLOAT64;
+                SET f = 9007199254740993 - 9007199254740992;
+                SELECT f;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].type", equalTo("FLOAT"))
+                .body("rows[0].f[0].v", equalTo("1.0"));
+        query(Map.of("query", """
+                DECLARE f FLOAT64;
+                SET f = 3 * 4;
+                SELECT f;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].type", equalTo("FLOAT"))
+                .body("rows[0].f[0].v", equalTo("12.0"));
+        // A FLOAT64 target does not widen the operands, so an INT64 overflow still fails.
+        query(Map.of("query", """
+                DECLARE f FLOAT64;
+                SET f = 9223372036854775807 + 1;
+                SELECT f;
+                """, "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", containsString("Integer Overflow"));
+    }
+
+    @Test
+    @Order(2)
+    void scriptVariablesLeaveTheStatementsOwnNamesAlone() {
+        // Live BigQuery resolves the derived table's column first: 2, not the variable.
+        query(Map.of("query", "DECLARE x INT64 DEFAULT 1; SELECT x FROM (SELECT 2 AS x)", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("x"))
+                .body("rows[0].f[0].v", equalTo("2"));
+        // An UNNEST alias is a column scope too: 1.
+        query(Map.of("query", "DECLARE id INT64 DEFAULT 7; SELECT id AS v FROM UNNEST([1]) AS id",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("v"))
+                .body("rows[0].f[0].v", equalTo("1"));
+        // A CTE name names a table, not a variable: 5, as in BigQuery.
+        query(Map.of("query", "DECLARE x INT64 DEFAULT 1; WITH x AS (SELECT 5 AS v) SELECT v FROM x",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("v"))
+                .body("rows[0].f[0].v", equalTo("5"));
+        // A nested query's alias hides the variable inside that query only: 7 and 1.
+        query(Map.of("query", """
+                DECLARE x INT64 DEFAULT 7;
+                SELECT x AS v, (SELECT x FROM UNNEST([1]) AS x) AS nested;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("7"))
+                .body("rows[0].f[1].v", equalTo("1"));
+        // A subquery that aliases the name still names the variable inside it: 7 and 7.
+        query(Map.of("query", """
+                DECLARE x INT64 DEFAULT 7;
+                SELECT x AS v, (SELECT x AS x FROM UNNEST([1]) AS u) AS nested;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("7"))
+                .body("rows[0].f[1].v", equalTo("7"));
+        // An alias stays visible inside a parenthesised or function-call condition: 2.
+        query(Map.of("query", """
+                DECLARE total INT64 DEFAULT 0;
+                SELECT COUNT(*) AS total FROM UNNEST([1,2]) AS n HAVING (total > 1);
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("total"))
+                .body("rows[0].f[0].v", equalTo("2"));
+        query(Map.of("query", """
+                DECLARE total INT64 DEFAULT 0;
+                SELECT COUNT(*) AS total FROM UNNEST([1,2]) AS n HAVING COALESCE(total, 0) > 1;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("2"));
+        // A CTE reference inside a nested query still names the table.
+        query(Map.of("query", """
+                DECLARE x INT64 DEFAULT 7;
+                WITH x AS (SELECT 5 AS v) SELECT v FROM (SELECT v FROM x) AS nested;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("v"))
+                .body("rows[0].f[0].v", equalTo("5"));
+        // A variable that is a function argument or a grouped expression is not a whole select item,
+        // so only the item that is one is named after the variable: live BigQuery answers f0_ and x.
+        query(Map.of("query", "DECLARE x INT64 DEFAULT 7; SELECT COALESCE(NULL, x), x", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("f0_"))
+                .body("rows[0].f[0].v", equalTo("7"))
+                .body("schema.fields[1].name", equalTo("x"))
+                .body("rows[0].f[1].v", equalTo("7"));
+        query(Map.of("query", "DECLARE x INT64 DEFAULT 7; SELECT IF(x > 1, x, 0)", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("f0_"))
+                .body("rows[0].f[0].v", equalTo("7"));
+        query(Map.of("query", "DECLARE x INT64 DEFAULT 7; SELECT (x) + 1", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("f0_"))
+                .body("rows[0].f[0].v", equalTo("8"));
+        // A struct field named like the variable is no select-list alias either: live BigQuery
+        // resolves the variable, so the condition holds and the count is 2.
+        query(Map.of("query", """
+                DECLARE total INT64 DEFAULT 5;
+                SELECT STRUCT(COUNT(*) AS total) AS s FROM UNNEST([1,2]) AS u HAVING total > 1;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("s"))
+                .body("rows[0].f[0].v.f[0].v", equalTo("2"));
+    }
+
+    @Test
+    @Order(2)
+    void scriptVariablesLeaveTheColumnsOfASubqueryAndACTEAlone() {
+        // A table column wins inside a subquery too, whether the procedure evaluates the expression on
+        // its own or as a condition. Every value below is live BigQuery's.
+        query(Map.of("query", """
+                DECLARE v INT64 DEFAULT 1;
+                CREATE TEMP TABLE t AS SELECT 4 AS v;
+                SET v = (SELECT v FROM t);
+                SELECT v;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("v"))
+                .body("rows[0].f[0].v", equalTo("4"));
+        query(Map.of("query", """
+                DECLARE v INT64 DEFAULT 1;
+                CREATE TEMP TABLE t AS SELECT 4 AS v;
+                IF EXISTS(SELECT 1 FROM t WHERE v = 4) THEN SELECT 'col' AS r; ELSE SELECT 'var' AS r; END IF;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("col"));
+        // The columns a CTE's select list exposes win over a variable, as a derived table's do: 4, a
+        // row, 2 then 4, and one row.
+        query(Map.of("query", "DECLARE v INT64 DEFAULT 1; WITH t AS (SELECT 4 AS v) SELECT v FROM t",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("v"))
+                .body("rows[0].f[0].v", equalTo("4"));
+        query(Map.of("query",
+                "DECLARE v INT64 DEFAULT 1; WITH t AS (SELECT 4 AS v) SELECT * FROM t WHERE v > 3",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(1))
+                .body("rows[0].f[0].v", equalTo("4"));
+        query(Map.of("query", """
+                DECLARE v INT64 DEFAULT 1;
+                WITH t AS (SELECT 4 AS v UNION ALL SELECT 2) SELECT v AS o FROM t ORDER BY v;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("2"))
+                .body("rows[1].f[0].v", equalTo("4"));
+        query(Map.of("query",
+                "DECLARE v INT64 DEFAULT 1; WITH t AS (SELECT 4 AS v) SELECT COUNT(*) AS c FROM t GROUP BY v",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("c"))
+                .body("rows[0].f[0].v", equalTo("1"));
+        // A later CTE reads the columns an earlier one exposes: 4.
+        query(Map.of("query", """
+                DECLARE v INT64 DEFAULT 1;
+                WITH a AS (SELECT 4 AS v), b AS (SELECT v FROM a) SELECT v FROM b;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("4"));
+        // A CTE nothing reads declares no column in scope, so the variable still answers: 1, 6 and 4.
+        query(Map.of("query", "DECLARE v INT64 DEFAULT 1; WITH t AS (SELECT 4 AS v) SELECT v",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("1"));
+        query(Map.of("query", "DECLARE v INT64 DEFAULT 1; WITH t AS (SELECT 4 AS v) SELECT 5 + v",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("f0_"))
+                .body("rows[0].f[0].v", equalTo("6"));
+        query(Map.of("query", "DECLARE v INT64 DEFAULT 1; WITH t AS (SELECT 4 AS v) SELECT (SELECT v FROM t)",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("4"));
+        // A stored table's column wins in an expression and in a loop condition alike: 3 and one
+        // iteration.
+        query(Map.of("query", """
+                DECLARE id INT64 DEFAULT 1;
+                DECLARE m INT64;
+                SET m = (SELECT MAX(id) FROM shop.users);
+                SELECT m;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("3"));
+        query(Map.of("query", """
+                DECLARE i INT64 DEFAULT 0;
+                DECLARE n INT64 DEFAULT 0;
+                WHILE (SELECT COUNT(*) FROM shop.users WHERE id = 1) > i DO
+                  SET n = n + 1;
+                  SET i = i + 1;
+                END WHILE;
+                SELECT n;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("1"));
+    }
+
+    @Test
+    @Order(2)
+    void aScriptVariableOutsideASubqueryKeepsItsValue() {
+        // A table a nested query reads exposes its columns inside that query only, so a name the query
+        // around it writes still binds the variable. Every value below is live BigQuery's: out, 2, 3 and 5.
+        query(Map.of("query", """
+                DECLARE v INT64 DEFAULT 1;
+                CREATE TEMP TABLE t AS SELECT 4 AS v;
+                IF v IN (SELECT v FROM t) THEN SELECT 'in' AS r; ELSE SELECT 'out' AS r; END IF;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("out"));
+        query(Map.of("query", """
+                DECLARE v INT64 DEFAULT 1;
+                CREATE TEMP TABLE t AS SELECT 4 AS v;
+                SET v = v + (SELECT COUNT(*) FROM t);
+                SELECT v;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("2"));
+        query(Map.of("query", """
+                DECLARE v INT64 DEFAULT 1;
+                CREATE TEMP TABLE t AS SELECT 4 AS v;
+                WHILE v < 3 DO SET v = v + 1; END WHILE;
+                SELECT v;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("3"));
+        query(Map.of("query", """
+                DECLARE v INT64 DEFAULT 1;
+                CREATE TEMP TABLE t AS SELECT 4 AS v;
+                SET v = (SELECT v FROM t) + v;
+                SELECT v;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("5"));
+        // The statement path scopes them the same way: 4 and 1, with or without another table beside the
+        // subquery, and 4 for a column the enclosing query reads.
+        query(Map.of("query", """
+                DECLARE v INT64 DEFAULT 1;
+                CREATE TEMP TABLE t AS SELECT 4 AS v;
+                SELECT (SELECT MAX(v) FROM t) AS m, v AS outer_v;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("4"))
+                .body("rows[0].f[1].v", equalTo("1"));
+        query(Map.of("query", """
+                DECLARE v INT64 DEFAULT 1;
+                CREATE TEMP TABLE t AS SELECT 4 AS v;
+                CREATE TEMP TABLE u AS SELECT 2 AS z;
+                SELECT (SELECT MAX(v) FROM t) AS m, v AS o FROM u;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("4"))
+                .body("rows[0].f[1].v", equalTo("1"));
+        query(Map.of("query", """
+                DECLARE v INT64 DEFAULT 1;
+                CREATE TEMP TABLE t AS SELECT 4 AS v;
+                CREATE TEMP TABLE u AS SELECT 2 AS z;
+                SELECT (SELECT z + v FROM u) AS s FROM t;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("6"));
+        query(Map.of("query", """
+                DECLARE v INT64 DEFAULT 1;
+                CREATE TEMP TABLE t AS SELECT 4 AS v;
+                SELECT (SELECT v) AS s FROM t;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("4"));
+        // A CTE and a derived table a subquery reads expose their columns there too: 4 with 1, twice.
+        query(Map.of("query",
+                "DECLARE v INT64 DEFAULT 1; WITH t AS (SELECT 4 AS v)"
+                        + " SELECT (SELECT v FROM t) AS m, v AS o",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("4"))
+                .body("rows[0].f[1].v", equalTo("1"));
+        query(Map.of("query",
+                "DECLARE v INT64 DEFAULT 1; SELECT (SELECT MAX(v) FROM (SELECT 4 AS v)) AS m, v AS o",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("4"))
+                .body("rows[0].f[1].v", equalTo("1"));
+    }
+
+    @Test
+    @Order(2)
+    void aTemporaryFunctionsParametersShadowScriptVariables() {
+        // Live BigQuery: 3, a parameter is local to the function, so the script variable of the same name
+        // is neither its declaration nor the references in its body.
+        query(Map.of("query", "DECLARE x INT64 DEFAULT 7; CREATE TEMP FUNCTION f(x INT64) AS (x + 1);"
+                        + " SELECT f(2)", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("f0_"))
+                .body("rows[0].f[0].v", equalTo("3"));
+        // The function's parameters end with its body: the statement that follows still binds the
+        // variable, as live BigQuery's 7 shows.
+        query(Map.of("query", "DECLARE x INT64 DEFAULT 7; CREATE TEMP FUNCTION f(x INT64) AS (x + 1);"
+                        + " SELECT x", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("x"))
+                .body("rows[0].f[0].v", equalTo("7"));
+        query(Map.of("query", "DECLARE x INT64 DEFAULT 7; CREATE TEMP FUNCTION f(x INT64) RETURNS INT64"
+                        + " AS (x * 2); SELECT f(3), x", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("6"))
+                .body("rows[0].f[1].v", equalTo("7"));
+        // A parameter of another name leaves the variable alone inside the body too: 9.
+        query(Map.of("query", "DECLARE x INT64 DEFAULT 7; CREATE TEMP FUNCTION f(y INT64) AS (y + x);"
+                        + " SELECT f(2)", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("9"));
+    }
+
+    @Test
+    @Order(2)
+    void aForLoopLeavesNoResultOfItsOwn() {
+        // Live BigQuery answers a script that ends in a FOR loop with no rows at all, whether the loop
+        // runs or not, so the earlier SELECT's result is gone: no schema, no rows, zero total rows.
+        query(Map.of("query", """
+                DECLARE n INT64 DEFAULT 0;
+                SELECT 9 AS answer;
+                FOR r IN (SELECT 1 AS id FROM UNNEST([1]) WHERE FALSE) DO SET n = n + 1; END FOR;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema", nullValue())
+                .body("rows", nullValue())
+                .body("totalRows", equalTo("0"));
+        query(Map.of("query", """
+                DECLARE n INT64 DEFAULT 0;
+                SELECT 9 AS answer;
+                FOR r IN (SELECT 1 AS id FROM UNNEST([1])) DO SET n = n + 1; END FOR;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema", nullValue())
+                .body("rows", nullValue())
+                .body("totalRows", equalTo("0"));
+        // A loop that runs a query reports that query's result: 5.
+        query(Map.of("query", """
+                DECLARE n INT64 DEFAULT 0;
+                SELECT 9 AS answer;
+                FOR r IN (SELECT 1 AS id FROM UNNEST([1])) DO SELECT 5 AS inner_result; END FOR;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("inner_result"))
+                .body("rows[0].f[0].v", equalTo("5"));
+        // A WHILE loop that never runs keeps the earlier result: 9.
+        query(Map.of("query", """
+                DECLARE n INT64 DEFAULT 0;
+                SELECT 9 AS answer;
+                WHILE FALSE DO SET n = n + 1; END WHILE;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("answer"))
+                .body("rows[0].f[0].v", equalTo("9"));
+    }
+
+    @Test
+    @Order(2)
+    void aBareBreakOrContinueReportsBigQuerysWording() {
+        // Live BigQuery: "BREAK without label is only allowed inside of a loop body at [1:1]".
+        query(Map.of("query", "BREAK;", "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalidQuery"))
+                .body("error.message", containsString(
+                        "BREAK without label is only allowed inside of a loop body"));
+        // Live BigQuery: "CONTINUE is only allowed inside of a loop body at [1:1]".
+        query(Map.of("query", "CONTINUE;", "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", containsString("CONTINUE is only allowed inside of a loop body"));
+    }
+
+    @Test
+    @Order(2)
+    void executeImmediateUsesParametersAndAssignsItsResult() {
+        query(Map.of("query", """
+                DECLARE input_value INT64 DEFAULT 7;
+                DECLARE output_value INT64;
+                EXECUTE IMMEDIATE "SELECT @value * 2 AS result"
+                  INTO output_value USING input_value AS value;
+                SELECT output_value;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].type", equalTo("INTEGER"))
+                .body("rows[0].f[0].v", equalTo("14"));
+    }
+
+    @Test
+    @Order(2)
+    void executeImmediateBindsAndReturnsAQueryResult() {
+        query(Map.of("query", """
+                DECLARE user_id INT64 DEFAULT 2;
+                DECLARE user_name STRING;
+                EXECUTE IMMEDIATE "SELECT name FROM shop.users WHERE id = @requested_id"
+                  INTO user_name USING user_id AS requested_id;
+                SELECT user_name;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(1))
+                .body("rows[0].f[0].v", equalTo("bo"));
+    }
+
+    @Test
+    @Order(2)
+    void executeImmediateCreatesTemporaryTables() {
+        query(Map.of("query", """
+                EXECUTE IMMEDIATE "CREATE TEMP TABLE dynamic_values AS SELECT 1 AS value UNION ALL SELECT 2";
+                SELECT SUM(value) AS total FROM dynamic_values;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("3"));
+    }
+
+    @Test
+    @Order(2)
     void joinGroupByOrderBy() {
         query("""
                 {"query": "SELECT u.name, SUM(o.total) AS spent, COUNT(*) FROM `bq-duck-it.shop.users` u JOIN shop.orders o ON u.id = o.user_id GROUP BY u.name ORDER BY spent DESC", "useLegacySql": false}
@@ -2397,6 +3417,78 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(5)
+    void selectAsStructNestedFunctionsKeepComputedFieldWithStarExcept() {
+        Response result = query(Map.of("query", """
+                CREATE TEMP FUNCTION add_digits(digit_a STRING, digit_b STRING) RETURNS STRING AS (
+                  CAST(MOD((CAST(digit_a AS INT64) + CAST(digit_b AS INT64)), 10) AS STRING)
+                );
+                CREATE TEMP FUNCTION reverse_suffix(value STRING) RETURNS STRING AS (
+                  REVERSE(SUBSTR(value, 2, 10))
+                );
+                CREATE TEMP FUNCTION reverse_identifier(value STRING) RETURNS STRING AS (
+                  CONCAT(SUBSTR(value, 1, 1), reverse_suffix(value))
+                );
+                CREATE TEMP FUNCTION encode_identifier(value STRING, code STRING) RETURNS STRING AS (
+                  CONCAT(
+                    SUBSTR(value, 1, 1),
+                    add_digits(SUBSTR(value, 2, 1), SUBSTR(code, 1, 1)),
+                    add_digits(SUBSTR(value, 3, 1), SUBSTR(code, 2, 1)),
+                    add_digits(SUBSTR(value, 4, 1), SUBSTR(code, 3, 1)),
+                    add_digits(SUBSTR(value, 5, 1), SUBSTR(code, 1, 1)),
+                    add_digits(SUBSTR(value, 6, 1), SUBSTR(code, 2, 1)),
+                    add_digits(SUBSTR(value, 7, 1), SUBSTR(code, 3, 1)),
+                    add_digits(SUBSTR(value, 8, 1), SUBSTR(code, 1, 1)),
+                    add_digits(SUBSTR(value, 9, 1), SUBSTR(code, 2, 1)),
+                    add_digits(SUBSTR(value, 10, 1), SUBSTR(code, 3, 1))
+                  )
+                );
+                CREATE TEMP FUNCTION normalize_identifier(value STRING, code STRING) RETURNS STRING AS (
+                  CASE WHEN REGEXP_CONTAINS(value, r"^[0-9]{10}$")
+                    THEN encode_identifier(reverse_identifier(value), code) ELSE NULL END
+                );
+                CREATE TEMP FUNCTION denormalize_identifier(value STRING, code STRING) RETURNS STRING AS (
+                  CONCAT(SUBSTR(value, 1, 1), REVERSE(CONCAT(
+                    CAST(MOD(CAST(SUBSTR(value, 2, 1) AS INT64) + 10 - CAST(SUBSTR(code, 1, 1) AS INT64), 10) AS STRING),
+                    CAST(MOD(CAST(SUBSTR(value, 3, 1) AS INT64) + 10 - CAST(SUBSTR(code, 2, 1) AS INT64), 10) AS STRING),
+                    CAST(MOD(CAST(SUBSTR(value, 4, 1) AS INT64) + 10 - CAST(SUBSTR(code, 3, 1) AS INT64), 10) AS STRING),
+                    CAST(MOD(CAST(SUBSTR(value, 5, 1) AS INT64) + 10 - CAST(SUBSTR(code, 1, 1) AS INT64), 10) AS STRING),
+                    CAST(MOD(CAST(SUBSTR(value, 6, 1) AS INT64) + 10 - CAST(SUBSTR(code, 2, 1) AS INT64), 10) AS STRING),
+                    CAST(MOD(CAST(SUBSTR(value, 7, 1) AS INT64) + 10 - CAST(SUBSTR(code, 3, 1) AS INT64), 10) AS STRING),
+                    CAST(MOD(CAST(SUBSTR(value, 8, 1) AS INT64) + 10 - CAST(SUBSTR(code, 1, 1) AS INT64), 10) AS STRING),
+                    CAST(MOD(CAST(SUBSTR(value, 9, 1) AS INT64) + 10 - CAST(SUBSTR(code, 2, 1) AS INT64), 10) AS STRING),
+                    CAST(MOD(CAST(SUBSTR(value, 10, 1) AS INT64) + 10 - CAST(SUBSTR(code, 3, 1) AS INT64), 10) AS STRING)
+                  ))));
+                CREATE TEMP FUNCTION process_records(records ANY TYPE) AS ((
+                  ARRAY(
+                    SELECT AS STRUCT normalize_identifier(denormalize_identifier(id, '123'), '123') AS id,
+                      * EXCEPT(id)
+                    FROM UNNEST(records)
+                    WHERE kind IN ('A', 'B')
+                    UNION ALL
+                    SELECT AS STRUCT *
+                    FROM UNNEST(records)
+                    WHERE NOT kind IN ('A', 'B')
+                  )
+                ));
+                SELECT process_records([
+                  STRUCT('0123456789' AS id, 'A' AS kind, 'Record' AS label),
+                  STRUCT('bad' AS id, 'C' AS kind, 'Other' AS label)
+                ]) AS result;
+                """, "useLegacySql", false));
+        result.then().log().ifValidationFails().statusCode(200)
+                .body("schema.fields[0].type", equalTo("RECORD"))
+                .body("schema.fields[0].mode", equalTo("REPEATED"))
+                .body("schema.fields[0].fields.name", equalTo(List.of("id", "kind", "label")))
+                .body("rows", hasSize(1));
+        List<List<String>> records = result.jsonPath().getList("rows[0].f[0].v.v.f.v");
+        assertEquals(List.of("0123456789", "A", "Record"), records.stream()
+                .filter(record -> "A".equals(record.get(1))).findFirst().orElseThrow());
+        assertEquals(List.of("bad", "C", "Other"), records.stream()
+                .filter(record -> "C".equals(record.get(1))).findFirst().orElseThrow());
+    }
+
+    @Test
+    @Order(5)
     void mixedStructStarsExpandIntoSiblingFields() {
         for (String sql : List.of(
                 "SELECT AS STRUCT t.*, 2 AS y FROM (SELECT 1 AS x) t",
@@ -2719,11 +3811,21 @@ class BigQueryDuckIntegrationTest {
                 """).when().post(BASE + "/datasets/shop/tables/reviewed_partition/insertAll")
                 .then().statusCode(200).body("insertErrors", nullValue());
 
-        query(Map.of("query", "SELECT (SELECT AS STRUCT input.* EXCEPT(id)) AS original"
-                        + " FROM shop.reviewed_partition input", "useLegacySql", false))
+        query(Map.of("query", """
+                BEGIN
+                  CREATE TEMP TABLE correlated_projection AS
+                    SELECT id, (SELECT AS STRUCT input.* EXCEPT(id)) AS original
+                    FROM shop.reviewed_partition input;
+                  CREATE TEMP TABLE result AS
+                    SELECT v.id, ANY_VALUE(v.original).* EXCEPT(secret), COUNT(*) AS secret
+                    FROM correlated_projection v
+                    GROUP BY v.id;
+                  SELECT * FROM result;
+                END
+                """, "useLegacySql", false))
                 .then().statusCode(200)
-                .body("schema.fields[0].fields.name", equalTo(List.of("name", "secret")))
-                .body("rows[0].f[0].v.f.v", equalTo(List.of("ana", "hidden")));
+                .body("schema.fields.name", equalTo(List.of("id", "name", "secret")))
+                .body("rows[0].f.v", equalTo(List.of("1", "ana", "1")));
 
         query(Map.of("query", "SELECT q.original FROM (SELECT (SELECT AS STRUCT input.* EXCEPT(id)) AS original"
                         + " FROM shop.reviewed_partition input) q", "useLegacySql", false))
@@ -4673,6 +5775,12 @@ class BigQueryDuckIntegrationTest {
                 {"query": "SELECT ANY_VALUE(t.s).* EXCEPT(a), COUNT(*) AS n FROM (SELECT STRUCT(1 AS a, 'x' AS b) s UNION ALL SELECT STRUCT(2 AS a, 'x' AS b)) t GROUP BY 1", "useLegacySql": false}
                 """)
                 .then().statusCode(400);
+        query("""
+                {"query": "BEGIN CREATE TEMP TABLE input_data AS SELECT 1 AS id, STRUCT('drop' AS omitted, 'keep' AS retained) AS original; CREATE TEMP TABLE intermediate AS SELECT id, ANY_VALUE(original).* EXCEPT (omitted), COUNT(*) AS omitted FROM input_data GROUP BY id; SELECT * FROM intermediate; END", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("id", "retained", "omitted")))
+                .body("rows[0].f.v", equalTo(List.of("1", "keep", "1")));
         query("""
                 {"query": "SELECT t.s.inr.* FROM (SELECT STRUCT(STRUCT(1 AS c, 2 AS d) AS inr) s) t", "useLegacySql": false}
                 """)

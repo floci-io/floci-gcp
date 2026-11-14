@@ -13734,6 +13734,25 @@ final class SqlDialectTranslator {
         if (ranges.isEmpty()) {
             return "{}";
         }
+        if (laterSetOperationItem(significantBefore(open), close)) {
+            List<String> values = new ArrayList<>();
+            for (int[] r : ranges) {
+                int asIndex = -1;
+                int depth = 0;
+                for (int k = r[0]; k < r[1]; k++) {
+                    Token t = tokens.get(k);
+                    if (t.isPunct("(")) {
+                        depth++;
+                    } else if (t.isPunct(")")) {
+                        depth--;
+                    } else if (depth == 0 && t.isKeyword("AS")) {
+                        asIndex = k;
+                    }
+                }
+                values.add(render(r[0], asIndex >= 0 ? asIndex : r[1]).trim());
+            }
+            return "ROW(" + String.join(", ", values) + ")";
+        }
         List<String> inheritedNames = inheritedArrayStructFieldNames(open);
         StringBuilder sb = new StringBuilder("{");
         for (int n = 0; n < ranges.size(); n++) {
@@ -13771,6 +13790,54 @@ final class SqlDialectTranslator {
             sb.append(DuckTypes.quoteLiteral(name)).append(": ").append(expr);
         }
         return sb.append('}').toString();
+    }
+
+    /**
+     * Whether the STRUCT(...) from {@code keyword} to {@code close} is a whole select item of a query after a set
+     * operator. BigQuery names the fields of a set operation's STRUCT column after its first query and matches
+     * later queries by position, while DuckDB unions STRUCT values by field name; an unnamed ROW(...) takes the
+     * first query's names by position.
+     */
+    private boolean laterSetOperationItem(int keyword, int close) {
+        if (keyword < 0 || !tokens.get(keyword).isKeyword("STRUCT")) {
+            return false;
+        }
+        int start = keyword;
+        int end = close;
+        while (true) {
+            // An item written in parentheses, SELECT (STRUCT(2 AS q)), is the same item.
+            int open = significantBefore(start);
+            int shut = nextSignificant(end + 1, tokens.size());
+            if (open < 0 || shut < 0 || !tokens.get(open).isPunct("(") || matchingParen(open) != shut) {
+                break;
+            }
+            start = open;
+            end = shut;
+        }
+        int depth = parenthesisDepth(start);
+        int select = precedingSelect(start, depth);
+        if (select < 0 || leavesDepth(select, start, depth)) {
+            return false;
+        }
+        int before = significantBefore(select);
+        while (before >= 0 && tokens.get(before).isPunct("(")) {
+            before = significantBefore(before);
+        }
+        if (before < 0 || !(tokens.get(before).isKeyword("UNION") || tokens.get(before).isKeyword("INTERSECT")
+                || tokens.get(before).isKeyword("EXCEPT") || tokens.get(before).isKeyword("ALL")
+                || tokens.get(before).isKeyword("DISTINCT"))) {
+            return false;
+        }
+        List<int[]> items = selectItems(select);
+        for (int[] item : items == null ? List.<int[]>of() : items) {
+            if (nextSignificant(item[0], item[1]) != start) {
+                continue;
+            }
+            int after = nextSignificant(end + 1, item[1]);
+            return after < 0 || tokens.get(after).isKeyword("AS")
+                    || isName(tokens.get(after)) && nextSignificant(after + 1, item[1]) < 0;
+        }
+        return false;
     }
 
     /**

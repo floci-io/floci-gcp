@@ -1640,6 +1640,38 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(5)
+    void setOperationStructsTakeTheFirstQuerysFieldNamesLikeBigQuery() {
+        for (String[] c : new String[][] {
+                {"SELECT STRUCT(1 AS n) AS s UNION ALL SELECT STRUCT(0)", "n", "1,0"},
+                {"SELECT STRUCT(1 AS n) AS s UNION ALL SELECT STRUCT(2 AS q) UNION ALL SELECT STRUCT(3)", "n", "1,2,3"},
+                {"(SELECT STRUCT(1 AS n) AS s) UNION ALL (SELECT STRUCT(0 AS z))", "n", "1,0"},
+                {"SELECT STRUCT(1 AS n) AS s UNION ALL SELECT (STRUCT(2 AS q))", "n", "1,2"},
+                {"SELECT STRUCT(1 AS n) AS s UNION ALL SELECT ((STRUCT(2 AS q))) AS t", "n", "1,2"},
+        }) {
+            List<String> values = query(Map.of("query", c[0], "useLegacySql", false))
+                    .then().statusCode(200)
+                    .body("schema.fields[0].fields.name", equalTo(List.of(c[1])))
+                    .extract().path("rows.collect { it.f[0].v.f[0].v }");
+            assertEquals(List.of(c[2].split(",")), values);
+        }
+        query(Map.of("query", "SELECT STRUCT(1 AS n, 'a' AS m) AS s UNION ALL SELECT STRUCT(2 AS x, 'b' AS y)",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].fields.name", equalTo(List.of("n", "m")))
+                .body("rows.collect { it.f[0].v.f.v }", equalTo(List.of(List.of("1", "a"), List.of("2", "b"))));
+        query(Map.of("query", "SELECT s.n FROM (SELECT STRUCT(1 AS n) AS s UNION ALL SELECT STRUCT(0)) ORDER BY s.n",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.collect { it.f[0].v }", equalTo(List.of("0", "1")));
+        query(Map.of("query", "SELECT 1 AS k, STRUCT('a' AS n) AS s UNION ALL SELECT 2, STRUCT('b' AS w) ORDER BY k",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[1].fields.name", equalTo(List.of("n")))
+                .body("rows.collect { it.f[1].v.f[0].v }", equalTo(List.of("a", "b")));
+    }
+
+    @Test
+    @Order(5)
     void orderByAMissingStructAliasFieldNamesTheFieldLikeBigQuery() {
         for (String[] c : new String[][] {
                 {"SELECT STRUCT(x AS n) AS s FROM UNNEST([3, 1, 2]) x ORDER BY s.zz", "zz", "STRUCT<n INT64>"},

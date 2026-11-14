@@ -125,9 +125,13 @@ REST paths live under `/bigquery/v2/projects/{project}/...`.
   name: a source column, a column a DML statement names, a CTE name, the columns a CTE's select list
   exposes, a function's parameters, a `FROM` item's alias (a table, `UNNEST` or derived table), the
   columns a derived table exposes, function names, and qualified fields are left intact, so a column
-  keeps its name while the values an `INSERT` supplies still bind the variables. The expression a `SET`
-  or `DECLARE` default evaluates and the condition of an `IF`, `WHILE` or `REPEAT` collect the same names
-  from the tables they read and the CTEs they define, and a CTE nothing reads declares none of them. A
+  keeps its name while the values an `INSERT` supplies still bind the variables. Those names win at the
+  query that reads them and in the queries nested inside it, so `DECLARE v INT64 DEFAULT 1;
+  CREATE TEMP TABLE t AS SELECT 4 AS v; SET v = v + (SELECT COUNT(*) FROM t)` stores `2`: the column
+  answers `4` inside the subquery, and the variable the `v` around it. The expression a `SET` or
+  `DECLARE` default evaluates and the condition of an `IF`, `WHILE` or `REPEAT` collect the same names
+  from the tables they read and the CTEs they define, at the same depths, and a CTE nothing reads
+  declares none of them. A
   variable that is a whole select item keeps its name as the result column, while
   `SELECT f + 0.2` is named `f0_`, as BigQuery names it; so are a function argument such as
   `SELECT COALESCE(NULL, f)` and a grouped expression such as `SELECT (f) + 1`.

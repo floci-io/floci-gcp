@@ -47,9 +47,11 @@ import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.time.format.ResolverStyle;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collection;
+import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -2802,24 +2804,24 @@ public class BigQueryService {
 
     private String expandScriptVariables(String sql, String projectId, String jobProjectId, QueryOptions options,
                                          ProceduralContext context, JobLocation jobLocation) {
-        Set<String> columnNames;
+        ScriptColumns columns;
         Set<Integer> columnPositions = Set.of();
         try {
             SqlDialectTranslator.Translation translation = SqlDialectTranslator.translateStatement(sql, projectId,
                     jobProjectId, options.defaultDatasetId(),
                     new SqlDialectTranslator.QueryParameters(options.queryParameters(), options.parameterMode()),
                     context.temporaryTables());
-            columnNames = temporaryColumnNames(sql, context);
-            addTableColumnNames(translation.tables(), projectId, jobLocation, context, columnNames);
+            columns = temporaryColumnNames(sql, context, SCRIPT_TABLE_KEYWORDS);
+            addTableColumnNames(sql, translation.tables(), projectId, jobLocation, context, columns);
         } catch (GcpException e) {
             // Variable substitution runs before statement-specific handling. A DML statement writes and
             // reads tables, and a DDL statement declares or targets columns, that a query translation
             // cannot describe; their own handling reports errors.
-            columnNames = new LinkedHashSet<>();
+            columns = new ScriptColumns();
             columnPositions = statementColumnPositions(sql, projectId, jobProjectId, options, context, jobLocation,
-                    columnNames);
+                    columns);
         }
-        return expandScriptVariables(sql, context, columnNames, columnPositions);
+        return expandScriptVariables(sql, context, columns, columnPositions);
     }
 
     /**
@@ -2836,35 +2838,38 @@ public class BigQueryService {
     /**
      * The columns an expression a procedure evaluates on its own reads. BigQuery resolves them, and the
      * columns a CTE it defines exposes, before a script variable of the same name, so an expression that
-     * reads a table collects its columns the way a statement does.
+     * reads a table collects its columns the way a statement does, at the depth that reads the table.
      */
-    private Set<String> scriptExpressionColumnNames(String expression, String projectId, String jobProjectId,
-                                                     QueryOptions options, ProceduralContext context,
-                                                     JobLocation jobLocation) {
+    private ScriptColumns scriptExpressionColumnNames(String expression, String projectId, String jobProjectId,
+                                                      QueryOptions options, ProceduralContext context,
+                                                      JobLocation jobLocation) {
         String select = "SELECT " + expression;
-        Set<String> columnNames = new LinkedHashSet<>(temporaryColumnNames(select, context));
+        ScriptColumns columns = temporaryColumnNames(select, context, SCRIPT_TABLE_KEYWORDS);
         try {
             SqlDialectTranslator.Translation translation = SqlDialectTranslator.translateStatement(select,
                     projectId, jobProjectId, options.defaultDatasetId(),
                     new SqlDialectTranslator.QueryParameters(options.queryParameters(), options.parameterMode()),
                     context.temporaryTables());
-            addTableColumnNames(translation.tables(), projectId, jobLocation, context, columnNames);
+            addTableColumnNames(select, translation.tables(), projectId, jobLocation, context, columns);
         } catch (GcpException e) {
             // An expression the translator cannot describe reads nothing more this path can name; the
             // engine that evaluates it reports any error.
-            return columnNames;
+            return columns;
         }
-        return columnNames;
+        return columns;
     }
 
     /**
      * Adds the lower-cased column names of {@code refs}: a temporary table has no entry in the store,
-     * so its schema comes from the script context.
+     * so its schema comes from the script context. Each name keeps the depth of the table position that
+     * reads it, so a table a subquery reads hides a variable of the same name inside that query only.
      */
-    private void addTableColumnNames(Collection<SqlDialectTranslator.TableRef> refs, String projectId,
-                                     JobLocation jobLocation, ProceduralContext context, Set<String> columnNames) {
+    private void addTableColumnNames(String sql, Collection<SqlDialectTranslator.TableRef> refs, String projectId,
+                                     JobLocation jobLocation, ProceduralContext context, ScriptColumns columns) {
+        List<SqlDialectTranslator.Token> tokens = new SqlDialectTranslator.Lexer(sql).tokenize();
+        Map<String, Integer> tableDepths = tableDepths(tokens, queryDepths(tokens), SCRIPT_TABLE_KEYWORDS);
         for (SqlDialectTranslator.TableRef ref : refs) {
-            columnNames.addAll(tableColumnNames(ref, projectId, jobLocation, context));
+            columns.add(tableColumnNames(ref, projectId, jobLocation, context), tableDepth(tableDepths, ref));
         }
     }
 
@@ -2902,11 +2907,11 @@ public class BigQueryService {
      * the columns a {@code CREATE TABLE} declares, and the {@code INSERT} column list of a statement
      * whose values or query is a scope of its own, where a variable still substitutes as in BigQuery.
      * The other DML statements read their target's columns wherever they name one, so those names join
-     * {@code columnNames} instead. Returns the positions of a declaration's column list.
+     * {@code columns} instead. Returns the positions of a declaration's column list.
      */
     private Set<Integer> statementColumnPositions(String sql, String projectId, String jobProjectId,
                                                   QueryOptions options, ProceduralContext context,
-                                                  JobLocation jobLocation, Set<String> columnNames) {
+                                                  JobLocation jobLocation, ScriptColumns columns) {
         Set<Integer> positions = new LinkedHashSet<>();
         List<SqlDialectTranslator.Token> tokens = new SqlDialectTranslator.Lexer(sql).tokenize();
 
@@ -2951,20 +2956,20 @@ public class BigQueryService {
             positions.addAll(columnListPositions(tokens, targetTable, target));
             // Only the column list names the target's columns; the values or query an INSERT supplies
             // is a scope of its own, where a variable of the same name still substitutes.
-            columnNames.addAll(temporarySourceColumnNames(sql, context));
+            columns.add(temporaryColumnNames(sql, context, SCRIPT_SOURCE_KEYWORDS));
             addDmlTableColumnNames(sql, projectId, jobProjectId, options, jobLocation, context,
-                    targetTable, columnNames);
+                    targetTable, columns);
             if (readsTable(tokens, targetTable)) {
                 // A self-referencing INSERT reads the columns of its own target.
-                columnNames.addAll(target);
+                columns.add(target, 0);
             }
             return positions;
         }
         // UPDATE, DELETE and MERGE read their target's columns wherever they name one.
-        columnNames.addAll(target);
+        columns.add(target, 0);
         if (statement.kind() == SqlDialectTranslator.StatementKind.MERGE) {
-            columnNames.addAll(temporarySourceColumnNames(sql, context));
-            addDmlTableColumnNames(sql, projectId, jobProjectId, options, jobLocation, context, null, columnNames);
+            columns.add(temporaryColumnNames(sql, context, SCRIPT_SOURCE_KEYWORDS));
+            addDmlTableColumnNames(sql, projectId, jobProjectId, options, jobLocation, context, null, columns);
         }
         return positions;
     }
@@ -2976,7 +2981,7 @@ public class BigQueryService {
      */
     private void addDmlTableColumnNames(String sql, String projectId, String jobProjectId, QueryOptions options,
                                         JobLocation jobLocation, ProceduralContext context,
-                                        String skip, Set<String> columnNames) {
+                                        String skip, ScriptColumns columns) {
         SqlDialectTranslator.Translation translation;
         try {
             translation = SqlDialectTranslator.translateDml(sql, projectId, jobProjectId, options.defaultDatasetId(),
@@ -2985,9 +2990,11 @@ public class BigQueryService {
         } catch (GcpException e) {
             return;
         }
+        List<SqlDialectTranslator.Token> tokens = new SqlDialectTranslator.Lexer(sql).tokenize();
+        Map<String, Integer> tableDepths = tableDepths(tokens, queryDepths(tokens), SCRIPT_TABLE_KEYWORDS);
         for (SqlDialectTranslator.TableRef ref : translation.tables()) {
             if (skip == null || !skip.equalsIgnoreCase(ref.tableId())) {
-                columnNames.addAll(tableColumnNames(ref, projectId, jobLocation, context));
+                columns.add(tableColumnNames(ref, projectId, jobLocation, context), tableDepth(tableDepths, ref));
             }
         }
     }
@@ -3064,30 +3071,107 @@ public class BigQueryService {
      * store, so its schema comes from the script context; without these names a variable of the same
      * name would replace a column reference or a DML column list.
      */
-    private static Set<String> temporaryColumnNames(String sql, ProceduralContext context) {
-        Set<String> columnNames = new LinkedHashSet<>();
+    private static ScriptColumns temporaryColumnNames(String sql, ProceduralContext context,
+                                                      Set<String> keywords) {
+        ScriptColumns columns = new ScriptColumns();
         if (context.temporaryTables().isEmpty()) {
-            return columnNames;
+            return columns;
         }
         List<SqlDialectTranslator.Token> tokens = new SqlDialectTranslator.Lexer(sql).tokenize();
+        int[] depths = queryDepths(tokens);
         for (int index = 0; index < tokens.size(); index++) {
             SqlDialectTranslator.Token token = tokens.get(index);
             if (token.kind != SqlDialectTranslator.Kind.IDENT && token.kind != SqlDialectTranslator.Kind.QIDENT) {
                 continue;
             }
             String name = token.identifierText();
-            if (!context.temporaryTables().contains(name) || !temporaryTablePosition(tokens, index)) {
+            if (!context.temporaryTables().contains(name) || !tablePosition(tokens, index, keywords)) {
                 continue;
             }
-            for (TableFieldSchema field : context.temporaryTableColumns(name)) {
-                columnNames.add(field.getName().toLowerCase(Locale.ROOT));
-            }
+            columns.add(fieldNames(context.temporaryTableColumns(name)), depths[index]);
         }
-        return columnNames;
+        return columns;
     }
 
-    private static boolean temporaryTablePosition(List<SqlDialectTranslator.Token> tokens, int index) {
-        return tablePosition(tokens, index, Set.of("FROM", "JOIN", "INTO", "UPDATE", "TABLE", "USING"));
+    /**
+     * The query depth of every token: a parenthesis that opens a query is a scope of its own, while one
+     * that groups an expression stays at the depth and in the clause around it.
+     */
+    private static int[] queryDepths(List<SqlDialectTranslator.Token> tokens) {
+        int[] depths = new int[tokens.size()];
+        Deque<Boolean> queries = new ArrayDeque<>();
+        int depth = 0;
+        for (int index = 0; index < tokens.size(); index++) {
+            SqlDialectTranslator.Token token = tokens.get(index);
+            if (token.isPunct("(")) {
+                boolean query = startsQuery(tokens, index);
+                queries.push(query);
+                if (query) {
+                    depth++;
+                }
+            } else if (token.isPunct(")") && !queries.isEmpty() && queries.pop()) {
+                depth--;
+            }
+            depths[index] = depth;
+        }
+        return depths;
+    }
+
+    /**
+     * The query depth of the tables a statement names, by bare and by qualified lower-case name: the
+     * shallowest table position that reads the table. A table has no entry when the statement names it
+     * in no position the scan recognizes, such as an {@code INFORMATION_SCHEMA} pseudo-table.
+     */
+    private static Map<String, Integer> tableDepths(List<SqlDialectTranslator.Token> tokens, int[] depths,
+                                                    Set<String> keywords) {
+        Map<String, Integer> tableDepths = new LinkedHashMap<>();
+        for (int index = 0; index < tokens.size(); index++) {
+            SqlDialectTranslator.Token token = tokens.get(index);
+            if (token.kind != SqlDialectTranslator.Kind.IDENT && token.kind != SqlDialectTranslator.Kind.QIDENT
+                    || !tablePosition(tokens, index, keywords)) {
+                continue;
+            }
+            tableDepths.merge(token.identifierText().toLowerCase(Locale.ROOT), depths[index], Math::min);
+            List<String> chain = tableNameChain(tokens, index);
+            if (chain.size() > 1) {
+                tableDepths.merge(String.join(".", chain), depths[index], Math::min);
+            }
+        }
+        return tableDepths;
+    }
+
+    /** The dotted name ending at {@code index}, lower-cased and in source order. */
+    private static List<String> tableNameChain(List<SqlDialectTranslator.Token> tokens, int index) {
+        List<String> chain = new ArrayList<>();
+        chain.add(tokens.get(index).identifierText().toLowerCase(Locale.ROOT));
+        int previous = previousSignificantToken(tokens, index - 1);
+        while (previous >= 0 && tokens.get(previous).isPunct(".")) {
+            int qualifier = previousSignificantToken(tokens, previous - 1);
+            if (qualifier < 0) {
+                break;
+            }
+            chain.addFirst(tokens.get(qualifier).identifierText().toLowerCase(Locale.ROOT));
+            previous = previousSignificantToken(tokens, qualifier - 1);
+        }
+        return chain;
+    }
+
+    /**
+     * The depth at which a statement reads {@code ref}: its qualified name wins, its bare name is the
+     * fallback, and a table the scan cannot place keeps its columns out of a variable's way everywhere.
+     */
+    private static int tableDepth(Map<String, Integer> tableDepths, SqlDialectTranslator.TableRef ref) {
+        Integer qualified = tableDepths.get(ref.datasetId().toLowerCase(Locale.ROOT) + "."
+                + ref.tableId().toLowerCase(Locale.ROOT));
+        if (qualified != null) {
+            return qualified;
+        }
+        Integer bare = tableDepths.get(ref.tableId().toLowerCase(Locale.ROOT));
+        return bare != null ? bare : 0;
+    }
+
+    private static String expandScriptVariables(String sql, ProceduralContext context, ScriptColumns columns) {
+        return expandScriptVariables(sql, context, columns, Set.of());
     }
 
     /**
@@ -3107,39 +3191,11 @@ public class BigQueryService {
         return previous >= 0 && keywords.contains(tokens.get(previous).upper());
     }
 
-    /** As {@link #temporaryColumnNames(String, ProceduralContext)}, for the tables a query reads. */
-    private static Set<String> temporarySourceColumnNames(String sql, ProceduralContext context) {
-        Set<String> columnNames = new LinkedHashSet<>();
-        if (context.temporaryTables().isEmpty()) {
-            return columnNames;
-        }
-        List<SqlDialectTranslator.Token> tokens = new SqlDialectTranslator.Lexer(sql).tokenize();
-        for (int index = 0; index < tokens.size(); index++) {
-            SqlDialectTranslator.Token token = tokens.get(index);
-            if (token.kind != SqlDialectTranslator.Kind.IDENT && token.kind != SqlDialectTranslator.Kind.QIDENT) {
-                continue;
-            }
-            String name = token.identifierText();
-            if (!context.temporaryTables().contains(name)
-                    || !tablePosition(tokens, index, Set.of("FROM", "JOIN", "USING"))) {
-                continue;
-            }
-            for (TableFieldSchema field : context.temporaryTableColumns(name)) {
-                columnNames.add(field.getName().toLowerCase(Locale.ROOT));
-            }
-        }
-        return columnNames;
-    }
-
-    private static String expandScriptVariables(String sql, ProceduralContext context, Set<String> columnNames) {
-        return expandScriptVariables(sql, context, columnNames, Set.of());
-    }
-
     /**
      * Replaces every script variable a statement may name with its typed literal. {@code columnPositions}
      * are the token indexes a statement resolves as column names even when a variable has that name.
      */
-    private static String expandScriptVariables(String sql, ProceduralContext context, Set<String> columnNames,
+    private static String expandScriptVariables(String sql, ProceduralContext context, ScriptColumns columns,
                                                 Set<Integer> columnPositions) {
         List<SqlDialectTranslator.Token> tokens = new SqlDialectTranslator.Lexer(sql).tokenize();
         ScriptNameResolution resolution = scriptNameResolution(tokens);
@@ -3149,11 +3205,11 @@ public class BigQueryService {
             String name = token.text.toLowerCase(Locale.ROOT);
             int previous = previousSignificantToken(tokens, index - 1);
             int next = nextSignificantToken(tokens, index + 1);
-            boolean declarationPosition = previous >= 0 && Set.of("FROM", "JOIN", "INTO", "UPDATE", "TABLE", "AS")
-                    .contains(tokens.get(previous).upper());
+            boolean declarationPosition = previous >= 0
+                    && SCRIPT_DECLARATION_KEYWORDS.contains(tokens.get(previous).upper());
             boolean functionName = next >= 0 && tokens.get(next).isPunct("(");
             boolean qualifiedField = previous >= 0 && tokens.get(previous).isPunct(".");
-            boolean columnName = columnNames.contains(name) || columnPositions.contains(index)
+            boolean columnName = columns.hides(name, resolution.depths()[index]) || columnPositions.contains(index)
                     || resolution.hides(name, index);
             if (token.kind != SqlDialectTranslator.Kind.IDENT || !context.variables().containsKey(name)
                     || declarationPosition || functionName || qualifiedField || columnName
@@ -3220,6 +3276,34 @@ public class BigQueryService {
     }
 
     /**
+     * The lower-cased columns the tables a statement names expose, each with the shallowest query depth
+     * that reads one of them. A table a nested query reads hides a variable of the same name inside that
+     * query only, while a column the query itself reads hides it in that query and in the ones nested in
+     * it: {@code DECLARE v INT64 DEFAULT 1; CREATE TEMP TABLE t AS SELECT 4 AS v;
+     * SET v = v + (SELECT COUNT(*) FROM t)} binds {@code v} outside the subquery and the column inside.
+     */
+    private static final class ScriptColumns {
+
+        private final Map<String, Integer> depths = new LinkedHashMap<>();
+
+        private void add(Collection<String> columns, int depth) {
+            for (String column : columns) {
+                depths.merge(column, depth, Math::min);
+            }
+        }
+
+        private void add(ScriptColumns columns) {
+            columns.depths.forEach((column, depth) -> depths.merge(column, depth, Math::min));
+        }
+
+        /** Whether a token at {@code depth} names one of the columns rather than a script variable. */
+        private boolean hides(String name, int depth) {
+            Integer columnDepth = depths.get(name);
+            return columnDepth != null && depth >= columnDepth;
+        }
+    }
+
+    /**
      * A statement's own name resolution, which BigQuery applies before a script variable of the same name:
      * the token positions where a variable is a whole select item, whose column BigQuery names after it, and
      * the names the statement binds to something else: a CTE name, the alias of a FROM item, and the columns
@@ -3279,27 +3363,31 @@ public class BigQueryService {
     /**
      * The columns a CTE exposes, which BigQuery resolves before a script variable of the same name from
      * the CTE's definition on, once the statement reads the CTE. {@code definitionEnd} is the parenthesis
-     * that closes the CTE body.
+     * that closes the CTE body, and {@code depth} the WITH clause's query depth.
      */
     private record CteColumnScope(String name, Set<String> columns, int definitionEnd, int depth) {}
 
     /**
-     * Whether the statement reads the CTE {@code cte}: a {@code FROM} or {@code JOIN} item names it, at the
-     * WITH clause's depth or deeper. A CTE whose columns nothing reads leaves a variable of that name alone.
+     * The shallowest depth at which the statement reads the CTE {@code cte}, or -1 when it reads none: a
+     * {@code FROM} or {@code JOIN} item names it, at the WITH clause's depth or deeper, and its columns
+     * resolve at that depth and deeper. A CTE whose columns nothing reads leaves a variable of that name
+     * alone.
      */
-    private static boolean readsCte(List<SqlDialectTranslator.Token> tokens, CteColumnScope cte, int[] depths) {
+    private static int cteReadDepth(List<SqlDialectTranslator.Token> tokens, CteColumnScope cte, int[] depths) {
+        int readDepth = -1;
         for (int index = cte.definitionEnd() + 1; index < tokens.size(); index++) {
             SqlDialectTranslator.Token token = tokens.get(index);
             if (token.kind != SqlDialectTranslator.Kind.IDENT && token.kind != SqlDialectTranslator.Kind.QIDENT
                     || !cte.name().equalsIgnoreCase(token.identifierText())
-                    || depths[index] < cte.depth()) {
+                    || depths[index] < cte.depth()
+                    || !tablePosition(tokens, index, SCRIPT_SOURCE_KEYWORDS)) {
                 continue;
             }
-            if (tablePosition(tokens, index, Set.of("FROM", "JOIN", "USING"))) {
-                return true;
+            if (readDepth < 0 || depths[index] < readDepth) {
+                readDepth = depths[index];
             }
         }
-        return false;
+        return readDepth;
     }
 
     /**
@@ -3377,11 +3465,9 @@ public class BigQueryService {
         clauses.add(null);
         List<Boolean> withClauses = new ArrayList<>();
         withClauses.add(false);
-        int[] depths = new int[tokens.size()];
+        int[] depths = queryDepths(tokens);
         String[] clauseByToken = new String[tokens.size()];
         Map<String, Set<Integer>> aliasDepths = new LinkedHashMap<>();
-        List<Integer> queryDepths = new ArrayList<>();
-        queryDepths.add(0);
         List<Boolean> queryScopes = new ArrayList<>();
         queryScopes.add(true);
         for (int index = 0; index < tokens.size(); index++) {
@@ -3392,23 +3478,19 @@ public class BigQueryService {
                     // keeps the clause and the alias scope around it.
                     boolean query = token.isPunct("(") && startsQuery(tokens, index);
                     if (token.isPunct("(")) {
-                        addDerivedTableColumns(tokens, index, clauses.getLast(), hiddenNames);
+                        addDerivedTableColumns(tokens, index, clauses.getLast(), depths, hiddenNames);
                     }
                     clauses.add(query ? null : clauses.getLast());
                     withClauses.add(false);
-                    queryDepths.add(query ? queryDepths.getLast() + 1 : queryDepths.getLast());
                     queryScopes.add(query);
                 } else if ((token.isPunct(")") || token.isPunct("]") || token.isPunct("}"))
                         && clauses.size() > 1) {
                     clauses.removeLast();
                     withClauses.removeLast();
-                    queryDepths.removeLast();
                     queryScopes.removeLast();
                 }
-                depths[index] = queryDepths.getLast();
                 continue;
             }
-            depths[index] = queryDepths.getLast();
             if (token.kind != SqlDialectTranslator.Kind.IDENT) {
                 continue;
             }
@@ -3457,11 +3539,13 @@ public class BigQueryService {
             }
         }
         for (CteColumnScope cte : cteColumnScopes) {
-            if (readsCte(tokens, cte, depths)) {
-                // The columns are visible from the CTE's definition on, so the body that declares them is
-                // not one of the places they hide a variable.
+            int readDepth = cteReadDepth(tokens, cte, depths);
+            if (readDepth >= 0) {
+                // The columns are visible from the CTE's definition on, at the depth that reads the CTE and
+                // deeper: the body that declares them, and the query around a name it does not expose,
+                // still bind the variable.
                 hiddenNames.add(new ScriptNameResolution.HiddenName(cte.columns(), -1, cte.definitionEnd(),
-                        cte.depth()));
+                        readDepth));
             }
         }
         return new ScriptNameResolution(selectItemStarts, hiddenNames, localNames, depths, clauseByToken,
@@ -3474,7 +3558,7 @@ public class BigQueryService {
      * resolves the derived table's column first.
      */
     private static void addDerivedTableColumns(List<SqlDialectTranslator.Token> tokens, int open, String clause,
-                                               List<ScriptNameResolution.HiddenName> hiddenNames) {
+                                               int[] depths, List<ScriptNameResolution.HiddenName> hiddenNames) {
         int previous = previousSignificantToken(tokens, open - 1);
         boolean fromItem = "FROM".equals(clause) && previous >= 0
                 && (tokens.get(previous).isKeyword("FROM") || tokens.get(previous).isKeyword("JOIN")
@@ -3485,8 +3569,9 @@ public class BigQueryService {
         int close = matchingParenthesis(tokens, open);
         Set<String> names = selectListColumnNames(tokens, open, close);
         if (!names.isEmpty()) {
-            // A derived table exposes its columns to the query that reads it, so any depth qualifies.
-            hiddenNames.add(new ScriptNameResolution.HiddenName(names, open, close, -1));
+            // A derived table exposes its columns to the query that reads it, and to a query nested inside
+            // that one, but not to a name the query around a nested read writes.
+            hiddenNames.add(new ScriptNameResolution.HiddenName(names, open, close, depths[previous]));
         }
     }
 
@@ -3589,6 +3674,17 @@ public class BigQueryService {
 
     /** The clauses where BigQuery resolves an unqualified name against the select-list aliases. */
     private static final Set<String> ALIAS_CLAUSES = Set.of("GROUP", "ORDER", "HAVING", "QUALIFY", "WINDOW");
+
+    /** The keywords that put a name in a table position: a query reads the table, or a DML statement writes it. */
+    private static final Set<String> SCRIPT_TABLE_KEYWORDS = Set.of("FROM", "JOIN", "INTO", "UPDATE", "TABLE",
+            "USING");
+
+    /** The keywords that put a name in a table position a query reads. */
+    private static final Set<String> SCRIPT_SOURCE_KEYWORDS = Set.of("FROM", "JOIN", "USING");
+
+    /** The keywords that name a table or declare a column, where a script variable cannot stand. */
+    private static final Set<String> SCRIPT_DECLARATION_KEYWORDS = Set.of("FROM", "JOIN", "INTO", "UPDATE",
+            "TABLE", "AS");
 
     private static int nextSignificantToken(List<SqlDialectTranslator.Token> tokens, int from) {
         for (int index = from; index < tokens.size(); index++) {

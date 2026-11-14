@@ -1873,6 +1873,92 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(2)
+    void aScriptVariableOutsideASubqueryKeepsItsValue() {
+        // A table a nested query reads exposes its columns inside that query only, so a name the query
+        // around it writes still binds the variable. Every value below is live BigQuery's: out, 2, 3 and 5.
+        query(Map.of("query", """
+                DECLARE v INT64 DEFAULT 1;
+                CREATE TEMP TABLE t AS SELECT 4 AS v;
+                IF v IN (SELECT v FROM t) THEN SELECT 'in' AS r; ELSE SELECT 'out' AS r; END IF;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("out"));
+        query(Map.of("query", """
+                DECLARE v INT64 DEFAULT 1;
+                CREATE TEMP TABLE t AS SELECT 4 AS v;
+                SET v = v + (SELECT COUNT(*) FROM t);
+                SELECT v;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("2"));
+        query(Map.of("query", """
+                DECLARE v INT64 DEFAULT 1;
+                CREATE TEMP TABLE t AS SELECT 4 AS v;
+                WHILE v < 3 DO SET v = v + 1; END WHILE;
+                SELECT v;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("3"));
+        query(Map.of("query", """
+                DECLARE v INT64 DEFAULT 1;
+                CREATE TEMP TABLE t AS SELECT 4 AS v;
+                SET v = (SELECT v FROM t) + v;
+                SELECT v;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("5"));
+        // The statement path scopes them the same way: 4 and 1, with or without another table beside the
+        // subquery, and 4 for a column the enclosing query reads.
+        query(Map.of("query", """
+                DECLARE v INT64 DEFAULT 1;
+                CREATE TEMP TABLE t AS SELECT 4 AS v;
+                SELECT (SELECT MAX(v) FROM t) AS m, v AS outer_v;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("4"))
+                .body("rows[0].f[1].v", equalTo("1"));
+        query(Map.of("query", """
+                DECLARE v INT64 DEFAULT 1;
+                CREATE TEMP TABLE t AS SELECT 4 AS v;
+                CREATE TEMP TABLE u AS SELECT 2 AS z;
+                SELECT (SELECT MAX(v) FROM t) AS m, v AS o FROM u;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("4"))
+                .body("rows[0].f[1].v", equalTo("1"));
+        query(Map.of("query", """
+                DECLARE v INT64 DEFAULT 1;
+                CREATE TEMP TABLE t AS SELECT 4 AS v;
+                CREATE TEMP TABLE u AS SELECT 2 AS z;
+                SELECT (SELECT z + v FROM u) AS s FROM t;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("6"));
+        query(Map.of("query", """
+                DECLARE v INT64 DEFAULT 1;
+                CREATE TEMP TABLE t AS SELECT 4 AS v;
+                SELECT (SELECT v) AS s FROM t;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("4"));
+        // A CTE and a derived table a subquery reads expose their columns there too: 4 with 1, twice.
+        query(Map.of("query",
+                "DECLARE v INT64 DEFAULT 1; WITH t AS (SELECT 4 AS v)"
+                        + " SELECT (SELECT v FROM t) AS m, v AS o",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("4"))
+                .body("rows[0].f[1].v", equalTo("1"));
+        query(Map.of("query",
+                "DECLARE v INT64 DEFAULT 1; SELECT (SELECT MAX(v) FROM (SELECT 4 AS v)) AS m, v AS o",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("4"))
+                .body("rows[0].f[1].v", equalTo("1"));
+    }
+
+    @Test
+    @Order(2)
     void aTemporaryFunctionsParametersShadowScriptVariables() {
         // Live BigQuery: 3, a parameter is local to the function, so the script variable of the same name
         // is neither its declaration nor the references in its body.

@@ -3388,17 +3388,19 @@ public class BigQueryService {
         }
 
         /**
-         * Whether a token in {@code scope} stands in the query {@code owner} names, a branch of the set
-         * operation it is part of included: a CTE is visible to every branch, while the columns a branch
-         * reads stay its own.
+         * The hops from a token in {@code scope} up to the query {@code owner} names, a branch of the set
+         * operation it is part of counted as that query, or -1 when the token stands outside it: a CTE is
+         * visible to every branch, while the columns a branch reads stay its own.
          */
-        private boolean namesQuery(int scope, int owner) {
+        private int hopsTo(int scope, int owner) {
+            int hops = 0;
             for (int at = scope; at >= 0; at = parents.get(at)) {
                 if (at == owner || setOperations.get(at).equals(setOperations.get(owner))) {
-                    return true;
+                    return hops;
                 }
+                hops++;
             }
-            return false;
+            return -1;
         }
     }
 
@@ -3473,25 +3475,48 @@ public class BigQueryService {
     private record CteColumnScope(String name, Set<String> columns, int definitionEnd, int scope) {}
 
     /**
-     * The queries that read the CTE {@code cte}: a {@code FROM} or {@code JOIN} item names it in the WITH
-     * clause's own query or in one nested inside it, a branch of the set operation it is part of included,
-     * since a WITH clause declares its CTE for every branch. Its columns resolve there. A CTE whose columns
-     * nothing reads leaves a variable of that name alone.
+     * The queries that read the CTE {@code cte}: a {@code FROM} or {@code JOIN} item names it where no
+     * closer declaration of the same name shadows it, in the WITH clause's own query or in one nested inside
+     * it, a branch of the set operation it is part of included, since a WITH clause declares its CTE for
+     * every branch. Its columns resolve there. A CTE whose columns nothing reads leaves a variable of that
+     * name alone.
      */
     private static Set<Integer> cteReadScopes(List<SqlDialectTranslator.Token> tokens, CteColumnScope cte,
-                                              QueryStructure structure) {
+                                              QueryStructure structure, List<CteColumnScope> ctes) {
         Set<Integer> readScopes = new LinkedHashSet<>();
         for (int index = cte.definitionEnd() + 1; index < tokens.size(); index++) {
             SqlDialectTranslator.Token token = tokens.get(index);
             if (token.kind != SqlDialectTranslator.Kind.IDENT && token.kind != SqlDialectTranslator.Kind.QIDENT
                     || !cte.name().equalsIgnoreCase(token.identifierText())
-                    || !structure.namesQuery(structure.scopes()[index], cte.scope())
-                    || !tablePosition(tokens, index, SCRIPT_SOURCE_KEYWORDS)) {
+                    || !tablePosition(tokens, index, SCRIPT_SOURCE_KEYWORDS)
+                    || nearestCte(ctes, cte.name(), index, structure.scopes()[index], structure) != cte) {
                 continue;
             }
             readScopes.add(structure.scopes()[index]);
         }
         return readScopes;
+    }
+
+    /**
+     * The CTE a read of {@code name} at {@code index} resolves to: the innermost declaration already defined
+     * that reaches the reading query, since a nested WITH shadows the CTE of the query around it. {@code null}
+     * when no declaration reaches it.
+     */
+    private static CteColumnScope nearestCte(List<CteColumnScope> ctes, String name, int index, int readScope,
+                                             QueryStructure structure) {
+        CteColumnScope nearest = null;
+        int nearestHops = Integer.MAX_VALUE;
+        for (CteColumnScope candidate : ctes) {
+            if (!candidate.name().equalsIgnoreCase(name) || candidate.definitionEnd() >= index) {
+                continue;
+            }
+            int hops = structure.hopsTo(readScope, candidate.scope());
+            if (hops >= 0 && hops < nearestHops) {
+                nearest = candidate;
+                nearestHops = hops;
+            }
+        }
+        return nearest;
     }
 
     /**
@@ -3646,7 +3671,7 @@ public class BigQueryService {
             }
         }
         for (CteColumnScope cte : cteColumnScopes) {
-            for (int readScope : cteReadScopes(tokens, cte, structure)) {
+            for (int readScope : cteReadScopes(tokens, cte, structure, cteColumnScopes)) {
                 // The columns are visible from the CTE's definition on, in the query that reads the CTE and
                 // in the queries nested inside it: the body that declares them, and a sibling query of the
                 // one that reads them, still bind the variable.

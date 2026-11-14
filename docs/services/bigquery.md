@@ -133,7 +133,9 @@ REST paths live under `/bigquery/v2/projects/{project}/...`.
   `2`: the column answers `4` inside the subquery, and the variable the `v` around it, while `SELECT
   COUNT(*) FROM t UNION ALL SELECT v` answers `1` and the variable's `1`. A `WITH` clause declares its
   CTE for every branch of a set operation, so `WITH t AS (SELECT 4 AS v) SELECT 0 UNION ALL SELECT v FROM
-  t` answers `0` and `4`. The expression a `SET` or
+  t` answers `0` and `4`, and a nested `WITH` of the same name shadows the CTE of the query around it, so
+  `WITH t AS (SELECT 4 AS v) SELECT 0 UNION ALL SELECT (WITH t AS (SELECT 2 AS w) SELECT v FROM t)`
+  answers `0` and the variable's `1`. The expression a `SET` or
   `DECLARE` default evaluates and the condition of an `IF`, `WHILE` or `REPEAT` collect the same names
   from the tables they read and the CTEs they define, in the same queries, and a CTE nothing reads
   declares none of them. A

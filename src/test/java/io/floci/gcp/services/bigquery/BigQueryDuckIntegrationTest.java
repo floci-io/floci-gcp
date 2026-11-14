@@ -1758,6 +1758,39 @@ class BigQueryDuckIntegrationTest {
                 .body("rows[0].f[0].v", equalTo("0"))
                 .body("rows[1].f[0].v", equalTo("4"))
                 .body("rows[2].f[0].v", equalTo("1"));
+        // A nested WITH of the same name shadows the CTE of the query around it, so the column it exposes is
+        // the one that answers, and the variable where it exposes none: 0 and 1, then 0 and 2.
+        query(Map.of("query", """
+                DECLARE v INT64 DEFAULT 1;
+                WITH t AS (SELECT 4 AS v)
+                SELECT 0 UNION ALL
+                SELECT (WITH t AS (SELECT 2 AS w) SELECT v FROM t);
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(2))
+                .body("rows[0].f[0].v", equalTo("0"))
+                .body("rows[1].f[0].v", equalTo("1"));
+        query(Map.of("query", """
+                DECLARE v INT64 DEFAULT 1;
+                WITH t AS (SELECT 4 AS v)
+                SELECT 0 UNION ALL
+                SELECT (WITH t AS (SELECT 2 AS v) SELECT v FROM t);
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(2))
+                .body("rows[0].f[0].v", equalTo("0"))
+                .body("rows[1].f[0].v", equalTo("2"));
+        // A nested WITH of another name leaves the CTE around it in scope: 0 and 4.
+        query(Map.of("query", """
+                DECLARE v INT64 DEFAULT 1;
+                WITH t AS (SELECT 4 AS v)
+                SELECT 0 UNION ALL
+                SELECT (WITH u AS (SELECT 9 AS w) SELECT v FROM t);
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(2))
+                .body("rows[0].f[0].v", equalTo("0"))
+                .body("rows[1].f[0].v", equalTo("4"));
         // A branch still reads the columns the query around the set operation reads: 4 + 2 = 6.
         query(Map.of("query", """
                 DECLARE v INT64 DEFAULT 1;

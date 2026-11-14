@@ -12,6 +12,13 @@ and signing requires `iam.serviceAccounts.signBlob` or
 Anonymous/external credentials bypass this evaluation, including bootstrap token
 issuance. Tokens are local emulator credentials and cannot be used with real GCP.
 
+In enforce mode, all four methods, and IAM v1 `signBlob`, refuse a
+[disabled](iam.md#disabling-a-service-account) target account with `401 UNAUTHENTICATED` and the message Google returns for an
+account in an invalid state, as the
+[disable reference](https://docs.cloud.google.com/iam/docs/reference/rest/v1/projects.serviceAccounts/disable)
+says "requests for new access tokens will fail". In the default `disabled` mode a
+disabled account still gets tokens and signatures.
+
 ## Configuration
 
 | Variable | Default | Description |

@@ -70,6 +70,7 @@ class IamServiceAccountIamEnforcementTest {
         callerEmail = "caller@" + project + ".iam.gserviceaccount.com";
         targetEmail = "target@" + project + ".iam.gserviceaccount.com";
         createTargetAccount();
+        TestFixtures.createServiceAccount(callerEmail);
         setup = TestFixtures.iamCredentialsClient();
         GenerateAccessTokenResponse callerToken = setup.generateAccessToken(
                 "projects/-/serviceAccounts/" + callerEmail, List.of(), List.of(CLOUD_PLATFORM_SCOPE),

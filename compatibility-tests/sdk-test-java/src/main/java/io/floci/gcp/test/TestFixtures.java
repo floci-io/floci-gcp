@@ -84,6 +84,30 @@ public final class TestFixtures {
         return prefix + "-" + UUID.randomUUID().toString().substring(0, 8);
     }
 
+    /**
+     * Creates the service account {@code email} names over the IAM REST API, unless it already
+     * exists. In IAM enforce mode the emulator mints a token only for an account that exists.
+     */
+    public static void createServiceAccount(String email) throws IOException, InterruptedException {
+        int at = email.indexOf('@');
+        String accountId = email.substring(0, at);
+        String project = email.substring(at + 1, email.indexOf(".iam.gserviceaccount.com"));
+        HttpRequest request = HttpRequest.newBuilder(URI.create(endpoint()
+                        + "/v1/projects/" + project + "/serviceAccounts"))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString("{\"accountId\":\"" + accountId + "\"}"))
+                .build();
+        HttpResponse<String> response;
+        try (HttpClient http = HttpClient.newHttpClient()) {
+            response = http.send(request, HttpResponse.BodyHandlers.ofString());
+        }
+        // 409 means it already exists: created earlier in the same test, or by an earlier run.
+        if (response.statusCode() != 200 && response.statusCode() != 409) {
+            throw new IllegalStateException("creating " + email + " answered " + response.statusCode()
+                    + ": " + response.body());
+        }
+    }
+
     // ── TLS ──────────────────────────────────────────────────────────────────────
     // floci-gcp serves HTTP and HTTPS on the same port, so the TLS endpoint is the
     // plain endpoint with the scheme swapped. Trust material is bootstrapped at

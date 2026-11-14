@@ -9,6 +9,7 @@ import io.floci.gcp.core.common.ProtoJsonBytes;
 import io.floci.gcp.core.common.ServiceDescriptor;
 import io.floci.gcp.core.common.ServiceProtocol;
 import io.floci.gcp.core.common.ServiceRegistry;
+import io.floci.gcp.services.credentials.CredentialAuthenticationException;
 import io.floci.gcp.services.credentials.CredentialTokenService;
 import io.floci.gcp.services.credentials.StoredCredentialToken;
 import io.floci.gcp.services.iam.IamService;
@@ -94,7 +95,8 @@ public class IamCredentialsService {
         Instant expireTime = clock.instant().plusSeconds(lifetimeSeconds);
         String principal = iamService != null && serviceAccount.chars().allMatch(Character::isDigit)
                 ? iamService.getServiceAccount("-", serviceAccount).getEmail() : serviceAccount;
-        StoredCredentialToken token = tokenService.mintImpersonatedToken(principal, expireTime);
+        StoredCredentialToken token = tokenService.mintImpersonatedToken(principal, expireTime,
+                () -> requireEnabledTarget(serviceAccount));
         return new GeneratedAccessToken(token.getTokenValue(), expireTime);
     }
 
@@ -150,6 +152,22 @@ public class IamCredentialsService {
         response.put("token", signClaims(serviceAccount,
                 account -> idTokenClaims(account, audience, includeEmail)).jwt());
         return response;
+    }
+
+    /**
+     * serviceAccounts.disable: "requests for new access tokens will fail"
+     * (https://docs.cloud.google.com/iam/docs/reference/rest/v1/projects.serviceAccounts/disable), as a token of
+     * the disabled account is refused; a deleted account's tokens are revoked, so it gets none either. Run under
+     * the lock that revocation takes. Only enforce mode evaluates identities; the default mode is unchanged.
+     */
+    private void requireEnabledTarget(String serviceAccount) {
+        if (config == null || iamService == null
+                || config.services().iam().authorizationMode() != EmulatorConfig.IamAuthorizationMode.ENFORCE) {
+            return;
+        }
+        if (iamService.getServiceAccount(WILDCARD_PROJECT, serviceAccount).isDisabled()) {
+            throw CredentialAuthenticationException.accountStateInvalid();
+        }
     }
 
     private String idTokenClaims(StoredServiceAccount account, String audience, boolean includeEmail) {

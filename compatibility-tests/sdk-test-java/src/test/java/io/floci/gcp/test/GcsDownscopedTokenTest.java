@@ -100,6 +100,9 @@ class GcsDownscopedTokenTest {
     @Test
     @EnabledIfEnvironmentVariable(named = "FLOCI_GCP_IAM_ENFORCEMENT_COMPAT", matches = "true")
     void storageClientEnforcesIamPolicyForDownscopedImpersonatedToken() throws Exception {
+        // Enforce mode only mints a token for a service account that exists.
+        TestFixtures.createServiceAccount(AUTHORIZED_SERVICE_ACCOUNT);
+        TestFixtures.createServiceAccount(UNAUTHORIZED_SERVICE_ACCOUNT);
         String bucket = TestFixtures.uniqueName("downscoped-iam");
         BlobId allowed = BlobId.of(bucket, "allowed/report.csv");
         BlobId outside = BlobId.of(bucket, "outside/report.csv");

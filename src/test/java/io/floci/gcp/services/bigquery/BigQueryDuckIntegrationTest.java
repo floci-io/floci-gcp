@@ -1596,11 +1596,11 @@ class BigQueryDuckIntegrationTest {
                 .then().statusCode(200)
                 .body("schema.fields[0].name", equalTo("a"))
                 .body("rows[0].f[0].v", equalTo("1"));
-        // Live BigQuery rejects an assignment to an undeclared variable.
+        // Live BigQuery rejects an assignment to an undeclared variable: "Undeclared variable: x at [1:5]".
         query(Map.of("query", "SET x = 1;", "useLegacySql", false))
                 .then().statusCode(400)
                 .body("error.errors[0].reason", equalTo("invalidQuery"))
-                .body("error.message", containsString("has not been declared"));
+                .body("error.message", containsString("Undeclared variable: x"));
     }
 
     @Test
@@ -1653,6 +1653,113 @@ class BigQueryDuckIntegrationTest {
                 .then().statusCode(200)
                 .body("schema.fields[0].name", equalTo("id"))
                 .body("rows[0].f[0].v", equalTo("1"));
+        // So is a select item that wraps the reference in parentheses, in any number of them, and a
+        // backticked reference: live BigQuery names both x.
+        query(Map.of("query", "DECLARE x INT64 DEFAULT 7; SELECT (x)", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("x"))
+                .body("rows[0].f[0].v", equalTo("7"));
+        query(Map.of("query", "DECLARE x INT64 DEFAULT 7; SELECT ((x))", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("x"));
+        query(Map.of("query", "DECLARE x INT64 DEFAULT 7; SELECT `x`", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("x"))
+                .body("rows[0].f[0].v", equalTo("7"));
+        query(Map.of("query", "DECLARE x INT64 DEFAULT 7; SELECT (x) AS y, x", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("y", "x")));
+        // An expression over a parenthesised reference keeps the generated name, and so does a reference
+        // that is a function argument: live BigQuery answers f0_ = 7 for the second script.
+        query(Map.of("query", "DECLARE x INT64 DEFAULT 7; SELECT (x) + 1", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("f0_"));
+        query(Map.of("query", "DECLARE x INT64 DEFAULT 7; SELECT COALESCE(NULL, (x))", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("f0_"))
+                .body("rows[0].f[0].v", equalTo("7"));
+        // So is a JSON field path used as a function argument: live BigQuery answers f0_ = 1.
+        query(Map.of("query", "DECLARE j JSON DEFAULT JSON '{\"a\":1}'; SELECT COALESCE(NULL, j.a)",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("f0_"))
+                .body("rows[0].f[0].v", equalTo("1"));
+        // A field of a JSON variable is named after the field, while its subscript keeps the generated name.
+        query(Map.of("query", "DECLARE j JSON DEFAULT JSON '{\"a\": {\"b\": 2}}'; SELECT j.a.b",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("b"))
+                .body("rows[0].f[0].v", equalTo("2"));
+        query(Map.of("query", "DECLARE j JSON DEFAULT JSON '{\"a\": 1}'; SELECT j['a']", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("f0_"));
+    }
+
+    @Test
+    @Order(2)
+    void aScriptVariableInASortOrGroupKeyIsAConstant() {
+        // Live BigQuery reads a constant sort key as no ordering and a constant group key as one group, and
+        // names neither column after the variable.
+        query(Map.of("query", "DECLARE x INT64 DEFAULT 7; SELECT 1 FROM UNNEST([1]) ORDER BY 1, (x)",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("f0_"))
+                .body("rows[0].f[0].v", equalTo("1"));
+        query(Map.of("query",
+                "DECLARE x INT64 DEFAULT 7; SELECT (x), 2 AS two FROM UNNEST([2]) ORDER BY 2, (x)",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("x", "two")))
+                .body("rows[0].f[0].v", equalTo("7"))
+                .body("rows[0].f[1].v", equalTo("2"));
+        query(Map.of("query", "DECLARE x INT64 DEFAULT 7; SELECT x FROM UNNEST([1]) ORDER BY x",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("7"));
+        query(Map.of("query", "DECLARE x INT64 DEFAULT 7; SELECT COUNT(*) AS n FROM UNNEST([1,2]) GROUP BY x",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(1))
+                .body("rows[0].f[0].v", equalTo("2"));
+        query(Map.of("query", "DECLARE s STRING DEFAULT 'a'; SELECT s FROM UNNEST([1]) ORDER BY s",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("a"));
+        query(Map.of("query", "DECLARE x INT64 DEFAULT 7; SELECT 1 FROM UNNEST([1]) GROUP BY 1, (x)",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("1"));
+    }
+
+    @Test
+    @Order(2)
+    void aQuotedNameResolvesLikeAnUnquotedOne() {
+        // Live BigQuery answers 2 for each of these: a quoted alias resolves an ORDER BY or GROUP BY
+        // reference, and a quoted column of a derived table or CTE wins over a variable of that name.
+        for (String sql : List.of(
+                "DECLARE x INT64 DEFAULT 7; SELECT 2 AS `x` FROM UNNEST([1]) ORDER BY `x`",
+                "DECLARE x INT64 DEFAULT 7; SELECT 2 AS `x` FROM UNNEST([1]) GROUP BY `x`",
+                "DECLARE x INT64 DEFAULT 7; SELECT 2 AS `x` FROM UNNEST([1]) ORDER BY x",
+                "DECLARE x INT64 DEFAULT 7; SELECT `x` FROM (SELECT 2 AS `x`)",
+                "DECLARE x INT64 DEFAULT 7; WITH t AS (SELECT 2 AS `x`) SELECT `x` FROM t")) {
+            query(Map.of("query", sql, "useLegacySql", false))
+                    .then().statusCode(200)
+                    .body("rows[0].f[0].v", equalTo("2"));
+        }
+        // A quoted source alias and a quoted CTE name win over a variable of the same name too.
+        query(Map.of("query", "DECLARE r INT64 DEFAULT 7; SELECT `r`.a FROM (SELECT 2 AS a) AS `r`",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("a"))
+                .body("rows[0].f[0].v", equalTo("2"));
+        query(Map.of("query", "DECLARE t INT64 DEFAULT 7; WITH `t` AS (SELECT 1 AS a) SELECT a FROM `t`",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("1"));
+        // A select-list reference is still the variable, as BigQuery resolves it.
+        query(Map.of("query", "DECLARE x INT64 DEFAULT 7; SELECT `x` FROM UNNEST([1])", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("7"));
     }
 
     @Test
@@ -1693,6 +1800,61 @@ class BigQueryDuckIntegrationTest {
                 """, "useLegacySql", false))
                 .then().statusCode(200)
                 .body("rows[0].f[0].v", equalTo("equal"));
+        // A FLOAT64 value is not stored in a NUMERIC variable: BigQuery coerces a floating point literal
+        // and refuses every other FLOAT64 expression with its own wording.
+        for (String sql : List.of(
+                "DECLARE f FLOAT64 DEFAULT 2.5; DECLARE n NUMERIC DEFAULT f; SELECT n",
+                "DECLARE i INT64 DEFAULT 8; DECLARE n NUMERIC; SET n = i / 2; SELECT n",
+                "DECLARE f FLOAT64 DEFAULT 2.5; DECLARE n NUMERIC; SET n = f * 2; SELECT n",
+                "DECLARE f FLOAT64 DEFAULT 2.5; DECLARE n NUMERIC; SET n = (SELECT f); SELECT n")) {
+            query(Map.of("query", sql, "useLegacySql", false))
+                    .then().statusCode(400)
+                    .body("error.message", containsString("Cannot coerce expression"))
+                    .body("error.message", containsString("to type NUMERIC"));
+        }
+        // No array is coercible, and a typed array literal names the array type it builds, as live BigQuery
+        // answers for each shape: [1.5] is ARRAY<FLOAT64> and [1, 2] is ARRAY<INT64>, and ARRAY<FLOAT64>[1.5]
+        // does not coerce to ARRAY<NUMERIC>.
+        for (String sql : List.of(
+                "DECLARE a ARRAY<NUMERIC> DEFAULT [1.5]; SELECT a",
+                "DECLARE a ARRAY<NUMERIC> DEFAULT [1, 2]; SELECT a",
+                "DECLARE f FLOAT64 DEFAULT 2.5; DECLARE a ARRAY<NUMERIC> DEFAULT [f]; SELECT a",
+                "DECLARE a ARRAY<NUMERIC> DEFAULT ARRAY<FLOAT64>[1.5]; SELECT a",
+                "DECLARE a ARRAY<NUMERIC> DEFAULT ARRAY<INT64>[1]; SELECT a",
+                "DECLARE a ARRAY<INT64> DEFAULT [1.9]; SELECT a",
+                "DECLARE a ARRAY<INT64> DEFAULT ARRAY<NUMERIC>[1]; SELECT a")) {
+            query(Map.of("query", sql, "useLegacySql", false))
+                    .then().statusCode(400)
+                    .body("error.message", containsString("to type ARRAY<"));
+        }
+        // A typed ARRAY<NUMERIC> reads a floating point literal as an element, where a FLOAT64 value is
+        // refused: live BigQuery answers 1.5 for the first script and the element error for the second.
+        query(Map.of("query", "DECLARE a ARRAY<NUMERIC> DEFAULT ARRAY<NUMERIC>[1.5]; SELECT a",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].mode", equalTo("REPEATED"))
+                .body("schema.fields[0].type", equalTo("NUMERIC"))
+                .body("rows[0].f[0].v[0].v", equalTo("1.5"));
+        query(Map.of("query", "DECLARE f FLOAT64 DEFAULT 2.5; DECLARE a ARRAY<NUMERIC> DEFAULT"
+                        + " ARRAY<NUMERIC>[f]; SELECT a", "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", containsString("Array element type FLOAT64 does not coerce to NUMERIC"));
+        query(Map.of("query", "DECLARE a ARRAY<INT64> DEFAULT ARRAY<INT64>[1.9]; SELECT a",
+                "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", containsString("Array element type FLOAT64 does not coerce to INT64"));
+        // The value a dynamic statement returns is not assignable to a variable of another type either.
+        query(Map.of("query", "DECLARE n NUMERIC; EXECUTE IMMEDIATE 'SELECT CAST(1.5 AS FLOAT64)' INTO n; SELECT n",
+                "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", containsString("Value returned by Dynamic SQL has type FLOAT64 "
+                        + "which is not assignable to variable n of type NUMERIC"));
+        // A NUMERIC field of a STRUCT default still accepts a FLOAT64 value, which BigQuery coerces only
+        // from a literal: the last deviation the docs list for a numeric assignment.
+        query(Map.of("query", "DECLARE f FLOAT64 DEFAULT 2.5; DECLARE s STRUCT<n NUMERIC> DEFAULT"
+                        + " STRUCT(f AS n); SELECT s", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.f[0].v", equalTo("2.5"));
     }
 
     @Test
@@ -2134,11 +2296,31 @@ class BigQueryDuckIntegrationTest {
                 .then().statusCode(200)
                 .body("rows[0].f[0].v", equalTo("6"))
                 .body("rows[0].f[1].v", equalTo("7"));
-        // A parameter of another name leaves the variable alone inside the body too: 9.
+        // A parameter of another name leaves the variable out of the body: BigQuery refuses to resolve a
+        // script variable inside a temporary function at all.
         query(Map.of("query", "DECLARE x INT64 DEFAULT 7; CREATE TEMP FUNCTION f(y INT64) AS (y + x);"
                         + " SELECT f(2)", "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", containsString("Invalid reference to script variable x; in function f"));
+        // A column the body reads is its own name, not a variable of that name: live BigQuery answers 4.
+        query(Map.of("query", """
+                DECLARE value INT64 DEFAULT 1;
+                CREATE TEMP TABLE body_inputs AS SELECT 4 AS value;
+                CREATE TEMP FUNCTION body_value() AS ((SELECT MAX(value) FROM body_inputs));
+                SELECT body_value();
+                """, "useLegacySql", false))
                 .then().statusCode(200)
-                .body("rows[0].f[0].v", equalTo("9"));
+                .body("rows[0].f[0].v", equalTo("4"));
+        // A body is an expression, not a query: BigQuery asks for the extra parentheses of a scalar subquery.
+        query(Map.of("query", "CREATE TEMP FUNCTION body_query() AS (SELECT 1 AS one); SELECT body_query()",
+                "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", containsString(
+                        "The body of each CREATE FUNCTION statement is an expression, not a query"));
+        query(Map.of("query", "CREATE TEMP FUNCTION body_query() AS ((SELECT 1 AS one)); SELECT body_query()",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("1"));
     }
 
     @Test
@@ -2197,6 +2379,125 @@ class BigQueryDuckIntegrationTest {
         query(Map.of("query", "CONTINUE;", "useLegacySql", false))
                 .then().statusCode(400)
                 .body("error.message", containsString("CONTINUE is only allowed inside of a loop body"));
+        // BigQuery's grammar closes the statement without a semicolon at the end of its block.
+        query(Map.of("query", "BREAK", "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", containsString(
+                        "BREAK without label is only allowed inside of a loop body"));
+        query(Map.of("query", "CONTINUE", "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", containsString("CONTINUE is only allowed inside of a loop body"));
+        // Before a block end BigQuery still needs the semicolon: "Syntax error: Expected \";\" but got keyword
+        // END". The emulator rejects the same shape with its own wording.
+        query(Map.of("query", "DECLARE n INT64 DEFAULT 0; LOOP SET n = n + 1; BREAK END LOOP; SELECT n",
+                "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", containsString("BREAK statement requires a semicolon"));
+        // With the semicolon the loop runs and reports its last assignment.
+        query(Map.of("query", "DECLARE n INT64 DEFAULT 0; LOOP SET n = n + 1; BREAK; END LOOP; SELECT n",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("1"));
+    }
+
+    @Test
+    @Order(2)
+    void aScriptVariableIsRefusedWhereBigQueryReadsTheClausesOwnExpression() {
+        // Live BigQuery: "Query error: LIMIT expects an integer literal or parameter at [1:45]", and the
+        // OFFSET wording for the skip rows.
+        query(Map.of("query", "DECLARE lim INT64 DEFAULT 1; SELECT 1 AS one LIMIT lim", "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalidQuery"))
+                .body("error.message", containsString("LIMIT expects an integer literal or parameter"));
+        query(Map.of("query", "DECLARE off INT64 DEFAULT 1; SELECT 1 AS one LIMIT 2 OFFSET off",
+                "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", containsString("OFFSET expects an integer literal or parameter"));
+        // OFFSET is not a reserved keyword and takes a clause only after LIMIT, so it also names a variable
+        // and the array subscript: live BigQuery answers 1 and 20 for these, and keeps the OFFSET wording
+        // for a variable after a real OFFSET.
+        query(Map.of("query", "DECLARE offset INT64 DEFAULT 1; SELECT offset", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("offset"))
+                .body("rows[0].f[0].v", equalTo("1"));
+        query(Map.of("query", "DECLARE offset INT64 DEFAULT 1; SELECT offset AS o", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("1"));
+        query(Map.of("query", "DECLARE offset INT64 DEFAULT 1; SELECT [10, 20][OFFSET(offset)] AS v",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("20"));
+        query(Map.of("query", "DECLARE offset INT64 DEFAULT 1; DECLARE skip INT64 DEFAULT 1;"
+                        + " SELECT 1 AS one LIMIT 5 OFFSET skip", "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", containsString("OFFSET expects an integer literal or parameter"));
+        // A query parameter is allowed there, as BigQuery allows it.
+        query(Map.of("query", "SELECT 1 AS one LIMIT @lim", "useLegacySql", false,
+                "queryParameters", List.of(Map.of("name", "lim", "parameterType", Map.of("type", "INT64"),
+                        "parameterValue", Map.of("value", "1")))))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("1"));
+        // A backticked reference is a script variable there too: live BigQuery rejects it.
+        query(Map.of("query", "DECLARE lim INT64 DEFAULT 1; SELECT 1 AS one LIMIT `lim`", "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", containsString("LIMIT expects an integer literal or parameter"));
+        // An array index is an expression, so a variable is read there: live BigQuery answers 10.
+        query(Map.of("query", "DECLARE i INT64 DEFAULT 0; SELECT [10,20][OFFSET(i)]", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("10"));
+        // Live BigQuery: "Query error: Cannot coerce expression 1.9 to type INT64 at [1:25]".
+        query(Map.of("query", "DECLARE x INT64 DEFAULT 1.9; SELECT x", "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", containsString("Query error: Cannot coerce expression 1.9 to type INT64"));
+    }
+
+    @Test
+    @Order(2)
+    void scriptRejectionsQuoteBigQuerysWording() {
+        // Live BigQuery, through the REST API: a coercion error carries a Query error prefix.
+        for (String sql : List.of("IF 1 THEN SELECT 1 AS a; END IF",
+                "WHILE 1 DO SELECT 1 AS a; END WHILE",
+                "REPEAT SELECT 1 AS a; UNTIL 1 END REPEAT")) {
+            query(Map.of("query", sql, "useLegacySql", false))
+                    .then().statusCode(400)
+                    .body("error.message", containsString(
+                            "Query error: Cannot coerce expression 1 to type BOOL"));
+        }
+        // Live BigQuery: "SQL created by EXECUTE IMMEDIATE contains unsupported statement type:
+        // ExecuteImmediateStatement at [1:25]".
+        query(Map.of("query", "BEGIN EXECUTE IMMEDIATE 'EXECUTE IMMEDIATE \"SELECT 1\"'; END",
+                "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", containsString("SQL created by EXECUTE IMMEDIATE contains unsupported "
+                        + "statement type: ExecuteImmediateStatement"));
+        // Live BigQuery: "Undeclared variable: y at [1:35]".
+        query(Map.of("query", "EXECUTE IMMEDIATE 'SELECT 1' INTO y", "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", containsString("Undeclared variable: y"));
+        // Live BigQuery: "SQL functions with the same name but different signatures are currently
+        // unsupported; found f".
+        query(Map.of("query", "CREATE TEMP FUNCTION f(a INT64) AS (a); CREATE TEMP FUNCTION f(a INT64) AS (a);"
+                        + " SELECT f(1)", "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", containsString("SQL functions with the same name but different "
+                        + "signatures are currently unsupported; found f"));
+    }
+
+    @Test
+    @Order(2)
+    void redeclaringATemporaryTableAlreadyExists() {
+        // Live BigQuery: "Already Exists: Table <project>:_script<hash>.dup"; the script's temporary tables
+        // live in _SESSION here.
+        query(Map.of("query", "CREATE TEMP TABLE dup (id INT64); CREATE TEMP TABLE dup (id INT64);"
+                        + " SELECT 1 AS one", "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.errors[0].reason", equalTo("invalidQuery"))
+                .body("error.message", containsString("Already Exists: Table " + PROJECT + ":_SESSION.dup"));
+        // OR REPLACE still replaces it.
+        query(Map.of("query", "CREATE TEMP TABLE dup (id INT64); CREATE OR REPLACE TEMP TABLE dup (id INT64);"
+                        + " SELECT 1 AS one", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("1"));
     }
 
     @Test

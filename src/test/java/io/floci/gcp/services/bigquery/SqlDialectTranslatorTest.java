@@ -478,12 +478,45 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void aLoopControlStatementKeepsItsSemicolonBeforeABlockEnd() {
+        // Live BigQuery: "Syntax error: Expected \";\" but got keyword END at [1:54]". Only a statement that
+        // ends the script may omit the semicolon.
+        GcpException error = assertThrows(GcpException.class, () -> SqlDialectTranslator.proceduralScript("""
+                DECLARE n INT64 DEFAULT 0;
+                LOOP SET n = n + 1; BREAK END LOOP;
+                SELECT n;
+                """));
+        assertEquals("BREAK statement requires a semicolon.", error.getMessage());
+
+        SqlDialectTranslator.ProceduralScript script = SqlDialectTranslator.proceduralScript("""
+                DECLARE n INT64 DEFAULT 0;
+                LOOP SET n = n + 1; BREAK; END LOOP;
+                SELECT n;
+                """);
+        assertEquals(3, script.items().size());
+    }
+
+    @Test
+    void aTemporaryFunctionBodyIsAnExpressionNotAQuery() {
+        // Live BigQuery: "The body of each CREATE FUNCTION statement is an expression, not a query; to use a
+        // query as an expression, the query must be wrapped with additional parentheses ...".
+        GcpException error = assertThrows(GcpException.class, () -> SqlDialectTranslator.translateScript("""
+                CREATE TEMP FUNCTION body_query() AS (SELECT 1 AS one);
+                SELECT body_query() AS value;
+                """, "test-project", null, SqlDialectTranslator.QueryParameters.none()));
+
+        assertEquals("The body of each CREATE FUNCTION statement is an expression, not a query; to use a query "
+                + "as an expression, the query must be wrapped with additional parentheses to make it a scalar "
+                + "subquery expression", error.getMessage());
+    }
+
+    @Test
     void temporaryFunctionTranslatesStructsAndDeclaredTypes() {
         SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript("""
                 CREATE TEMP FUNCTION pick(id STRING, name STRING) RETURNS
-                  STRUCT<id STRING, display_name STRING> AS (
+                  STRUCT<id STRING, display_name STRING> AS ((
                   SELECT AS STRUCT id, name || '_display' display_name
-                );
+                ));
                 SELECT pick('id1', 'name1') AS value;
                 """, "test-project", null, SqlDialectTranslator.QueryParameters.none());
 

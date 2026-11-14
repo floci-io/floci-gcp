@@ -421,10 +421,14 @@ final class SqlDialectTranslator {
                     throw invalidQuery("A script must end with a query or DML statement.");
                 }
                 TemporaryFunctionDefinition definition = temporaryFunctionDefinition(statement);
+                if (!temporaryFunctions.add(definition.name().toLowerCase(Locale.ROOT))) {
+                    // BigQuery refuses a second declaration of the same temporary function with this wording.
+                    throw invalidQuery("SQL functions with the same name but different signatures are "
+                            + "currently unsupported; found " + definition.name());
+                }
                 Translation macro = translateTemporaryFunction(statement, projectId, jobProjectId, defaultDatasetId,
                         parameters, temporaryTables, temporaryFunctions);
                 setup.append(macro.sql()).append(";\n");
-                temporaryFunctions.add(definition.name().toLowerCase(Locale.ROOT));
                 tables.addAll(macro.tables());
                 informationSchema.addAll(macro.informationSchema());
                 needsUnicodeCaseFold |= macro.needsUnicodeCaseFold();
@@ -794,16 +798,27 @@ final class SqlDialectTranslator {
             String keyword = tokens.get(at++).upper();
             skipTrivia();
             String label = null;
-            if (at < tokens.size() && (tokens.get(at).kind == Kind.IDENT || tokens.get(at).kind == Kind.QIDENT)) {
+            if (at < tokens.size() && startsLabel()) {
                 label = identifier(tokens.get(at++));
                 skipTrivia();
             }
             if (at < tokens.size() && tokens.get(at).isPunct(";")) {
                 at++;
-            } else {
+            } else if (at < tokens.size()) {
+                // BigQuery's grammar omits the semicolon only where the script ends, not at a block end.
                 throw invalidQuery(keyword + " statement requires a semicolon.");
             }
             return new LoopControl(continueLoop, label);
+        }
+
+        /** Whether the token at {@code at} is a label: a block-ending keyword closes the statement instead. */
+        private boolean startsLabel() {
+            Token token = tokens.get(at);
+            if (token.kind == Kind.QIDENT) {
+                return true;
+            }
+            return token.kind == Kind.IDENT && !token.isKeyword("END") && !token.isKeyword("ELSE")
+                    && !token.isKeyword("ELSEIF") && !token.isKeyword("WHEN");
         }
 
         private WhileBlock parseWhile(String label) {
@@ -1015,7 +1030,7 @@ final class SqlDialectTranslator {
                 ? new TemporaryDeclaration(significant, at - 1, at, orReplace, ifNotExists) : null;
     }
 
-    private static boolean temporaryFunction(String sql) {
+    static boolean temporaryFunction(String sql) {
         return temporaryDeclaration(sql, "FUNCTION") != null;
     }
 
@@ -1053,6 +1068,20 @@ final class SqlDialectTranslator {
             translateTemporaryFunction(sql, projectId, jobProjectId, defaultDatasetId, parameters,
                     Set.copyOf(temporaryTables), Set.of());
         }
+    }
+
+    /**
+     * The tables a temporary function body reads, so that a column of one of them hides a script variable of
+     * the same name in the body, as it does in a statement. Empty for any other statement.
+     */
+    static Collection<TableRef> temporaryFunctionTables(String sql, String projectId, String jobProjectId,
+                                                        String defaultDatasetId, QueryParameters parameters,
+                                                        Collection<String> temporaryTables) {
+        if (!temporaryFunction(sql)) {
+            return List.of();
+        }
+        return translateTemporaryFunction(sql, projectId, jobProjectId, defaultDatasetId, parameters,
+                Set.copyOf(temporaryTables), Set.of()).tables();
     }
 
     static String declaredTemporaryTable(String sql) {
@@ -1318,6 +1347,7 @@ final class SqlDialectTranslator {
             throw invalidQuery("Syntax error: Unexpected tokens after CREATE TEMP FUNCTION expression.");
         }
         String body = translator.text(bodyOpen + 1, bodyClose);
+        rejectQueryBody(body);
         List<List<Token>> arguments = splitArguments(translator.tokens, open + 1, close);
         int returns = translator.nextSignificant(close + 1, as);
         String returnType = returns >= 0 && translator.tokens.get(returns).isKeyword("RETURNS")
@@ -1375,8 +1405,21 @@ final class SqlDialectTranslator {
                 expression.tables(), expression.informationSchema(), expression.needsUnicodeCaseFold());
     }
 
-    private static boolean referencesTemporaryFunctionWithConcat(String body, Set<String> temporaryFunctions) {
-        if (temporaryFunctions.isEmpty()) {
+    /**
+     * A function body is an expression, not a query: BigQuery refuses {@code AS (SELECT ...)} and asks for the
+     * extra parentheses of a scalar subquery expression, {@code AS ((SELECT ...))}.
+     */
+    private static void rejectQueryBody(String body) {
+        List<Token> tokens = significant(new Lexer(body).tokenize());
+        if (tokens.isEmpty() || !(tokens.getFirst().isKeyword("SELECT") || tokens.getFirst().isKeyword("WITH"))) {
+            return;
+        }
+        throw invalidQuery("The body of each CREATE FUNCTION statement is an expression, not a query; to use a "
+                + "query as an expression, the query must be wrapped with additional parentheses to make it a "
+                + "scalar subquery expression");
+    }
+
+    private static boolean referencesTemporaryFunctionWithConcat(String body, Set<String> temporaryFunctions) {        if (temporaryFunctions.isEmpty()) {
             return false;
         }
         List<Token> bodyTokens = significant(new Lexer(body).tokenize());

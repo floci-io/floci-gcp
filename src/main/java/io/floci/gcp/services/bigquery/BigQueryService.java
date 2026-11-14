@@ -670,6 +670,9 @@ public class BigQueryService {
     /** A typed array literal, whose element type BigQuery keeps instead of inferring one. */
     private static final Pattern SCRIPT_TYPED_ARRAY_LITERAL = Pattern.compile(
             "(?is)^ARRAY\\s*<\\s*([^<>]+?)\\s*>\\s*\\[(.*)]$");
+    /** A FLOAT64 literal, which BigQuery coerces into a NUMERIC variable where it refuses a FLOAT64 value. */
+    private static final Pattern SCRIPT_FLOAT_LITERAL = Pattern.compile(
+            "[-+]?(?:[0-9]+\\.[0-9]*|\\.[0-9]+)(?:[eE][-+]?[0-9]+)?|[-+]?[0-9]+[eE][-+]?[0-9]+");
     private static final DateTimeFormatter HOUR_PARTITION = DateTimeFormatter.ofPattern("uuuuMMddHH")
             .withResolverStyle(ResolverStyle.STRICT);
     private static final DateTimeFormatter DAY_PARTITION = DateTimeFormatter.ofPattern("uuuuMMdd")
@@ -1309,6 +1312,7 @@ public class BigQueryService {
                     context.clearQueryResult();
                     return true;
                 }
+                rejectExistingTemporaryTable(temporaryTable, context, projectId);
                 // A dry run describes the definition instead of storing it, so a later statement of the
                 // same script still resolves the temporary table by name.
                 materializeTemporaryTable(projectId, jobProjectId, sql.sql(), temporaryTable.name(),
@@ -1513,12 +1517,13 @@ public class BigQueryService {
     private void executeImmediate(String projectId, String jobProjectId, String sql, QueryOptions options,
                                   StoredJob job, ProceduralContext context, JobLocation jobLocation) {
         if (context.dynamicSqlExecution()) {
-            throw QueryEngine.invalidQuery("EXECUTE IMMEDIATE cannot be nested.");
+            throw QueryEngine.invalidQuery("SQL created by EXECUTE IMMEDIATE contains unsupported statement type: "
+                    + "ExecuteImmediateStatement");
         }
         ExecuteImmediateStatement statement = parseExecuteImmediate(sql);
         for (String variable : statement.intoVariables()) {
             if (!context.variables().containsKey(variable.toLowerCase(Locale.ROOT))) {
-                throw QueryEngine.invalidQuery("Variable " + variable + " has not been declared.");
+                throw QueryEngine.invalidQuery("Undeclared variable: " + variable);
             }
         }
         String dynamicSql = evaluateImmediateSqlExpression(projectId, jobProjectId, statement.sqlExpression(),
@@ -1736,12 +1741,31 @@ public class BigQueryService {
         for (int index = 0; index < targets.size(); index++) {
             String target = targets.get(index).toLowerCase(Locale.ROOT);
             if (!context.variables().containsKey(target)) {
-                throw QueryEngine.invalidQuery("Variable " + targets.get(index) + " has not been declared.");
+                throw QueryEngine.invalidQuery("Undeclared variable: " + targets.get(index));
             }
             Object value = row == null ? null : scriptResultValue(row, fields.get(index), index);
+            rejectInexactImmediateAssignment(targets.get(index), value,
+                    context.variableTypes().get(target));
             assigned.put(target, coerceScriptVariableValue(value, context.variableTypes().get(target)));
         }
         context.variables().putAll(assigned);
+    }
+
+    /**
+     * A variable does not take a value of another type from a dynamic statement: BigQuery answers "Value
+     * returned by Dynamic SQL has type FLOAT64 which is not assignable to variable n of type NUMERIC" where
+     * the value would otherwise be stored as the decimal or integer it prints.
+     */
+    private static void rejectInexactImmediateAssignment(String target, Object value, String type) {
+        if (!(value instanceof Double || value instanceof Float)) {
+            return;
+        }
+        String targetType = new ScriptVariableTypeParser(type).parse().scalarType();
+        if (!"NUMERIC".equals(targetType) && !"INT64".equals(targetType)) {
+            return;
+        }
+        throw QueryEngine.invalidQuery("Value returned by Dynamic SQL has type FLOAT64 which is not assignable "
+                + "to variable " + target + " of type " + targetType);
     }
 
     private static Object scriptResultValue(Map<String, Object> row, TableFieldSchema field, int index) {
@@ -1877,7 +1901,7 @@ public class BigQueryService {
             for (int index = 0; index < names.size(); index++) {
                 String name = names.get(index).trim().toLowerCase(Locale.ROOT);
                 if (!context.variables().containsKey(name)) {
-                    throw QueryEngine.invalidQuery("Variable " + names.get(index).trim() + " has not been declared.");
+                    throw QueryEngine.invalidQuery("Undeclared variable: " + names.get(index).trim());
                 }
                 assigned.put(name, parseScriptVariableValue(expressions.get(index), context.variableTypes().get(name),
                         projectId, jobProjectId, options, context, jobLocation));
@@ -1889,7 +1913,7 @@ public class BigQueryService {
         if (assignment.matches()) {
             String name = assignment.group(1).toLowerCase(Locale.ROOT);
             if (!context.variables().containsKey(name)) {
-                throw QueryEngine.invalidQuery("Variable " + assignment.group(1) + " has not been declared.");
+                throw QueryEngine.invalidQuery("Undeclared variable: " + assignment.group(1));
             }
             String type = context.variableTypes().get(name);
             Object value = parseScriptVariableValue(assignment.group(2), type,
@@ -2396,7 +2420,7 @@ public class BigQueryService {
                     };
                 } catch (ArithmeticException overflow) {
                     // BigQuery reports an out-of-range INT64 result as an invalid query.
-                    throw QueryEngine.invalidQuery("Integer Overflow");
+                    throw QueryEngine.invalidQuery("Query error: Integer Overflow");
                 }
             }
         } else if (isScriptIntegerLiteral(value)) {
@@ -2410,6 +2434,7 @@ public class BigQueryService {
                 evaluated = evaluateScriptSqlExpression(value, projectId, jobProjectId, options, context, jobLocation).value();
             }
         }
+        rejectInexactScriptAssignment(value, evaluated, type);
         return coerceScriptVariableValue(evaluated, type);
     }
 
@@ -2492,6 +2517,82 @@ public class BigQueryService {
             return ((Number) value).longValue();
         }
         throw QueryEngine.invalidQuery("Value cannot be coerced to INT64.");
+    }
+
+    /**
+     * A NUMERIC or INT64 variable takes only a value BigQuery reads exactly. It coerces a floating point
+     * literal into a NUMERIC variable, whose digits it takes as written, where an INT64 variable coerces no
+     * floating point value at all; every other value of another type is refused with BigQuery's wording,
+     * "Cannot coerce expression f to type NUMERIC", where a value that prints cleanly would otherwise be
+     * stored as the decimal or integer it prints. An array literal of FLOAT64 elements is refused the same
+     * way, while a typed {@code ARRAY<NUMERIC>[...]} coerces each element as a literal.
+     */
+    private static void rejectInexactScriptAssignment(String expression, Object value, String type) {
+        String source = expression.trim();
+        ScriptVariableType target = new ScriptVariableTypeParser(type).parse();
+        if (target.isArray()) {
+            rejectInexactArrayAssignment(source, value, target);
+            return;
+        }
+        if ("INT64".equals(target.scalarType())) {
+            if (value != null && !(value instanceof Long || value instanceof Integer
+                    || value instanceof Short || value instanceof Byte)) {
+                throw QueryEngine.invalidQuery("Query error: Cannot coerce expression " + source + " to type INT64");
+            }
+            return;
+        }
+        if ("NUMERIC".equals(target.scalarType()) && (value instanceof Double || value instanceof Float)
+                && !SCRIPT_FLOAT_LITERAL.matcher(source).matches()) {
+            throw QueryEngine.invalidQuery("Query error: Cannot coerce expression " + source + " to type NUMERIC");
+        }
+    }
+
+    /**
+     * BigQuery assigns an array only from its own array type, since no array is coercible, apart from the
+     * elements of a typed {@code ARRAY<T>[...]}, which it reads as literals of T. So the literal's element
+     * type must be the target's, an untyped literal of integers is an {@code ARRAY<INT64>}, and a floating
+     * point element is a literal only where it stands in a {@code NUMERIC} literal.
+     */
+    private static void rejectInexactArrayAssignment(String expression, Object value, ScriptVariableType target) {
+        String elementType = target.elementType().scalarType();
+        if ((!"INT64".equals(elementType) && !"NUMERIC".equals(elementType))
+                || !(value instanceof List<?> elements)) {
+            return;
+        }
+        String targetType = "ARRAY<" + elementType + ">";
+        Matcher typed = SCRIPT_TYPED_ARRAY_LITERAL.matcher(expression);
+        List<String> elementExpressions = List.of();
+        if (typed.matches()) {
+            if (!elementType.equals(normalizeScriptVariableType(typed.group(1)))) {
+                throw QueryEngine.invalidQuery("Query error: Cannot coerce expression " + expression
+                        + " to type " + targetType);
+            }
+            elementExpressions = splitScriptArrayElements(typed.group(2));
+        } else if (!elements.isEmpty() && elements.stream().allMatch(BigQueryService::integralValue)
+                && !"INT64".equals(elementType)) {
+            throw QueryEngine.invalidQuery("Query error: Cannot coerce expression " + expression + " to type "
+                    + targetType);
+        }
+        for (int index = 0; index < elements.size(); index++) {
+            Object element = elements.get(index);
+            if (!(element instanceof Double || element instanceof Float)) {
+                continue;
+            }
+            boolean numericLiteral = "NUMERIC".equals(elementType) && typed.matches()
+                    && index < elementExpressions.size()
+                    && SCRIPT_FLOAT_LITERAL.matcher(elementExpressions.get(index).trim()).matches();
+            if (!numericLiteral) {
+                throw QueryEngine.invalidQuery(typed.matches()
+                        ? "Query error: Array element type FLOAT64 does not coerce to " + elementType
+                        : "Query error: Cannot coerce expression " + expression + " to type " + targetType);
+            }
+        }
+    }
+
+    /** Whether a value is an integral number, so an array literal of it is an {@code ARRAY<INT64>}. */
+    private static boolean integralValue(Object value) {
+        return value instanceof Long || value instanceof Integer
+                || value instanceof Short || value instanceof Byte;
     }
 
     /** A NUMERIC value: BigQuery keeps 38 digits with 9 after the point, and rejects a value that needs more. */
@@ -2745,7 +2846,7 @@ public class BigQueryService {
         try {
             return Long.parseLong(value);
         } catch (NumberFormatException e) {
-            throw QueryEngine.invalidQuery("Invalid integer literal: " + value);
+            throw QueryEngine.invalidQuery("Query error: Invalid integer literal: " + value);
         }
     }
 
@@ -2805,6 +2906,17 @@ public class BigQueryService {
 
     private String expandScriptVariables(String sql, String projectId, String jobProjectId, QueryOptions options,
                                          ProceduralContext context, JobLocation jobLocation) {
+        return expandScriptVariables(sql, projectId, jobProjectId, options, context, jobLocation,
+                new LinkedHashSet<>());
+    }
+
+    /**
+     * Expands a statement's script variables, naming in {@code referencedVariables} each variable it binds:
+     * a temporary function body may not read one, and the caller reports it.
+     */
+    private String expandScriptVariables(String sql, String projectId, String jobProjectId, QueryOptions options,
+                                         ProceduralContext context, JobLocation jobLocation,
+                                         Set<String> referencedVariables) {
         ScriptColumns columns;
         Set<Integer> columnPositions = Set.of();
         try {
@@ -2821,8 +2933,28 @@ public class BigQueryService {
             columns = new ScriptColumns();
             columnPositions = statementColumnPositions(sql, projectId, jobProjectId, options, context, jobLocation,
                     columns);
+            columns.add(temporaryFunctionBodyColumns(sql, projectId, jobProjectId, options, context, jobLocation));
         }
-        return expandScriptVariables(sql, context, columns, columnPositions);
+        return expandScriptVariables(sql, context, columns, columnPositions, referencedVariables);
+    }
+
+    /**
+     * The columns of the tables a temporary function body reads. A function declaration is not a query, so
+     * the translation a statement relies on does not describe them, and one of those columns hides a script
+     * variable of the same name in the body just as a statement's columns do.
+     */
+    private ScriptColumns temporaryFunctionBodyColumns(String sql, String projectId, String jobProjectId,
+                                                       QueryOptions options, ProceduralContext context,
+                                                       JobLocation jobLocation) {
+        if (!SqlDialectTranslator.temporaryFunction(sql)) {
+            return new ScriptColumns();
+        }
+        ScriptColumns columns = temporaryColumnNames(sql, context, SCRIPT_TABLE_KEYWORDS);
+        addTableColumnNames(sql, SqlDialectTranslator.temporaryFunctionTables(sql, projectId, jobProjectId,
+                options.defaultDatasetId(),
+                new SqlDialectTranslator.QueryParameters(options.queryParameters(), options.parameterMode()),
+                context.temporaryTables()), projectId, jobLocation, context, columns);
+        return columns;
     }
 
     /**
@@ -3228,6 +3360,11 @@ public class BigQueryService {
         return expandScriptVariables(sql, context, columns, Set.of());
     }
 
+    private static String expandScriptVariables(String sql, ProceduralContext context, ScriptColumns columns,
+                                                Set<Integer> columnPositions) {
+        return expandScriptVariables(sql, context, columns, columnPositions, new LinkedHashSet<>());
+    }
+
     /**
      * True when the dotted name ending at {@code index} stands in one of the {@code keywords} table
      * positions, so that {@code _SESSION.t} and {@code dataset.table} both count.
@@ -3250,13 +3387,17 @@ public class BigQueryService {
      * are the token indexes a statement resolves as column names even when a variable has that name.
      */
     private static String expandScriptVariables(String sql, ProceduralContext context, ScriptColumns columns,
-                                                Set<Integer> columnPositions) {
+                                                Set<Integer> columnPositions, Set<String> referencedVariables) {
         List<SqlDialectTranslator.Token> tokens = new SqlDialectTranslator.Lexer(sql).tokenize();
         ScriptNameResolution resolution = scriptNameResolution(tokens, columns);
+        // The column name BigQuery gives a substituted select item, keyed by the token it follows.
+        Map<Integer, String> resultNames = new LinkedHashMap<>();
         StringBuilder expanded = new StringBuilder();
         for (int index = 0; index < tokens.size(); index++) {
             SqlDialectTranslator.Token token = tokens.get(index);
-            String name = token.text.toLowerCase(Locale.ROOT);
+            boolean named = token.kind == SqlDialectTranslator.Kind.IDENT
+                    || token.kind == SqlDialectTranslator.Kind.QIDENT;
+            String name = named ? token.identifierText().toLowerCase(Locale.ROOT) : token.text;
             int previous = previousSignificantToken(tokens, index - 1);
             int next = nextSignificantToken(tokens, index + 1);
             boolean declarationPosition = previous >= 0
@@ -3264,12 +3405,14 @@ public class BigQueryService {
             boolean functionName = next >= 0 && tokens.get(next).isPunct("(");
             boolean qualifiedField = previous >= 0 && tokens.get(previous).isPunct(".");
             boolean columnName = columnPositions.contains(index) || resolution.hides(name, index);
-            if (token.kind != SqlDialectTranslator.Kind.IDENT || !context.variables().containsKey(name)
+            if (!named || !context.variables().containsKey(name)
                     || declarationPosition || functionName || qualifiedField || columnName
                     || resolution.isAliasReference(name, index)) {
-                expanded.append(token.text);
+                String resultName = resultNames.remove(index);
+                expanded.append(resultName == null ? token.text : token.text + " AS " + resultName);
                 continue;
             }
+            rejectScriptVariableClause(resolution.clauses[index]);
             Object value = context.variables().get(name);
             int dotIndex = nextSignificantToken(tokens, index + 1);
             int fieldIndex = dotIndex >= 0 && tokens.get(dotIndex).isPunct(".")
@@ -3307,8 +3450,9 @@ public class BigQueryService {
                     memberIndex = nestedField;
                 }
                 if (finalFieldIndex != index) {
-                    String literal = valueType != null ? sqlVariableLiteral(fieldValue, valueType)
-                            : sqlVariableLiteral(fieldValue);
+                    referencedVariables.add(name);
+                    String literal = clauseLiteral(valueType != null ? sqlVariableLiteral(fieldValue, valueType)
+                            : sqlVariableLiteral(fieldValue), resolution.clauses[index]);
                     // BigQuery names the column after the field a whole select item ends with.
                     expanded.append(resolution.startsSelectItem(index)
                             && endsSelectListItem(tokens, finalFieldIndex)
@@ -3318,15 +3462,139 @@ public class BigQueryService {
                     continue;
                 }
             }
-            String literal = sqlVariableLiteral(value, context.variableTypes().get(name));
+            referencedVariables.add(name);
+            String literal = clauseLiteral(sqlVariableLiteral(value, context.variableTypes().get(name)),
+                    resolution.clauses[index]);
             // A variable that is a whole select item keeps its name as the column name, as BigQuery's
             // path expression does, where an expression over it is named f0_, f1_, ...
-            expanded.append(resolution.startsSelectItem(index) && endsSelectListItem(tokens, index)
-                    ? literal + " AS " + token.text
-                    : literal);
+            if (resolution.startsSelectItem(index) && endsSelectListItem(tokens, index)) {
+                expanded.append(literal).append(" AS ").append(token.text);
+                continue;
+            }
+            ScriptResultName resultName = scriptResultName(tokens, resolution, context, name, index);
+            if (resultName != null) {
+                resultNames.put(resultName.end(), resultName.name());
+            }
+            expanded.append(literal);
         }
         return expanded.toString();
     }
+
+    /** A condition whose type is not a BOOL: BigQuery reports it as a coercion error. */
+    private static GcpException booleanConditionError(String condition) {
+        return QueryEngine.invalidQuery("Query error: Cannot coerce expression " + condition.trim()
+                + " to type BOOL");
+    }
+
+    /**
+     * A literal in {@code ORDER BY} or {@code GROUP BY} is a constant expression to BigQuery, where DuckDB
+     * reads an integer as a position and refuses any other constant, so it is wrapped as a scalar subquery.
+     */
+    private static String clauseLiteral(String literal, String clause) {
+        return "ORDER".equals(clause) || "GROUP".equals(clause) ? "(SELECT " + literal + ")" : literal;
+    }
+
+    /**
+     * BigQuery reads a variable in {@code LIMIT} or {@code OFFSET} as that clause's own expression and refuses
+     * it, where a query parameter is allowed there: "LIMIT expects an integer literal or parameter".
+     */
+    private static void rejectScriptVariableClause(String clause) {
+        if ("LIMIT".equals(clause) || "OFFSET".equals(clause)) {
+            throw QueryEngine.invalidQuery("Query error: " + clause + " expects an integer literal or parameter");
+        }
+    }
+
+    /**
+     * The column name BigQuery gives the select item a substituted variable produces when the variable is not
+     * the whole item: a reference the item wraps in parentheses is named after the variable, and a field path
+     * over a {@code JSON} value after its last field. {@code null} where BigQuery names the item f0_, f1_, ...
+     */
+    private static ScriptResultName scriptResultName(List<SqlDialectTranslator.Token> tokens,
+                                                     ScriptNameResolution resolution, ProceduralContext context,
+                                                     String variable, int index) {
+        String clause = resolution.clauses()[index];
+        if ("ORDER".equals(clause) || "GROUP".equals(clause)) {
+            // A sort or group key is not a select item, so it takes the value and keeps the generated name.
+            return null;
+        }
+        ScriptResultName jsonField = jsonFieldResultName(tokens, context, variable, index);
+        if (jsonField != null) {
+            return jsonField;
+        }
+        int open = previousSignificantToken(tokens, index - 1);
+        int close = nextSignificantToken(tokens, index + 1);
+        if (open < 0 || !tokens.get(open).isPunct("(") || close < 0 || !tokens.get(close).isPunct(")")) {
+            return null;
+        }
+        // The pair that wraps the reference alone, and every further pair around that one.
+        while (true) {
+            int outer = previousSignificantToken(tokens, open - 1);
+            int inner = nextSignificantToken(tokens, close + 1);
+            if (outer >= 0 && tokens.get(outer).isPunct("(") && inner >= 0 && tokens.get(inner).isPunct(")")) {
+                open = outer;
+                close = inner;
+                continue;
+            }
+            break;
+        }
+        return startsSelectItem(tokens, previousSignificantToken(tokens, open - 1))
+                && !insideExpressionParenthesis(tokens, open)
+                && endsSelectListItem(tokens, close)
+                ? new ScriptResultName(close, tokens.get(index).text) : null;
+    }
+
+    /**
+     * Whether the parenthesis at {@code open} sits inside a parenthesis, bracket or brace that is not a
+     * query. Such a reference is an argument or an element, whose column BigQuery names f0_, f1_, ...
+     */
+    private static boolean insideExpressionParenthesis(List<SqlDialectTranslator.Token> tokens, int open) {
+        int depth = 0;
+        for (int at = open - 1; at >= 0; at--) {
+            SqlDialectTranslator.Token token = tokens.get(at);
+            if (token.isPunct(")") || token.isPunct("]") || token.isPunct("}")) {
+                depth++;
+            } else if (token.isPunct("(")) {
+                if (depth == 0) {
+                    return !startsQuery(tokens, at);
+                }
+                depth--;
+            } else if (token.isPunct("[") || token.isPunct("{")) {
+                if (depth == 0) {
+                    return true;
+                }
+                depth--;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * The last field of the dotted path a whole select item reads from a {@code JSON} variable, which BigQuery
+     * names the column after. A subscript such as {@code j['a']} keeps the generated name.
+     */
+    private static ScriptResultName jsonFieldResultName(List<SqlDialectTranslator.Token> tokens,
+                                                       ProceduralContext context, String variable, int index) {
+        if (!"JSON".equals(context.variableTypes().get(variable))
+                || insideExpressionParenthesis(tokens, index)
+                || !startsSelectItem(tokens, previousSignificantToken(tokens, index - 1))) {
+            return null;
+        }
+        int field = -1;
+        int dot = nextSignificantToken(tokens, index + 1);
+        while (dot >= 0 && tokens.get(dot).isPunct(".")) {
+            int member = nextSignificantToken(tokens, dot + 1);
+            if (member < 0 || tokens.get(member).kind != SqlDialectTranslator.Kind.IDENT) {
+                break;
+            }
+            field = member;
+            dot = nextSignificantToken(tokens, member + 1);
+        }
+        return field >= 0 && endsSelectListItem(tokens, field)
+                ? new ScriptResultName(field, tokens.get(field).text) : null;
+    }
+
+    /** The token a result column name follows, and the name itself. */
+    private record ScriptResultName(int end, String name) {}
 
     /**
      * The lower-cased columns the tables a statement names expose, each with the queries that read one of
@@ -3621,7 +3889,8 @@ public class BigQueryService {
                 }
                 continue;
             }
-            if (token.kind != SqlDialectTranslator.Kind.IDENT) {
+            if (token.kind != SqlDialectTranslator.Kind.IDENT
+                    && token.kind != SqlDialectTranslator.Kind.QIDENT) {
                 continue;
             }
             int depth = clauses.size() - 1;
@@ -3629,17 +3898,23 @@ public class BigQueryService {
             String upper = token.upper();
             int previous = previousSignificantToken(tokens, index - 1);
             int next = nextSignificantToken(tokens, index + 1);
-            if ("WITH".equals(upper)) {
-                withClauses.set(depth, true);
-            } else if (SCRIPT_CLAUSE_KEYWORDS.contains(upper) || "SELECT".equals(upper)) {
-                clauses.set(depth, upper);
-                // A WITH clause collects CTE names; the query that follows it does not.
-                withClauses.set(depth, false);
+            // A quoted name is never a keyword, but BigQuery resolves it like an unquoted one everywhere
+            // else: it belongs to the clause around it, names a CTE, a source alias or a select item's
+            // column, and both declares and reads an output alias.
+            if (token.kind == SqlDialectTranslator.Kind.IDENT) {
+                if ("WITH".equals(upper)) {
+                    withClauses.set(depth, true);
+                } else if ((SCRIPT_CLAUSE_KEYWORDS.contains(upper) || "SELECT".equals(upper))
+                        && opensClause(upper, clauses.get(depth))) {
+                    clauses.set(depth, upper);
+                    // A WITH clause collects CTE names; the query that follows it does not.
+                    withClauses.set(depth, false);
+                }
             }
             // Only a query's own select list names its columns. A function call's arguments or a
             // grouped expression inherit the clause they sit in, but declare nothing there.
             boolean selectList = parenQueries.get(depth) && "SELECT".equals(clauses.get(depth));
-            String name = token.text.toLowerCase(Locale.ROOT);
+            String name = token.identifierText().toLowerCase(Locale.ROOT);
             clauseByToken[index] = clauses.get(depth);
             if (previous >= 0 && tokens.get(previous).isKeyword("AS") && selectList) {
                 aliasDepths.computeIfAbsent(name, key -> new LinkedHashSet<>()).add(structure.depths()[index]);
@@ -3726,6 +4001,13 @@ public class BigQueryService {
                 }
                 continue;
             }
+            if (token.kind == SqlDialectTranslator.Kind.QIDENT) {
+                // A quoted name is not a keyword, but it names a column like an unquoted one.
+                if ("SELECT".equals(innerClauses.getLast())) {
+                    addSelectListColumnName(tokens, index, names);
+                }
+                continue;
+            }
             if (token.kind != SqlDialectTranslator.Kind.IDENT) {
                 continue;
             }
@@ -3738,13 +4020,29 @@ public class BigQueryService {
             if (!"SELECT".equals(innerClauses.get(depth))) {
                 continue;
             }
-            int itemStart = previousSignificantToken(tokens, index - 1);
-            if (itemStart >= 0 && tokens.get(itemStart).isKeyword("AS")
-                    || startsSelectItem(tokens, itemStart) && endsSelectListItem(tokens, index)) {
-                names.add(token.text.toLowerCase(Locale.ROOT));
-            }
+            addSelectListColumnName(tokens, index, names);
         }
         return names;
+    }
+
+    /** Adds the column an item's alias or a bare item declares, by the name it carries. */
+    private static void addSelectListColumnName(List<SqlDialectTranslator.Token> tokens, int index,
+                                                Set<String> names) {
+        int itemStart = previousSignificantToken(tokens, index - 1);
+        if (itemStart >= 0 && tokens.get(itemStart).isKeyword("AS")
+                || startsSelectItem(tokens, itemStart) && endsSelectListItem(tokens, index)) {
+            names.add(tokens.get(index).identifierText().toLowerCase(Locale.ROOT));
+        }
+    }
+
+    /**
+     * Whether the keyword opens a clause here. BigQuery's grammar takes {@code OFFSET} only after a
+     * {@code LIMIT}, and it is the one clause keyword that is not reserved, so it also names variables and
+     * describes the array subscript function: {@code SELECT offset} and {@code [10, 20][OFFSET(offset)]} are
+     * expressions.
+     */
+    private static boolean opensClause(String keyword, String clause) {
+        return !"OFFSET".equals(keyword) || "LIMIT".equals(clause);
     }
 
     /** Whether the parenthesis at {@code open} opens a query rather than grouping an expression. */
@@ -4100,7 +4398,7 @@ public class BigQueryService {
         List<TableFieldSchema> fields = result.schema() != null && result.schema().getFields() != null
                 ? result.schema().getFields() : List.of();
         if (fields.size() != 1 || !"BOOLEAN".equalsIgnoreCase(fields.getFirst().getType())) {
-            throw QueryEngine.invalidQuery("Loop condition must be a BOOL expression");
+            throw booleanConditionError(condition);
         }
         boolean matches = !result.rows().isEmpty()
                 && Boolean.TRUE.equals(result.rows().getFirst().get("_floci_condition"));
@@ -4139,7 +4437,7 @@ public class BigQueryService {
             List<TableFieldSchema> fields = result.schema() != null && result.schema().getFields() != null
                     ? result.schema().getFields() : List.of();
             if (fields.size() != 1 || !"BOOLEAN".equalsIgnoreCase(fields.getFirst().getType())) {
-                throw QueryEngine.invalidQuery("WHILE condition must be a BOOL expression");
+                throw booleanConditionError(loop.condition());
             }
             boolean matches = !result.rows().isEmpty()
                     && Boolean.TRUE.equals(result.rows().getFirst().get("_floci_condition"));
@@ -4233,8 +4531,11 @@ public class BigQueryService {
                 executeImmediate(projectId, jobProjectId, sqlItem.sql(), options, job, context, jobLocation);
                 return;
             }
+            Set<String> referencedVariables = new LinkedHashSet<>();
             SqlDialectTranslator.SqlItem sql = new SqlDialectTranslator.SqlItem(
-                    expandScriptVariables(sqlItem.sql(), projectId, jobProjectId, options, context, jobLocation));
+                    expandScriptVariables(sqlItem.sql(), projectId, jobProjectId, options, context, jobLocation,
+                            referencedVariables));
+            rejectTemporaryFunctionVariableReference(sqlItem.sql(), referencedVariables);
             SqlDialectTranslator.TemporaryTableDefinition temporaryTable =
                     SqlDialectTranslator.temporaryTableDefinition(sql.sql());
             if (temporaryTable != null) {
@@ -4242,6 +4543,7 @@ public class BigQueryService {
                     context.clearQueryResult();
                     return;
                 }
+                rejectExistingTemporaryTable(temporaryTable, context, projectId);
                 materializeTemporaryTable(projectId, jobProjectId, sql.sql(), temporaryTable.name(),
                         temporaryTable.fields(), options, context, jobLocation, false);
                 return;
@@ -4296,7 +4598,7 @@ public class BigQueryService {
                     ? result.schema().getFields() : List.of();
             if (conditionFields.size() != 1
                     || !"BOOLEAN".equalsIgnoreCase(conditionFields.getFirst().getType())) {
-                throw QueryEngine.invalidQuery("IF condition must be a BOOL expression");
+                throw booleanConditionError(conditional.condition());
             }
             matches = !result.rows().isEmpty()
                     && Boolean.TRUE.equals(result.rows().getFirst().get("_floci_condition"));
@@ -4312,6 +4614,37 @@ public class BigQueryService {
                 options.defaultDatasetId(),
                 new SqlDialectTranslator.QueryParameters(options.queryParameters(), options.parameterMode()),
                 context.temporaryTables());
+    }
+
+    /**
+     * A temporary function's body resolves against its parameters and the tables it reads, never against the
+     * script around it: BigQuery answers "Invalid reference to script variable v; in function f" where the
+     * substitution would otherwise bake the variable's value into the macro.
+     */
+    private static void rejectTemporaryFunctionVariableReference(String sql, Set<String> referencedVariables) {
+        if (referencedVariables.isEmpty()) {
+            return;
+        }
+        SqlDialectTranslator.TemporaryFunctionDefinition function =
+                SqlDialectTranslator.temporaryFunctionDefinition(sql);
+        if (function == null) {
+            return;
+        }
+        throw QueryEngine.invalidQuery("Query error: Invalid reference to script variable "
+                + referencedVariables.iterator().next() + "; in function " + function.name());
+    }
+
+    /**
+     * BigQuery refuses a second declaration of the same temporary table: "Already Exists: Table
+     * <project>:<script dataset>.<name>", where the script's temporary tables live in {@code _SESSION}.
+     */
+    private static void rejectExistingTemporaryTable(SqlDialectTranslator.TemporaryTableDefinition declaration,
+                                                     ProceduralContext context, String projectId) {
+        if (!declaration.orReplace() && !declaration.ifNotExists()
+                && context.temporaryTables().contains(declaration.name())) {
+            throw QueryEngine.invalidQuery("Already Exists: Table " + projectId + ":_SESSION."
+                    + declaration.name());
+        }
     }
 
     private void materializeTemporaryTable(String projectId, String jobProjectId, String sql, String name,
@@ -4507,7 +4840,8 @@ public class BigQueryService {
                         return true;
                     }
                     if (!function.orReplace()) {
-                        throw QueryEngine.invalidQuery("Already Exists: Function " + function.name());
+                        throw QueryEngine.invalidQuery("SQL functions with the same name but different signatures are "
+                            + "currently unsupported; found " + function.name());
                     }
                     setupObjects.remove("function:" + normalized);
                 }

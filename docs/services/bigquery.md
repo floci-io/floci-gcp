@@ -660,13 +660,21 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
   `WHILE`, `LOOP`, `REPEAT`, and `FOR` with labels and loop control. Full GoogleSQL variable type
   and expression semantics, exception handlers, transactions, JavaScript UDFs, persistent
   `CREATE FUNCTION` / `PROCEDURE`, `EXPORT DATA`, `LOAD DATA`, `ALTER TABLE`, and `ALTER VIEW`
-  inside scripts are not supported; they fail with `invalidQuery`.
+  inside scripts are not supported; they fail with `invalidQuery`, and so do the `ASSERT` and
+  `RETURN` statements, which a script here cannot run yet.
   Dynamic SQL goes through `EXECUTE IMMEDIATE` and is supported only in the shapes listed above.
   A `BIGNUMERIC` variable is not supported: DuckDB's `DECIMAL(38,9)` is BigQuery's `NUMERIC` precision
   and cannot hold its 76 digits. Rejections use floci's own wording in a few places where BigQuery adds
   a position, for example `IF condition must be a BOOL expression` for `Cannot coerce expression 1 to
   type BOOL at [1:4]`, and `EXECUTE IMMEDIATE cannot be nested.` for `SQL created by EXECUTE IMMEDIATE
   contains unsupported statement type: ExecuteImmediateStatement`.
+- A script variable reference keeps BigQuery's value but not always its column name: a parenthesised
+  reference is named `f0_`, where BigQuery names it after the variable (`SELECT (x)` answers a column
+  named `x`), a qualified field of a `JSON` variable is `f0_`, where BigQuery names the field, and a
+  backticked reference such as ``SELECT `x` `` fails instead of reading the variable. Two
+  shapes BigQuery rejects also run here: a variable in `LIMIT`, which BigQuery refuses with `LIMIT
+  expects an integer literal or parameter`, and a reserved keyword used as a loop or block label,
+  which it refuses with `Reserved keyword 'outer' may not be used as a label name without backticks`.
 - Values a script needs at validation time are what a dry run cannot supply: a script dry run stops
   at the first variable or control-flow statement and after the first DDL statement, where BigQuery
   validates every statement of the script. A dry run whose script declares a temporary table reports

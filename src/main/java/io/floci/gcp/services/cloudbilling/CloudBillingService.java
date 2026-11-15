@@ -152,7 +152,8 @@ public class CloudBillingService {
     /**
      * Pages like {@code pageRows} in BigQuery: the token carries the page size, so a client that
      * sends only {@code pageToken} after the first request keeps paging instead of getting the
-     * whole list again. Without a page size anywhere, the whole list is one page.
+     * whole list again. Without a page size anywhere, a page holds {@link #MAX_PAGE_SIZE} items, and
+     * a larger requested size is capped at {@link #MAX_PAGE_SIZE}.
      */
     private static <T> PageToken.Page<T> page(List<T> all, int pageSize, String pageToken) {
         PageToken.Cursor cursor = PageToken.decodeCursor(pageToken);

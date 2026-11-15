@@ -14666,7 +14666,7 @@ final class SqlDialectTranslator {
             case "CURRENT_TIMESTAMP" -> "current_timestamp";
             case "CURRENT_DATE" -> "current_date";
             case "CURRENT_DATETIME" -> "CAST(current_timestamp AS TIMESTAMP)";
-            case "GENERATE_UUID" -> "uuid()";
+            case "GENERATE_UUID" -> "CAST(uuid() AS VARCHAR)";
             case "APPROX_COUNT_DISTINCT" -> args(a, 1, name, "COUNT(DISTINCT " + at(a, 0) + ")");
             case "UNIX_SECONDS" -> "CAST(epoch(" + at(a, 0) + ") AS BIGINT)";
             case "UNIX_MILLIS" -> "epoch_ms(" + at(a, 0) + ")";

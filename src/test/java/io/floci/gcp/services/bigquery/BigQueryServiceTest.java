@@ -2229,7 +2229,7 @@ class BigQueryServiceTest {
     @Test
     void int64VariablesRejectValuesBigQueryCannotCoerce() {
         // Live BigQuery: "Cannot coerce expression 1.9 to type INT64". A FLOAT64 or NUMERIC value is not
-        // truncated or wrapped into an INT64 variable; the emulator names the target type instead.
+        // truncated or wrapped into an INT64 variable, and the rejection names the expression as BigQuery does.
         for (String sql : List.of(
                 "DECLARE x INT64 DEFAULT 1.9; SELECT x;",
                 "DECLARE x INT64 DEFAULT 1.0; SELECT x;",
@@ -2239,13 +2239,257 @@ class BigQueryServiceTest {
                     () -> service.query(PROJECT, "US", null, sql, null));
 
             assertEquals("invalidQuery", error.getReason());
-            assertTrue(error.getMessage().contains("Value cannot be coerced to INT64"), error.getMessage());
+            assertTrue(error.getMessage().startsWith("Query error: Cannot coerce expression "),
+                    error.getMessage());
+            assertTrue(error.getMessage().endsWith(" to type INT64"), error.getMessage());
         }
+        GcpException numeric = assertThrows(GcpException.class, () -> service.query(PROJECT, "US", null,
+                "DECLARE n NUMERIC DEFAULT 7; DECLARE x INT64 DEFAULT n; SELECT x;", null));
+        assertEquals("Query error: Cannot coerce expression n to type INT64", numeric.getMessage());
         // An INT64 variable still holds an INT64 literal.
         seedTwoRows();
         StoredJob job = service.query(PROJECT, "US", null,
                 "DECLARE x INT64 DEFAULT 25; SELECT * FROM ds1.t1 WHERE age = x;", null);
         assertEquals(1, service.queryResults(PROJECT, job).rows().size());
+    }
+
+    @Test
+    void numericVariablesRejectFloat64ValuesBigQueryCannotCoerce() {
+        // Live BigQuery: "Cannot coerce expression f to type NUMERIC". A NUMERIC variable coerces a floating
+        // point literal, whose digits BigQuery reads exactly, and refuses a FLOAT64 value, where one that
+        // prints cleanly would otherwise be stored as the decimal it prints.
+        GcpException variable = assertThrows(GcpException.class, () -> service.query(PROJECT, "US", null,
+                "DECLARE f FLOAT64 DEFAULT 2.5; DECLARE n NUMERIC DEFAULT f; SELECT n;", null));
+        assertEquals("invalidQuery", variable.getReason());
+        assertEquals("Query error: Cannot coerce expression f to type NUMERIC", variable.getMessage());
+
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        when(engine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("_floci_script_value", "FLOAT", null))),
+                List.of(Map.of("_floci_script_value", 4.0)), "SELECT", 0));
+        BigQueryService expressionService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), engine);
+
+        GcpException division = assertThrows(GcpException.class, () -> expressionService.query(PROJECT, "US", null,
+                "DECLARE i INT64 DEFAULT 8; DECLARE n NUMERIC; SET n = i / 2; SELECT n;", null));
+        assertEquals("Query error: Cannot coerce expression i / 2 to type NUMERIC", division.getMessage());
+
+        GcpException subquery = assertThrows(GcpException.class, () -> expressionService.query(PROJECT, "US", null,
+                "DECLARE f FLOAT64 DEFAULT 2.5; DECLARE n NUMERIC; SET n = (SELECT f); SELECT n;", null));
+        assertEquals("Query error: Cannot coerce expression (SELECT f) to type NUMERIC", subquery.getMessage());
+
+        // A floating point literal is still coerced, as BigQuery coerces it.
+        StoredJob literal = expressionService.query(PROJECT, "US", null,
+                "DECLARE n NUMERIC DEFAULT 1.5; SELECT n;", null);
+        assertEquals("DONE", literal.getState());
+    }
+
+    @Test
+    void temporaryFunctionBodiesCannotReadScriptVariables() {
+        // Live BigQuery: "Invalid reference to script variable v; in function f". A temporary function
+        // resolves against its parameters and the tables its body reads, never the script around it.
+        GcpException error = assertThrows(GcpException.class, () -> service.query(PROJECT, "US", null,
+                "DECLARE v INT64 DEFAULT 1; CREATE TEMP FUNCTION f(y INT64) AS (y + v); SELECT f(2);", null));
+
+        assertEquals("invalidQuery", error.getReason());
+        assertEquals("Query error: Invalid reference to script variable v; in function f", error.getMessage());
+    }
+
+    @Test
+    void arraysAreAssignedOnlyFromTheirOwnArrayType() {
+        // Live BigQuery: no array is coercible, and a typed array literal builds the array type it names.
+        Map<String, String> rejected = new LinkedHashMap<>();
+        rejected.put("[1.5]", "DECLARE a ARRAY<NUMERIC> DEFAULT [1.5]; SELECT a;");
+        rejected.put("[1, 2]", "DECLARE a ARRAY<NUMERIC> DEFAULT [1, 2]; SELECT a;");
+        rejected.put("[f]", "DECLARE f FLOAT64 DEFAULT 2.5; DECLARE a ARRAY<NUMERIC> DEFAULT [f]; SELECT a;");
+        rejected.put("ARRAY<FLOAT64>[1.5]",
+                "DECLARE a ARRAY<NUMERIC> DEFAULT ARRAY<FLOAT64>[1.5]; SELECT a;");
+        rejected.put("ARRAY<INT64>[1]", "DECLARE a ARRAY<NUMERIC> DEFAULT ARRAY<INT64>[1]; SELECT a;");
+        for (Map.Entry<String, String> shape : rejected.entrySet()) {
+            GcpException error = assertThrows(GcpException.class,
+                    () -> service.query(PROJECT, "US", null, shape.getValue(), null));
+
+            assertEquals("Query error: Cannot coerce expression " + shape.getKey()
+                    + " to type ARRAY<NUMERIC>", error.getMessage());
+        }
+
+        GcpException element = assertThrows(GcpException.class, () -> service.query(PROJECT, "US", null,
+                "DECLARE f FLOAT64 DEFAULT 2.5; DECLARE a ARRAY<NUMERIC> DEFAULT ARRAY<NUMERIC>[f]; SELECT a;",
+                null));
+        assertEquals("Query error: Array element type FLOAT64 does not coerce to NUMERIC", element.getMessage());
+
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        when(engine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("a", "NUMERIC", "REPEATED"))),
+                List.of(Map.of("a", List.of("1.5"))), "SELECT", 0));
+        BigQueryService arrayService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), engine);
+
+        // A floating point element is a literal inside a typed ARRAY<NUMERIC>, and an INT64 array keeps its
+        // own element type.
+        StoredJob typed = arrayService.query(PROJECT, "US", null,
+                "DECLARE a ARRAY<NUMERIC> DEFAULT ARRAY<NUMERIC>[1.5]; SELECT a;", null);
+        assertEquals("DONE", typed.getState());
+        StoredJob integers = arrayService.query(PROJECT, "US", null,
+                "DECLARE a ARRAY<INT64> DEFAULT [1, 2]; SELECT a;", null);
+        assertEquals("DONE", integers.getState());
+    }
+
+    @Test
+    void aDynamicStatementCannotAssignAFloat64ToANumericVariable() {
+        // Live BigQuery: "Value returned by Dynamic SQL has type FLOAT64 which is not assignable to
+        // variable n of type NUMERIC", and the same for an INT64 target.
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        when(engine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("f0_", "FLOAT", null))),
+                List.of(Map.of("f0_", 1.5)), "SELECT", 0));
+        BigQueryService dynamicService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), engine);
+
+        for (String type : List.of("NUMERIC", "INT64")) {
+            GcpException error = assertThrows(GcpException.class, () -> dynamicService.query(PROJECT, "US", null,
+                    "DECLARE n " + type + "; EXECUTE IMMEDIATE 'SELECT CAST(1.5 AS FLOAT64)' INTO n; SELECT n;",
+                    null));
+
+            assertEquals("invalidQuery", error.getReason());
+            assertEquals("Value returned by Dynamic SQL has type FLOAT64 which is not assignable to variable n"
+                    + " of type " + type, error.getMessage());
+        }
+    }
+
+    @Test
+    void aParenthesizedOrQuotedVariableKeepsItsResultColumnName() {
+        // Live BigQuery names the column after the variable for SELECT (x), SELECT ((x)) and SELECT `x`, and
+        // f0_ once an expression reads it.
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        when(engine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("x", "INTEGER", null))), List.of(Map.of("x", 7L)), "SELECT", 0));
+        BigQueryService namingService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), engine);
+
+        namingService.query(PROJECT, "US", null, "DECLARE x INT64 DEFAULT 7; SELECT (x);", null);
+        namingService.query(PROJECT, "US", null, "DECLARE x INT64 DEFAULT 7; SELECT ((x));", null);
+        namingService.query(PROJECT, "US", null, "DECLARE x INT64 DEFAULT 7; SELECT `x`;", null);
+        namingService.query(PROJECT, "US", null, "DECLARE x INT64 DEFAULT 7; SELECT (x) + 1;", null);
+        namingService.query(PROJECT, "US", null, "DECLARE x INT64 DEFAULT 7; SELECT COALESCE(NULL, (x));", null);
+        namingService.query(PROJECT, "US", null, "DECLARE i INT64 DEFAULT 0; SELECT [10,20][OFFSET(i)];", null);
+
+        ArgumentCaptor<BigQuerySqlEngine.Request> request = ArgumentCaptor.forClass(BigQuerySqlEngine.Request.class);
+        verify(engine, times(6)).execute(request.capture(), any());
+        assertEquals("SELECT (7) AS x", request.getAllValues().get(0).sql());
+        assertEquals("SELECT ((7)) AS x", request.getAllValues().get(1).sql());
+        assertEquals("SELECT 7 AS `x`", request.getAllValues().get(2).sql());
+        assertEquals("SELECT (7) + 1", request.getAllValues().get(3).sql());
+        // A function argument is not a select item, so no alias is added there.
+        assertEquals("SELECT COALESCE(NULL, (7))", request.getAllValues().get(4).sql());
+        // The array subscript function is not the OFFSET clause, so the index reads the variable.
+        assertEquals("SELECT [10,20][OFFSET(0)]", request.getAllValues().get(5).sql());
+    }
+
+    @Test
+    void aQuotedAliasIsNotReplacedByAScriptVariable() {
+        // Live BigQuery resolves a quoted alias like an unquoted one, so the ORDER BY reference and the
+        // derived table's column keep their meaning.
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        when(engine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("x", "INTEGER", null))), List.of(Map.of("x", 2L)), "SELECT", 0));
+        BigQueryService quotedService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), engine);
+
+        quotedService.query(PROJECT, "US", null,
+                "DECLARE x INT64 DEFAULT 7; SELECT 2 AS `x` FROM UNNEST([1]) ORDER BY `x`;", null);
+        quotedService.query(PROJECT, "US", null,
+                "DECLARE x INT64 DEFAULT 7; SELECT `x` FROM (SELECT 2 AS `x`);", null);
+        quotedService.query(PROJECT, "US", null,
+                "DECLARE r INT64 DEFAULT 7; SELECT `r`.a FROM (SELECT 2 AS a) AS `r`;", null);
+
+        ArgumentCaptor<BigQuerySqlEngine.Request> request = ArgumentCaptor.forClass(BigQuerySqlEngine.Request.class);
+        verify(engine, times(3)).execute(request.capture(), any());
+        assertTrue(request.getAllValues().get(0).sql().contains("ORDER BY `x`"),
+                request.getAllValues().get(0).sql());
+        assertTrue(request.getAllValues().get(1).sql().contains("SELECT `x` FROM (SELECT 2 AS `x`)"),
+                request.getAllValues().get(1).sql());
+        assertTrue(request.getAllValues().get(2).sql().contains("SELECT `r`.a FROM (SELECT 2 AS a) AS `r`"),
+                request.getAllValues().get(2).sql());
+    }
+
+    @Test
+    void aScriptVariableInASortKeyIsAConstantAndKeepsNoAlias() {
+        // Live BigQuery treats the constant as a sort key with no effect, so no alias may be added there.
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        when(engine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("one", "INTEGER", null))), List.of(Map.of("one", 1L)), "SELECT", 0));
+        BigQueryService sortService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), engine);
+
+        sortService.query(PROJECT, "US", null,
+                "DECLARE x INT64 DEFAULT 7; SELECT 1 AS one FROM UNNEST([1]) ORDER BY 1, (x);", null);
+        sortService.query(PROJECT, "US", null,
+                "DECLARE x INT64 DEFAULT 7; SELECT 1 AS one FROM UNNEST([1]) ORDER BY x;", null);
+
+        ArgumentCaptor<BigQuerySqlEngine.Request> request = ArgumentCaptor.forClass(BigQuerySqlEngine.Request.class);
+        verify(engine, times(2)).execute(request.capture(), any());
+        assertTrue(request.getAllValues().get(0).sql().contains("ORDER BY 1, ((SELECT 7))"),
+                request.getAllValues().get(0).sql());
+        assertTrue(request.getAllValues().get(1).sql().contains("ORDER BY (SELECT 7)"),
+                request.getAllValues().get(1).sql());
+    }
+
+    @Test
+    void aScriptVariableIsRefusedInLimitAndOffset() {
+        // Live BigQuery: "LIMIT expects an integer literal or parameter". A query parameter is allowed there.
+        GcpException limit = assertThrows(GcpException.class, () -> service.query(PROJECT, "US", null,
+                "DECLARE lim INT64 DEFAULT 1; SELECT 1 AS one LIMIT lim;", null));
+        assertEquals("invalidQuery", limit.getReason());
+        assertEquals("Query error: LIMIT expects an integer literal or parameter", limit.getMessage());
+
+        GcpException offset = assertThrows(GcpException.class, () -> service.query(PROJECT, "US", null,
+                "DECLARE off INT64 DEFAULT 1; SELECT 1 AS one LIMIT 2 OFFSET off;", null));
+        assertEquals("Query error: OFFSET expects an integer literal or parameter", offset.getMessage());
+
+        GcpException quoted = assertThrows(GcpException.class, () -> service.query(PROJECT, "US", null,
+                "DECLARE lim INT64 DEFAULT 1; SELECT 1 AS one LIMIT `lim`;", null));
+        assertEquals("Query error: LIMIT expects an integer literal or parameter", quoted.getMessage());
+    }
+
+    @Test
+    void redeclaringATemporaryTableAnswersAlreadyExists() {
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        when(engine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("id", "INTEGER", null))), List.of(), "SELECT", 0));
+        BigQueryService temporaryService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), engine);
+
+        GcpException error = assertThrows(GcpException.class, () -> temporaryService.query(PROJECT, "US", null,
+                "CREATE TEMP TABLE dup (id INT64); CREATE TEMP TABLE dup (id INT64); SELECT 1 AS one;", null));
+
+        assertEquals("invalidQuery", error.getReason());
+        assertEquals("Already Exists: Table p1:_SESSION.dup", error.getMessage());
+    }
+
+    @Test
+    void aTemporaryFunctionParameterAndItsBodyColumnsStayInItsOwnScope() {
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        when(engine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("f0_", "INTEGER", null))),
+                List.of(Map.of("f0_", 3L)), "SELECT", 0));
+        BigQueryService functionService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), engine);
+        functionService.createDataset(PROJECT, newDataset(DATASET));
+        functionService.createTable(PROJECT, DATASET, newTable(DATASET, TABLE));
+        functionService.appendRows(PROJECT, DATASET, TABLE, List.of(Map.of("name", "ana", "age", 41)));
+
+        // A parameter and a column of the table a body reads both win over a script variable of the same
+        // name, so neither statement names a variable.
+        StoredJob job = functionService.query(PROJECT, "US", null, """
+                DECLARE x INT64 DEFAULT 7;
+                DECLARE age INT64 DEFAULT 18;
+                CREATE TEMP FUNCTION f(x INT64) AS (x + 1);
+                CREATE TEMP FUNCTION oldest() AS ((SELECT MAX(age) FROM ds1.t1));
+                SELECT f(2);
+                """, null);
+
+        assertEquals("DONE", job.getState());
     }
 
     private void seedEuDataset() {

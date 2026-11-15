@@ -94,14 +94,22 @@ REST paths live under `/bigquery/v2/projects/{project}/...`.
 - **Scripts and temporary objects**: request-scoped `CREATE TEMP FUNCTION` and `CREATE TEMP TABLE`
   declarations can be interleaved with queries in source order. Functions become temporary
   DuckDB macros; typed scalar, array and nested `STRUCT` parameters are accepted, and CTEs in a
-  function body remain local to that body. Temporary tables accept an explicit schema, an `AS`
+  function body remain local to that body. A function body resolves against its parameters and the
+  columns of the tables it reads, never against the script around it, so a body that reads a script
+  variable is rejected: `Query error: Invalid reference to script variable v; in function f`. A body is an
+  expression, not a query, so a query needs the extra parentheses of a scalar subquery, and
+  `AS (SELECT ...)` answers BigQuery's
+  `The body of each CREATE FUNCTION statement is an expression, not a query`.
+  Temporary tables accept an explicit schema, an `AS`
   query, or both, and can be explicitly addressed through the `_SESSION` qualifier; a `_SESSION`
   name that was not declared answers `Not found: Dataset <project>:_SESSION was not found`, as
   BigQuery does. `CREATE TEMP TABLE IF NOT EXISTS` skips a temporary table that already exists and
   `CREATE OR REPLACE TEMP TABLE` replaces one, where `CREATE TEMP FUNCTION` rejects a clause such as
   `IF NOT EXISTS` or `OR REPLACE`: `Clauses such as IF NOT EXISTS are not yet supported with CREATE TEMP
   FUNCTION`. `OR REPLACE` after the object name answers `Syntax error: Unexpected keyword OR`, as
-  BigQuery's grammar takes it before `TEMP`. Results from preceding statements are discarded; the final query or DML
+  BigQuery's grammar takes it before `TEMP`. A second declaration of the same temporary table answers
+  `Already Exists: Table <project>:_SESSION.<name>`, as BigQuery answers `Already Exists: Table ...`.
+  Results from preceding statements are discarded; the final query or DML
   statement supplies the result. A script reports no DML counts, `numDmlAffectedRows` or `dmlStats`,
   since BigQuery runs its statements as child jobs and the parent carries only the final result. A declaration, an assignment, or the condition that ends a loop does not
   discard it, so a loop reports its final iteration's result and a script that declares or assigns
@@ -116,17 +124,33 @@ REST paths live under `/bigquery/v2/projects/{project}/...`.
   `DATETIME`, `TIME`, `JSON`, `STRUCT`, and arrays of those non-array types, including
   `ARRAY<STRUCT<...>>`; multiple names may share a declaration type and default expression. Simple
   literals, array literals, and arithmetic are evaluated by floci-gcp; other supported expressions are
-  evaluated by the configured SQL engine. A `FLOAT64` literal stays floating point, so `f + 0.2` over
+  evaluated by the configured SQL engine. A value of another type is refused with BigQuery's wording, so
+  `DECLARE x INT64 DEFAULT 1.9` answers `Query error: Cannot coerce expression 1.9 to type INT64`.
+  A `FLOAT64` literal stays floating point, so `f + 0.2` over
   `DECLARE f FLOAT64 DEFAULT 0.1` answers `0.30000000000000004`, as BigQuery does, and the operands type
   the arithmetic, so `SET f = 9007199254740993 - 9007199254740992` stores the exact `1.0` and an `INT64`
   overflow fails even when the target is `FLOAT64`. A typed array literal
   keeps its element type, so `DECLARE xs DEFAULT ARRAY<FLOAT64>[]` declares an empty `ARRAY<FLOAT64>`, and
   a `STRUCT` value is assigned by field position, so `STRUCT(1 AS b, 2 AS a)` reaches
-  `STRUCT<a INT64, b INT64>` as `a = 1, b = 2`. Variable references
-  are token-substituted as typed literals; the statement's own names win over a variable of the same
+  `STRUCT<a INT64, b INT64>` as `a = 1, b = 2`. A `NUMERIC` variable takes a floating point literal as
+  written, so `DECLARE n NUMERIC DEFAULT 1.5` stores `1.5`, and refuses a `FLOAT64` value with
+  BigQuery's wording, so `DECLARE f FLOAT64 DEFAULT 2.5; DECLARE n NUMERIC DEFAULT f` answers
+  `Query error: Cannot coerce expression f to type NUMERIC`. An array takes only its own array type,
+  since BigQuery coerces no array: `[1, 2]` is an `ARRAY<INT64>`, so it answers `Query error: Cannot
+  coerce expression [1, 2] to type ARRAY<NUMERIC>`, `[1.5]` is an `ARRAY<FLOAT64>` and answers the
+  same wording, and a typed
+  literal must name the target's element type, `ARRAY<FLOAT64>[1.5]` and `ARRAY<INT64>[1]` answering
+  the same. Inside a typed `ARRAY<NUMERIC>` a floating point literal is an element, so
+  `ARRAY<NUMERIC>[1.5]` stores `1.5`, while a `FLOAT64` value answers `Array element type FLOAT64 does
+  not coerce to NUMERIC`, and `ARRAY<INT64>[1.9]` the same for `INT64`.
+  `EXECUTE IMMEDIATE` refuses a result of another type the same way, so `INTO` over a `NUMERIC`
+  variable and a `FLOAT64` result answers
+  `Value returned by Dynamic SQL has type FLOAT64 which is not assignable to variable n of type NUMERIC`.
+  Variable references are token-substituted as typed literals; the statement's own names win over a variable of the same
   name: a source column, a column a DML statement names, a CTE name, the columns a CTE's select list
   exposes, a function's parameters, a `FROM` item's alias (a table, `UNNEST` or derived table), the
-  columns a derived table exposes, function names, and qualified fields are left intact, so a column
+  columns a derived table exposes, function names, and qualified fields are left intact, as are quoted
+  names, which resolve like unquoted ones, so a column
   keeps its name while the values an `INSERT` supplies still bind the variables. Those names win in the
   query that reads them and in the queries nested inside it, never in a sibling query, so `DECLARE v
   INT64 DEFAULT 1; CREATE TEMP TABLE t AS SELECT 4 AS v; SET v = v + (SELECT COUNT(*) FROM t)` stores
@@ -139,9 +163,17 @@ REST paths live under `/bigquery/v2/projects/{project}/...`.
   `DECLARE` default evaluates and the condition of an `IF`, `WHILE` or `REPEAT` collect the same names
   from the tables they read and the CTEs they define, in the same queries, and a CTE nothing reads
   declares none of them. A
-  variable that is a whole select item keeps its name as the result column, while
+  variable that is a whole select item keeps its name as the result column, and so does one the item
+  wraps in parentheses or backticks, `SELECT (x)` and ``SELECT `x` `` answering a column named `x` while
   `SELECT f + 0.2` is named `f0_`, as BigQuery names it; so are a function argument such as
-  `SELECT COALESCE(NULL, f)` and a grouped expression such as `SELECT (f) + 1`.
+  `SELECT COALESCE(NULL, f)` and a grouped expression such as `SELECT (f) + 1`. A sort or group key
+  takes the variable's value, which BigQuery reads as a constant, so `ORDER BY f` neither renames the
+  item nor changes the order. A field of a `JSON`
+  variable is named after its last field, `SELECT j.a.b` answering column `b`, where the subscript
+  `SELECT j['a']` keeps the generated name, as BigQuery keeps it. A script variable in `LIMIT` or
+  `OFFSET` is rejected, `Query error: LIMIT expects an integer literal or parameter`, as BigQuery
+  rejects it, and a query parameter is accepted there; the `OFFSET(i)` array subscript is an
+  expression, so a variable is read there.
   `EXECUTE IMMEDIATE` supports a single query, supported DDL or DML statement, or `BEGIN`
   block. `USING` binds named or positional query
   parameters, and `INTO` assigns a zero- or one-row result to declared variables. SQL-text expressions can use
@@ -665,16 +697,25 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
   Dynamic SQL goes through `EXECUTE IMMEDIATE` and is supported only in the shapes listed above.
   A `BIGNUMERIC` variable is not supported: DuckDB's `DECIMAL(38,9)` is BigQuery's `NUMERIC` precision
   and cannot hold its 76 digits. Rejections use floci's own wording in a few places where BigQuery adds
-  a position, for example `IF condition must be a BOOL expression` for `Cannot coerce expression 1 to
-  type BOOL at [1:4]`, and `EXECUTE IMMEDIATE cannot be nested.` for `SQL created by EXECUTE IMMEDIATE
-  contains unsupported statement type: ExecuteImmediateStatement`.
-- A script variable reference keeps BigQuery's value but not always its column name: a parenthesised
-  reference is named `f0_`, where BigQuery names it after the variable (`SELECT (x)` answers a column
-  named `x`), a qualified field of a `JSON` variable is `f0_`, where BigQuery names the field, and a
-  backticked reference such as ``SELECT `x` `` fails instead of reading the variable. Two
-  shapes BigQuery rejects also run here: a variable in `LIMIT`, which BigQuery refuses with `LIMIT
-  expects an integer literal or parameter`, and a reserved keyword used as a loop or block label,
-  which it refuses with `Reserved keyword 'outer' may not be used as a label name without backticks`.
+  a position:
+  `Query error: Cannot coerce expression 1 to type BOOL` for BigQuery's
+  `Query error: Cannot coerce expression 1 to type BOOL at [1:4]`.
+  A rejection of a shape BigQuery words differently keeps floci's own wording.
+- A `NUMERIC` variable refuses a `FLOAT64` value, apart from two shapes that still store one: a
+  `NUMERIC` field of a `STRUCT` default accepts a `FLOAT64` value,
+  `STRUCT(f AS n)`, where BigQuery coerces a `STRUCT` field only when the value is a literal; and
+  arithmetic over floating point literals stays `NUMERIC` here, so `SET n = 1.5 + 0.5` stores `2`,
+  where BigQuery types the expression `FLOAT64` and refuses it. The last one follows from a bare
+  decimal literal being `NUMERIC` here and `FLOAT64` in BigQuery, which holds outside scripts too:
+  `SELECT 1.5` reports a `NUMERIC` column.
+- A reserved keyword used as a loop or block label runs here, where BigQuery refuses it with
+  `Reserved keyword 'outer' may not be used as a label name without backticks`.
+- An unknown name reports DuckDB's wording rather than BigQuery's: a query that names no such column
+  answers `Binder Error: Referenced column "x" was not found ...`, where BigQuery answers
+  `Unrecognized name: x at [1:8]`. The same holds for the other errors DuckDB raises while a
+  statement runs, such as a `NOT NULL` temporary column receiving a NULL, which answers
+  `Constraint Error: NOT NULL constraint failed: t.id` where BigQuery answers
+  `Required field id cannot be null`.
 - Values a script needs at validation time are what a dry run cannot supply: a script dry run stops
   at the first variable or control-flow statement and after the first DDL statement, where BigQuery
   validates every statement of the script. A dry run whose script declares a temporary table reports

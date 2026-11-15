@@ -695,6 +695,7 @@ class PubSubSubscriberControllerTest {
                 .setEnableMessageOrdering(true)
                 .setEnableExactlyOnceDelivery(true)
                 .setRetryPolicy(RetryPolicy.newBuilder()
+                        // Qualified: com.google.protobuf.Duration clashes with the imported java.time.Duration.
                         .setMinimumBackoff(com.google.protobuf.Duration.newBuilder().setSeconds(1))
                         .setMaximumBackoff(com.google.protobuf.Duration.newBuilder().setSeconds(5).setNanos(500_000_000)))
                 .build(), responseObserver);

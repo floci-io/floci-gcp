@@ -260,6 +260,8 @@ public interface EmulatorConfig {
 
         CloudBillingServiceConfig cloudbilling();
 
+        BillingBudgetsServiceConfig billingbudgets();
+
         FirebaseAuthServiceConfig firebaseauth();
 
         BigQueryServiceConfig bigquery();
@@ -333,6 +335,11 @@ public interface EmulatorConfig {
     }
 
     interface CloudBillingServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface BillingBudgetsServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }

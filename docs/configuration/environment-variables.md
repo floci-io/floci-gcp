@@ -126,6 +126,7 @@ Each service can be toggled independently. All are enabled by default.
 | `FLOCI_GCP_SERVICES_SERVICEUSAGE_DEFAULT_ENABLED` | GCP default set | Comma-separated APIs treated as enabled in every project until disabled; only used with enforcement |
 | `FLOCI_GCP_SERVICES_RESOURCEMANAGER_ENABLED` | `true` | Cloud Resource Manager v1 projects API |
 | `FLOCI_GCP_SERVICES_CLOUDBILLING_ENABLED` | `true` | Cloud Billing stub (project billing info) |
+| `FLOCI_GCP_SERVICES_BILLINGBUDGETS_ENABLED` | `true` | Cloud Billing Budget API (budgets under a billing account) |
 | `FLOCI_GCP_SERVICES_FIREBASEAUTH_ENABLED` | `true` | Firebase Auth (Identity Platform) |
 | `FLOCI_GCP_SERVICES_EVENTARC_ENABLED` | `true` | Eventarc |
 

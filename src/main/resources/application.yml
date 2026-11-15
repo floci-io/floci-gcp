@@ -210,6 +210,8 @@ floci-gcp:
       enabled: true
     cloudbilling:
       enabled: true
+    billingbudgets:
+      enabled: true
     firebaseauth:
       enabled: true
   dns:

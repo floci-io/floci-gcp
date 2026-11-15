@@ -38,6 +38,7 @@ floci-gcp is a fast, free, and open-source local GCP emulator built for develope
 | **IAM Credentials** | REST | `generateAccessToken` for service-account impersonation (shape-only stub tokens), `generateIdToken`, `signBlob`, `signJwt` |
 | **Resource Manager** | REST | v1 projects: create, get by ID or number, list with filter, update, delete/undelete, ancestry, IAM policy mixins; optional strict project mode |
 | **Cloud Billing** | REST | Project billing info stub for Terraform `google_project` billing links |
+| **Cloud Billing Budgets** | REST | Budget create, get, list, update and delete under a billing account |
 
 ## Why floci-gcp?
 

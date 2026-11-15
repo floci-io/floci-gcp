@@ -33,7 +33,7 @@ plain-HTTP clients keep working. See [TLS / HTTPS](./advanced/tls.md) for detail
 | `FLOCI_GCP_TLS_KEY_PATH` | _(none)_ | PEM private key file |
 | `FLOCI_GCP_TLS_HTTPS_PORT` | `443` | Extra port bound for HTTPS, since GCP SDKs assume HTTPS on 443 when no port is given. Set `0` to disable |
 
-Fetch the active certificate (over plain HTTP) with `GET /_floci-gcp/tls-cert`.
+Fetch the active certificate (over plain HTTP) with `GET /_floci/tls-cert`.
 
 ---
 

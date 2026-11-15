@@ -155,7 +155,8 @@ public class ServiceEnabledFilter implements ContainerRequestFilter {
         if (path.startsWith("/")) {
             path = path.substring(1);
         }
-        return path.startsWith("_floci-gcp") || path.startsWith("emulator/");
+        return path.equals("_floci") || path.startsWith("_floci/") || path.startsWith("_floci-gcp")
+                || path.startsWith("emulator/");
     }
 
     private Response disabledResponse(String serviceName) {

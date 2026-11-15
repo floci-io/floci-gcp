@@ -82,6 +82,31 @@ class CloudRunUrlRoutingFilterTest {
     }
 
     @Test
+    void controlPlanePathOnInvocationHostIsNotRewritten() {
+        CloudRunService service = mock(CloudRunService.class);
+        String host = "orders-api-f64551fcd6f0.us-central1.run.localhost.floci.io:4588";
+        when(service.resolveInvocationHost(host)).thenReturn(Optional.of(
+                new CloudRunService.InvocationRoute("p1", "us-central1", "orders-api")));
+        when(service.isGeneratedInvocationHost(host)).thenReturn(true);
+        CloudRunUrlRoutingFilter filter = new CloudRunUrlRoutingFilter(service);
+        ContainerRequestContext ctx = context("http://localhost:4588/_floci/health", host);
+
+        filter.filter(ctx);
+
+        verify(ctx, never()).setRequestUri(any(URI.class));
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void controlPlaneMatchesOnlyTheExactPrefix() {
+        assertTrue(CloudRunUrlRoutingFilter.isControlPlane("/_floci"));
+        assertTrue(CloudRunUrlRoutingFilter.isControlPlane("/_floci/health"));
+        assertFalse(CloudRunUrlRoutingFilter.isControlPlane("/_flocix/health"));
+        assertFalse(CloudRunUrlRoutingFilter.isControlPlane("/_floci-gcp/health"));
+        assertFalse(CloudRunUrlRoutingFilter.isControlPlane("/api/_floci/health"));
+    }
+
+    @Test
     void unknownGeneratedHostReturnsNotFound() {
         CloudRunService service = mock(CloudRunService.class);
         String host = "missing-f64551fcd6f0.us-central1.run.localhost.floci.io:4588";

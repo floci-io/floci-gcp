@@ -84,7 +84,7 @@ The generated certificate is a CA (a trust anchor), so a client that adds it to 
 can verify the connection rather than skipping verification. Fetch it over plain HTTP:
 
 ```bash
-curl http://localhost:4588/_floci-gcp/tls-cert -o floci-gcp.crt
+curl http://localhost:4588/_floci/tls-cert -o floci-gcp.crt
 curl --cacert floci-gcp.crt https://localhost:4588/health
 ```
 
@@ -138,4 +138,4 @@ TLS, configure the client's endpoint and transport credentials explicitly.
 
 | Endpoint | Description |
 |---|---|
-| `GET /_floci-gcp/tls-cert` | The active certificate in PEM form; `404` with a JSON explanation when TLS is off |
+| `GET /_floci/tls-cert` | The active certificate in PEM form; `404` with a JSON explanation when TLS is off. `/_floci-gcp/tls-cert` is the legacy path and answers the same |

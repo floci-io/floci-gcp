@@ -65,6 +65,7 @@ nav:
     - Docker Compose: configuration/docker-compose.md
     - Multi-Project Isolation: configuration/multi-project.md
     - Storage Modes: configuration/storage.md
+    - Control Plane Endpoints: configuration/control-plane.md
     - Advanced:
       - application.yml Reference: configuration/advanced/application-yml.md
       - TLS / HTTPS: configuration/advanced/tls.md

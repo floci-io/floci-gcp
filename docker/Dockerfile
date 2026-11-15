@@ -58,7 +58,7 @@ LABEL org.opencontainers.image.title="floci-gcp" \
 EXPOSE 4588
 
 HEALTHCHECK --interval=5s --timeout=3s --retries=5 \
-    CMD wget -q --spider http://localhost:4588/_floci-gcp/health || exit 1
+    CMD wget -q --spider http://localhost:4588/_floci/health || exit 1
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["java", "--enable-native-access=ALL-UNNAMED", "-jar", "/app/quarkus-app/quarkus-run.jar", "-Dquarkus.http.host=0.0.0.0"]

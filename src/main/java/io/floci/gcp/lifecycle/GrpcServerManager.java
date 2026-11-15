@@ -72,7 +72,7 @@ public class GrpcServerManager {
             String uri = ctx.request().uri();
             String contentType = ctx.request().getHeader("Content-Type");
             String path = ctx.request().path();
-            if ("/health".equals(path) || "/_floci-gcp/health".equals(path)) {
+            if ("/health".equals(path) || "/_floci/health".equals(path) || "/_floci-gcp/health".equals(path)) {
                 LOG.debugf("Incoming request: %s %s, content-type=%s", method, uri, contentType);
             } else {
                 LOG.infof("Incoming request: %s %s, content-type=%s", method, uri, contentType);

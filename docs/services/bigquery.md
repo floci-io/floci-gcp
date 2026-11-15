@@ -768,6 +768,15 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
   zone`; and a value with a zone name compared with a `DATE` succeeds, where BigQuery fails with `Invalid
   date`. An unknown zone name fails with DuckDB's `Unknown TimeZone` rather than BigQuery's `Invalid time
   zone`.
+- `ORDER BY` sorts a `FLOAT64` `NaN` just after `NULL` (ascending) as BigQuery does, through an extra sort key
+  that is added only when the query visibly can hold a `NaN` (a `'NaN'` string, `IEEE_DIVIDE`, a `FLOAT64`
+  parameter, or a table with a `FLOAT64` column read right after `FROM` or `JOIN`). `NaN` still sorts last,
+  as DuckDB orders it, when that key
+  is left out: in a query with a set operation, in a query that uses `GROUP BY ALL`, in a window with a
+  `RANGE` frame (also a named window an `OVER (w RANGE ...)` extends), in a `DISTINCT` aggregate, for an
+  ordinal key (`ORDER BY 1`), for a key holding a positional parameter, for a select alias whose expression
+  holds a window function, `RAND()` or `GENERATE_UUID()`, and when the only `FLOAT64` column comes from the
+  second table of a comma join (`FROM a, b`), which is not looked at.
 - `NUMERIC` and `BIGNUMERIC` are computed as `DECIMAL(38, 9)`.
 - `TIMESTAMP` values are staged as ISO-8601 strings for DuckDB, including values nested inside
   `RECORD` or `REPEATED` columns; the BigQuery wire format continues to use epoch seconds.

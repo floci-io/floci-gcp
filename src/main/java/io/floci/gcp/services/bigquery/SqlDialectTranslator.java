@@ -200,6 +200,13 @@ final class SqlDialectTranslator {
     private boolean needsUnicodeCaseFold;
     private final List<MissingStructField> missingStructFields = new ArrayList<>();
     /**
+     * The first token of each column path put in place of a renamed select alias in ORDER BY, with the alias and the
+     * number of names the path holds, so {@link #orderByFieldPaths} still reports the path from the alias.
+     */
+    private final Map<Token, RenamedPath> renamedPaths = new IdentityHashMap<>();
+
+    private record RenamedPath(String alias, int names) {}
+    /**
      * The {@code _field_<position>} keys of anonymous fields, per field map from {@link #googleSqlStructFields}.
      * Star expansion reads those keys, but no {@code alias.field} reference can name an anonymous field, as in
      * BigQuery, and the missing-field message writes it by type alone.
@@ -3929,6 +3936,12 @@ final class SqlDialectTranslator {
                 last = next;
                 dot = nextSignificant(last + 1, end);
                 next = dot < 0 ? -1 : nextSignificant(dot + 1, end);
+            }
+            RenamedPath renamed = renamedPaths.get(tokens.get(i));
+            if (renamed != null && path.size() > renamed.names()) {
+                List<String> fromAlias = new ArrayList<>(List.of(renamed.alias()));
+                fromAlias.addAll(path.subList(renamed.names(), path.size()));
+                path = fromAlias;
             }
             if (path.size() > 1) {
                 paths.add(List.copyOf(path));
@@ -11576,7 +11589,8 @@ final class SqlDialectTranslator {
      * BigQuery's ORDER BY also resolves {@code s.n} to a field of a STRUCT select alias {@code s}, ahead of an
      * input column of the same name, while DuckDB reads {@code s} as a table. Expand those fields as in HAVING.
      * An ORDER BY inside a call or {@code OVER (...)} is skipped, as is one after a set operation, whose
-     * aliases come from the first SELECT and whose expressions DuckDB cannot sort by.
+     * aliases come from the first SELECT and whose expressions DuckDB cannot sort by. An alias that renames a
+     * column path ({@code t.s AS r}) has its {@code r.n} read through that path ({@code t.s.n}).
      */
     private void expandOrderByStructAliasFields() {
         for (int order = tokens.size() - 1; order >= 0; order--) {
@@ -11593,8 +11607,72 @@ final class SqlDialectTranslator {
             int listStart = quantifier >= 0 && (tokens.get(quantifier).isKeyword("DISTINCT")
                     || tokens.get(quantifier).isKeyword("ALL")) ? quantifier : select;
             Map<String, Map<String, List<Token>>> aliases = structSelectAliases(listStart, order, depth);
+            Map<String, List<Token>> paths = columnPathSelectAliases(listStart, order, depth);
+            paths.keySet().removeAll(aliases.keySet());
             if (!aliases.isEmpty()) {
                 replaceStructAliasFields(by + 1, clauseEnd(by + 1, depth), aliases, true);
+            }
+            if (!paths.isEmpty()) {
+                replaceColumnPathAliasFields(by + 1, clauseEnd(by + 1, depth), paths);
+            }
+        }
+    }
+
+    /**
+     * Select aliases whose expression is a plain column path under another name ({@code t.s AS r}, {@code s AS r}),
+     * keyed by the lower-case alias. An alias that repeats the path's last name already resolves in DuckDB.
+     */
+    private Map<String, List<Token>> columnPathSelectAliases(int select, int before, int depth) {
+        Map<String, List<Token>> paths = new HashMap<>();
+        int selectEnd = before;
+        for (int i = select + 1; i < before; i++) {
+            if (parenthesisDepth(i) == depth && isFromClause(i)) {
+                selectEnd = i;
+                break;
+            }
+        }
+        int start = select + 1;
+        for (int end = start; end <= selectEnd; end++) {
+            if (end < selectEnd && !(parenthesisDepth(end) == depth && tokens.get(end).isPunct(","))) {
+                continue;
+            }
+            List<Token> item = significant(start, end);
+            start = end + 1;
+            int n = item.size();
+            if (n < 3 || !item.get(n - 2).isKeyword("AS") || !isName(item.get(n - 1))) {
+                continue;
+            }
+            List<Token> path = item.subList(0, n - 2);
+            boolean plain = path.size() % 2 == 1;
+            for (int k = 0; k < path.size() && plain; k++) {
+                plain = k % 2 == 0 ? isName(path.get(k)) : path.get(k).isPunct(".");
+            }
+            String alias = item.get(n - 1).identifierText().toLowerCase(Locale.ROOT);
+            if (plain && !path.getLast().identifierText().toLowerCase(Locale.ROOT).equals(alias)) {
+                paths.put(alias, List.copyOf(path));
+            }
+        }
+        return paths;
+    }
+
+    /** Replaces each {@code alias.field} between {@code start} and {@code end} with {@code path.field}. */
+    private void replaceColumnPathAliasFields(int start, int end, Map<String, List<Token>> paths) {
+        boolean[] nestedQuery = nestedQueryPositions(start, end);
+        boolean[] inlined = inlinedFieldPositions(start, end);
+        for (int i = end - 1; i >= start; i--) {
+            if (nestedQuery[i] || inlined[i] || !isName(tokens.get(i)) || renamedPaths.containsKey(tokens.get(i))) {
+                continue;
+            }
+            int before = previousSignificantBefore(i);
+            int dot = nextSignificant(i + 1, end);
+            if (before >= start && tokens.get(before).isPunct(".") || dot < 0 || !tokens.get(dot).isPunct(".")) {
+                continue;
+            }
+            List<Token> path = paths.get(tokens.get(i).identifierText().toLowerCase(Locale.ROOT));
+            if (path != null) {
+                renamedPaths.put(path.getFirst(), new RenamedPath(tokens.get(i).identifierText(), path.size() / 2 + 1));
+                tokens.remove(i);
+                tokens.addAll(i, path);
             }
         }
     }
@@ -11925,7 +12003,8 @@ final class SqlDialectTranslator {
         boolean[] nestedQuery = nestedQueryPositions(start, end);
         boolean[] inlined = inlinedFieldPositions(start, end);
         for (int i = end - 1; i >= start; i--) {
-            if (nestedQuery[i] || inlined[i]) {
+            if (nestedQuery[i] || inlined[i] || renamedPaths.containsKey(tokens.get(i))) {
+                // A path an earlier pass put in place of a renamed alias already names its source column.
                 continue;
             }
             Token alias = tokens.get(i);

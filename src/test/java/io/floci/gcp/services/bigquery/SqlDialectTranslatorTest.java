@@ -3963,6 +3963,24 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void orderByReadsAFieldOfARenamedColumnPathAlias() {
+        String renamed = sql("SELECT t.s AS r FROM ds.t ORDER BY r.n, r.n.m DESC");
+        assertTrue(renamed.contains("ORDER BY t.s.n, t.s.n.m DESC"), renamed);
+        String bare = sql("SELECT s AS r FROM ds.t ORDER BY r.n");
+        assertTrue(bare.contains("ORDER BY s.n"), bare);
+        String sameNamed = sql("SELECT t.s AS s FROM ds.t ORDER BY s.n");
+        assertTrue(sameNamed.contains("ORDER BY s.n"), sameNamed);
+        String nested = sql("SELECT t.s AS r FROM ds.t ORDER BY (SELECT MAX(r.n) FROM ds.u AS r)");
+        assertTrue(nested.contains("MAX(r.n)"), nested);
+        String computed = sql("SELECT t.s.n + 1 AS r FROM ds.t ORDER BY r");
+        assertTrue(computed.contains("ORDER BY r"), computed);
+        String swapped = sql("SELECT a AS b, c AS a FROM ds.t ORDER BY b.n");
+        assertTrue(swapped.contains("ORDER BY a.n"), swapped);
+        String struct = sql("SELECT s AS r, STRUCT(5 AS n) AS s FROM ds.t ORDER BY r.n");
+        assertTrue(struct.contains("ORDER BY s.n"), struct);
+    }
+
+    @Test
     void havingStructAliasDoesNotCaptureAnAliasInsideANestedQuery() {
         String translated = sql("SELECT STRUCT(MAX(x) AS n) AS s FROM UNNEST([1,2]) x"
                 + " HAVING (SELECT s.n FROM (SELECT STRUCT(0 AS n) AS s)) = 0");

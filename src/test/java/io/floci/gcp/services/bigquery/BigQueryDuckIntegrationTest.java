@@ -2874,6 +2874,11 @@ class BigQueryDuckIntegrationTest {
                 {"SELECT DISTINCT STRUCT(x AS n) AS s FROM UNNEST([2, 1, 3]) x QUALIFY ROW_NUMBER() OVER (ORDER BY s.n) <= 2 ORDER BY s.n", "rows.collect { it.f[0].v.f[0].v }", "1,2"},
                 {"SELECT t.s.n AS m, STRUCT(0 AS n) AS s FROM (SELECT STRUCT(x AS n) AS s FROM UNNEST([2, 1, 3]) x) AS t ORDER BY t.s.n", "rows.collect { it.f[0].v }", "1,2,3"},
                 {"SELECT STRUCT(MAX(t.s.n) AS n) AS s, t.s.n AS k FROM (SELECT STRUCT(x AS n) AS s FROM UNNEST([2, 1, 3]) x) AS t GROUP BY k HAVING t.s.n > 1 ORDER BY k", "rows.collect { it.f[1].v }", "2,3"},
+                {"SELECT t.s AS r FROM (SELECT STRUCT(2 AS n) AS s UNION ALL SELECT STRUCT(1 AS n)) t ORDER BY r.n", "rows.collect { it.f[0].v.f[0].v }", "1,2"},
+                {"SELECT s AS r, k FROM (SELECT STRUCT(2 AS n) AS s, 'a' AS k UNION ALL SELECT STRUCT(1 AS n), 'b') ORDER BY r.n DESC", "rows.collect { it.f[1].v }", "a,b"},
+                {"SELECT t.s AS r FROM (SELECT STRUCT(STRUCT(2 AS m) AS n) AS s UNION ALL SELECT STRUCT(STRUCT(1 AS m))) t ORDER BY r.n.m", "rows.collect { it.f[0].v.f[0].v.f[0].v }", "1,2"},
+                {"SELECT s AS r, q AS s FROM (SELECT STRUCT(2 AS n) AS s, STRUCT(1 AS n) AS q UNION ALL SELECT STRUCT(1 AS n), STRUCT(2 AS n)) t ORDER BY r.n", "rows.collect { it.f[0].v.f[0].v }", "1,2"},
+                {"SELECT s AS r, STRUCT(5 AS n) AS s FROM (SELECT STRUCT(2 AS n) AS s UNION ALL SELECT STRUCT(1 AS n)) t ORDER BY r.n", "rows.collect { it.f[0].v.f[0].v }", "1,2"},
         };
         for (String[] c : cases) {
             query(Map.of("query", c[0], "useLegacySql", false))

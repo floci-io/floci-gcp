@@ -1,5 +1,6 @@
 package io.floci.gcp.services.pubsub;
 
+import com.google.protobuf.Duration;
 import com.google.protobuf.util.Durations;
 import com.google.pubsub.v1.RetryPolicy;
 
@@ -11,11 +12,17 @@ import java.util.Map;
  * Converts a subscription retry policy between its gRPC message and the stored form, which is the
  * REST JSON shape ({@code {"minimumBackoff":"10s","maximumBackoff":"600s"}}), so both transports
  * read and write the same value.
+ *
+ * <p>A present policy is kept with the defaults the proto documents for unset fields (10 seconds
+ * minimum, 600 seconds maximum backoff), so it stays distinct from an absent one, which means
+ * immediate redelivery.
  */
 final class SubscriptionRetryPolicy {
 
     private static final String MINIMUM_BACKOFF = "minimumBackoff";
     private static final String MAXIMUM_BACKOFF = "maximumBackoff";
+    private static final Duration DEFAULT_MINIMUM_BACKOFF = Durations.fromSeconds(10);
+    private static final Duration DEFAULT_MAXIMUM_BACKOFF = Durations.fromSeconds(600);
 
     private SubscriptionRetryPolicy() {}
 
@@ -25,12 +32,10 @@ final class SubscriptionRetryPolicy {
             return null;
         }
         Map<String, Object> stored = new LinkedHashMap<>();
-        if (policy.hasMinimumBackoff()) {
-            stored.put(MINIMUM_BACKOFF, Durations.toString(policy.getMinimumBackoff()));
-        }
-        if (policy.hasMaximumBackoff()) {
-            stored.put(MAXIMUM_BACKOFF, Durations.toString(policy.getMaximumBackoff()));
-        }
+        stored.put(MINIMUM_BACKOFF, Durations.toString(
+                policy.hasMinimumBackoff() ? policy.getMinimumBackoff() : DEFAULT_MINIMUM_BACKOFF));
+        stored.put(MAXIMUM_BACKOFF, Durations.toString(
+                policy.hasMaximumBackoff() ? policy.getMaximumBackoff() : DEFAULT_MAXIMUM_BACKOFF));
         return stored;
     }
 
@@ -50,7 +55,7 @@ final class SubscriptionRetryPolicy {
             return;
         }
         try {
-            com.google.protobuf.Duration duration = Durations.parse(value.toString());
+            Duration duration = Durations.parse(value.toString());
             if (minimum) {
                 builder.setMinimumBackoff(duration);
             } else {

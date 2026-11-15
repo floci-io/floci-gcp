@@ -1,21 +1,21 @@
 package io.floci.gcp.services.pubsub;
 
 import com.google.protobuf.ByteString;
-import com.google.protobuf.FieldMask;
-import com.google.pubsub.v1.GetSubscriptionRequest;
-import com.google.pubsub.v1.RetryPolicy;
-import com.google.pubsub.v1.UpdateSubscriptionRequest;
 import com.google.protobuf.Empty;
+import com.google.protobuf.FieldMask;
 import com.google.protobuf.Timestamp;
 import com.google.pubsub.v1.DeadLetterPolicy;
+import com.google.pubsub.v1.GetSubscriptionRequest;
 import com.google.pubsub.v1.ModifyAckDeadlineRequest;
 import com.google.pubsub.v1.PubsubMessage;
 import com.google.pubsub.v1.ReceivedMessage;
+import com.google.pubsub.v1.RetryPolicy;
 import com.google.pubsub.v1.SeekRequest;
 import com.google.pubsub.v1.SeekResponse;
 import com.google.pubsub.v1.StreamingPullRequest;
 import com.google.pubsub.v1.StreamingPullResponse;
 import com.google.pubsub.v1.Subscription;
+import com.google.pubsub.v1.UpdateSubscriptionRequest;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.services.iam.IamServices;
@@ -749,8 +749,35 @@ class PubSubSubscriberControllerTest {
 
         assertNull(responseObserver.error.get());
         assertEquals(3, responseObserver.values.get(0).getRetryPolicy().getMinimumBackoff().getSeconds());
-        assertEquals(Map.of("minimumBackoff", "3s"),
+        assertEquals(600, responseObserver.values.get(0).getRetryPolicy().getMaximumBackoff().getSeconds());
+        assertEquals(Map.of("minimumBackoff", "3s", "maximumBackoff", "600s"),
                 service.getSubscription("projects/p1/subscriptions/s1").getRetryPolicy());
+    }
+
+    @Test
+    void createSubscriptionOverGrpcKeepsAnEmptyRetryPolicyWithItsDefaults() {
+        service.createTopic("projects/p1/topics/t1");
+
+        RecordingObserver<Subscription> withPolicy = new RecordingObserver<>();
+        controller.createSubscription(Subscription.newBuilder()
+                .setName("projects/p1/subscriptions/with-policy")
+                .setTopic("projects/p1/topics/t1")
+                .setRetryPolicy(RetryPolicy.getDefaultInstance())
+                .build(), withPolicy);
+        RecordingObserver<Subscription> withoutPolicy = new RecordingObserver<>();
+        controller.createSubscription(Subscription.newBuilder()
+                .setName("projects/p1/subscriptions/without-policy")
+                .setTopic("projects/p1/topics/t1")
+                .build(), withoutPolicy);
+
+        assertNull(withPolicy.error.get());
+        Subscription created = withPolicy.values.get(0);
+        assertTrue(created.hasRetryPolicy());
+        assertEquals(10, created.getRetryPolicy().getMinimumBackoff().getSeconds());
+        assertEquals(600, created.getRetryPolicy().getMaximumBackoff().getSeconds());
+        assertNull(withoutPolicy.error.get());
+        assertFalse(withoutPolicy.values.get(0).hasRetryPolicy());
+        assertNull(service.getSubscription("projects/p1/subscriptions/without-policy").getRetryPolicy());
     }
 
     @Test

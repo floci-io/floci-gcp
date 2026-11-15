@@ -168,7 +168,11 @@ public class BillingBudgetsService {
 
     public Map<String, Object> deleteBudget(String account, String budgetId) {
         String name = requireBillingAccount(account) + "/budgets/" + budgetId;
-        budgets.delete(name);
+        // Same monitor as updateBudget, so an update that read the budget cannot write it back
+        // after this delete.
+        synchronized (this) {
+            budgets.delete(name);
+        }
         LOG.infof("delete budget %s", name);
         return Map.of();
     }
@@ -300,16 +304,20 @@ public class BillingBudgetsService {
         if (IGNORED_MASK_FIELDS.contains(path)) {
             return;
         }
-        String[] parts = path.split("\\.", 2);
-        String field = toCamelCase(parts[0]);
-        if (parts.length == 1) {
-            setOrRemove(budget, field, request.get(field));
+        String[] segments = path.split("\\.");
+        setPath(budget, request, segments, 0);
+    }
+
+    private static void setPath(Map<String, Object> target, Map<String, Object> source, String[] segments,
+                                int index) {
+        String field = toCamelCase(segments[index]);
+        if (index == segments.length - 1) {
+            setOrRemove(target, field, source.get(field));
             return;
         }
-        Map<String, Object> target = new LinkedHashMap<>(asMap(budget.get(field)));
-        String child = toCamelCase(parts[1]);
-        setOrRemove(target, child, asMap(request.get(field)).get(child));
-        budget.put(field, target);
+        Map<String, Object> child = new LinkedHashMap<>(asMap(target.get(field)));
+        setPath(child, asMap(source.get(field)), segments, index + 1);
+        target.put(field, child);
     }
 
     private static void setOrRemove(Map<String, Object> target, String field, Object value) {

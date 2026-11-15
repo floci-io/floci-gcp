@@ -14267,10 +14267,8 @@ final class SqlDialectTranslator {
                     + " WHEN 'BIGINT' THEN 'number' WHEN 'UBIGINT' THEN 'number' WHEN 'HUGEINT' THEN 'number'"
                     + " WHEN 'DOUBLE' THEN 'number' END)");
             case "REGEXP_CONTAINS" -> "regexp_matches(" + String.join(", ", a) + ")";
-            case "REGEXP_EXTRACT" -> args(a, 2, name, "regexp_extract(" + at(a, 0) + ", " + at(a, 1) + ", "
-                    + (hasCaptureGroup(open, close) ? "1" : "0") + ")");
-            case "REGEXP_EXTRACT_ALL" -> args(a, 2, name, "regexp_extract_all(" + at(a, 0) + ", " + at(a, 1) + ", "
-                    + (hasCaptureGroup(open, close) ? "1" : "0") + ")");
+            case "REGEXP_EXTRACT" -> args(a, 2, name, regexpExtract("regexp_extract", a, open, close));
+            case "REGEXP_EXTRACT_ALL" -> args(a, 2, name, regexpExtract("regexp_extract_all", a, open, close));
             case "REGEXP_REPLACE" -> args(a, 3, name, "regexp_replace(" + at(a, 0) + ", " + at(a, 1) + ", "
                     + at(a, 2) + ", 'g')");
             case "CURRENT_TIMESTAMP" -> "current_timestamp";
@@ -14992,30 +14990,46 @@ final class SqlDialectTranslator {
         return value.startsWith("'") ? "CAST(" + value + " AS TIMESTAMPTZ)" : value;
     }
 
-    private boolean hasCaptureGroup(int open, int close) {
-        int depth = 0;
-        int commas = 0;
-        for (int k = open + 1; k < close; k++) {
-            Token t = tokens.get(k);
-            if (t.isPunct("(")) {
-                depth++;
-            } else if (t.isPunct(")")) {
-                depth--;
-            } else if (depth == 0 && t.isPunct(",")) {
-                commas++;
-            } else if (commas == 1 && depth == 0
-                    && (t.kind == Kind.STRING || t.kind == Kind.NAMED_PARAM || t.kind == Kind.POSITIONAL_PARAM)) {
-                // The first literal or parameter of the pattern argument, which may sit in an expression such
-                // as CASE WHEN ... THEN r'a([0-9])' ... END.
-                String pattern = switch (t.kind) {
-                    case STRING -> t.value;
-                    case NAMED_PARAM -> QueryParameters.stringLiteralValue(parameters.named(t.value));
-                    default -> QueryParameters.stringLiteralValue(t.value);
-                };
-                return pattern != null && regexHasCaptureGroup(pattern);
-            }
+    /**
+     * BigQuery's REGEXP_EXTRACT and REGEXP_EXTRACT_ALL return the capture group when the pattern has one and the
+     * whole match otherwise; DuckDB takes the group number as an argument. A pattern written as one literal or
+     * query parameter is read here. For any other pattern (a column, a CASE, a concatenation) RE2 decides when the
+     * query runs: {@code '|' || pattern} always matches the empty string, and RE2 applies the rewrite {@code a\1}
+     * to it only when the pattern has a group 1, so {@code regexp_replace('', '|' || pattern, 'a\1')} is
+     * {@code ''} exactly when there is no group. The leading empty alternative leaves the pattern's own text, an
+     * unterminated {@code \Q} included, untouched. The value and the pattern are bound once, in the caller's scope,
+     * so aggregates, window functions and volatile functions in either argument keep their meaning.
+     */
+    private String regexpExtract(String function, List<String> a, int open, int close) {
+        String pattern = singlePatternText(open, close);
+        if (pattern != null) {
+            return function + "(" + at(a, 0) + ", " + at(a, 1) + ", " + (regexHasCaptureGroup(pattern) ? "1" : "0")
+                    + ")";
         }
-        return false;
+        String v = "_floci_regexp.v";
+        String p = "_floci_regexp.p";
+        return "list_extract(list_transform([struct_pack(v := (" + at(a, 0) + "), p := (" + at(a, 1)
+                + "))], _floci_regexp -> CASE WHEN regexp_replace('', concat('|', " + p + "), 'a\\1') <> '' THEN "
+                + function + "(" + v + ", " + p + ", 1) ELSE " + function + "(" + v + ", " + p + ", 0) END), 1)";
+    }
+
+    /** The pattern argument's text when it is a single string literal or query parameter, or null. */
+    private String singlePatternText(int open, int close) {
+        List<int[]> ranges = argumentRanges(open, close);
+        if (ranges.size() < 2) {
+            return null;
+        }
+        List<Token> pattern = significant(ranges.get(1)[0], ranges.get(1)[1]);
+        if (pattern.size() != 1) {
+            return null;
+        }
+        Token t = pattern.getFirst();
+        return switch (t.kind) {
+            case STRING -> t.value;
+            case NAMED_PARAM -> QueryParameters.stringLiteralValue(parameters.named(t.value));
+            case POSITIONAL_PARAM -> QueryParameters.stringLiteralValue(t.value);
+            default -> null;
+        };
     }
 
     /**

@@ -20,6 +20,7 @@ import com.google.pubsub.v1.PullRequest;
 import com.google.pubsub.v1.PullResponse;
 import com.google.pubsub.v1.PushConfig;
 import com.google.pubsub.v1.ReceivedMessage;
+import com.google.pubsub.v1.RetryPolicy;
 import com.google.pubsub.v1.SeekRequest;
 import com.google.pubsub.v1.SeekResponse;
 import com.google.pubsub.v1.Snapshot;
@@ -67,8 +68,10 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
                     request.getName(), request.getTopic(), request.getAckDeadlineSeconds(),
                     null, false, null, request.getFilter(),
                     request.hasPushConfig() ? request.getPushConfig().getPushEndpoint() : null,
-                    null, null, null,
-                    deadLetterPolicy.getDeadLetterTopic(), deadLetterPolicy.getMaxDeliveryAttempts(), false, false);
+                    null, null,
+                    SubscriptionRetryPolicy.toStored(request.hasRetryPolicy(), request.getRetryPolicy()),
+                    deadLetterPolicy.getDeadLetterTopic(), deadLetterPolicy.getMaxDeliveryAttempts(),
+                    request.getEnableMessageOrdering(), request.getEnableExactlyOnceDelivery());
             responseObserver.onNext(buildSubscription(stored));
             responseObserver.onCompleted();
         } catch (Exception e) {
@@ -503,6 +506,10 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
                     .setDeadLetterTopic(stored.getDeadLetterTopic())
                     .setMaxDeliveryAttempts(stored.getMaxDeliveryAttempts())
                     .build());
+        }
+        RetryPolicy retryPolicy = SubscriptionRetryPolicy.toProto(stored.getRetryPolicy());
+        if (retryPolicy != null) {
+            builder.setRetryPolicy(retryPolicy);
         }
         return builder.build();
     }

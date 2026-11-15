@@ -378,6 +378,8 @@ public class PubSubService {
                 case "push_config" -> stored.setPushEndpoint(
                         subProto.getPushConfig().getPushEndpoint().isEmpty() ? null
                                 : subProto.getPushConfig().getPushEndpoint());
+                case "retry_policy" -> stored.setRetryPolicy(emptyObjectMapToNull(SubscriptionRetryPolicy.toStored(
+                        subProto.hasRetryPolicy(), subProto.getRetryPolicy())));
                 case "dead_letter_policy" -> {
                     DeadLetterPolicy policy = subProto.getDeadLetterPolicy();
                     stored.setDeadLetterTopic(blankToNull(policy.getDeadLetterTopic()));

@@ -37,6 +37,9 @@ public class CloudRunUrlRoutingFilter implements ContainerRequestFilter {
     @Override
     public void filter(ContainerRequestContext ctx) {
         URI original = ctx.getUriInfo().getRequestUri();
+        if (isControlPlane(original.getRawPath())) {
+            return;
+        }
         String host = firstHeader(ctx, HttpHeaders.HOST);
         if (host == null || host.isBlank()) {
             host = original.getRawAuthority();
@@ -74,6 +77,11 @@ public class CloudRunUrlRoutingFilter implements ContainerRequestFilter {
                 + internalPath
                 + query(original));
         ctx.setRequestUri(rewritten);
+    }
+
+    /** The Floci control plane answers on every host, a Cloud Run invocation host included. */
+    static boolean isControlPlane(String path) {
+        return path != null && (path.equals("/_floci") || path.startsWith("/_floci/"));
     }
 
     private static String firstHeader(ContainerRequestContext ctx, String name) {

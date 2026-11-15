@@ -41,6 +41,9 @@ public class CloudBillingService {
 
     private static final String DEFAULT_CURRENCY_CODE = "USD";
 
+    /** cloud_billing.proto: "The maximum page size is 100; this is also the default." */
+    static final int MAX_PAGE_SIZE = 100;
+
     private final ServiceRegistry serviceRegistry;
     private final EmulatorConfig config;
     private final ProjectRegistry projects;
@@ -157,8 +160,9 @@ public class CloudBillingService {
         if (offset < 0 || offset >= all.size()) {
             return new PageToken.Page<>(List.of(), null);
         }
-        int size = pageSize > 0 ? pageSize
-                : cursor.pageSize() != null && cursor.pageSize() > 0 ? cursor.pageSize() : all.size();
+        int requested = pageSize > 0 ? pageSize
+                : cursor.pageSize() != null && cursor.pageSize() > 0 ? cursor.pageSize() : MAX_PAGE_SIZE;
+        int size = Math.min(requested, MAX_PAGE_SIZE);
         int end = Math.min(offset + size, all.size());
         String next = end < all.size() ? PageToken.encode(end, size) : null;
         return new PageToken.Page<>(List.copyOf(all.subList(offset, end)), next);

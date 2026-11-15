@@ -94,6 +94,7 @@ nav:
     - Eventarc: services/eventarc.md
     - Service Usage: services/service-usage.md
     - Cloud Billing: services/cloud-billing.md
+    - Cloud Billing Budgets: services/billing-budgets.md
     - Firebase Auth: services/firebase-auth.md
     - BigQuery: services/bigquery.md
   - Contributing:

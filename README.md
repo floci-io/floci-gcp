@@ -217,7 +217,7 @@ floci-gcp emulates GCP services across storage, messaging, identity, and managed
 | Databases | Cloud SQL for PostgreSQL and MySQL |
 | Analytics | BigQuery |
 | Observability | Cloud Logging, Cloud Monitoring |
-| API management | Service Usage, Cloud Resource Manager v1 projects (create/get/list/update/delete, IAM policy mixins), Cloud Billing project billing info |
+| API management | Service Usage, Cloud Resource Manager v1 projects (create/get/list/update/delete, IAM policy mixins), Cloud Billing project billing info, Cloud Billing budgets |
 
 <details>
 <summary>Detailed service notes</summary>
@@ -247,6 +247,7 @@ floci-gcp emulates GCP services across storage, messaging, identity, and managed
 | **Service Usage** | REST JSON | Enable/disable/list a project's services (`serviceusage.googleapis.com` v1) with done LROs; accept-and-succeed state store for Terraform `google_project_service`, Pulumi, and `gcloud services` |
 | **Resource Manager** | REST JSON | Cloud Resource Manager v1 projects: create (done LRO), get by ID or number, filtered list, update, delete/undelete, `getAncestry`, project IAM policy mixins; projects are registered on first use, or only when created with `FLOCI_GCP_PROJECTS_STRICT=true` |
 | **Cloud Billing** | REST JSON | Project billing info get/update and billing-account `testIamPermissions` stub for Terraform `google_project` |
+| **Cloud Billing Budgets** | REST JSON | Budget create, get, list, update and delete under a billing account; no spend tracking or threshold notifications |
 | **Firebase Auth (Identity Platform)** | REST JSON | Identity Toolkit v1 wire-compatible with the official Auth emulator: email/password, anonymous and custom-token sign-in, unsigned emulator JWTs `firebase-admin` verifies, token refresh + revocation, admin user CRUD/list via `FIREBASE_AUTH_EMULATOR_HOST` |
 | **BigQuery** | REST JSON | Datasets and tables CRUD with schema normalization, schema-validated `tabledata.insertAll`/`tabledata.list`, query jobs (`jobs.query`, `jobs.insert`, `getQueryResults`) running GoogleSQL (joins, aggregation, window functions, CTEs, `UNNEST`, parameters, dry runs) on a DuckDB sidecar |
 

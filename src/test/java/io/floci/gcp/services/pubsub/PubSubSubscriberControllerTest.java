@@ -4,7 +4,9 @@ import com.google.protobuf.ByteString;
 import com.google.protobuf.Empty;
 import com.google.protobuf.FieldMask;
 import com.google.protobuf.Timestamp;
+import com.google.pubsub.v1.BigQueryConfig;
 import com.google.pubsub.v1.DeadLetterPolicy;
+import com.google.pubsub.v1.ExpirationPolicy;
 import com.google.pubsub.v1.GetSubscriptionRequest;
 import com.google.pubsub.v1.ModifyAckDeadlineRequest;
 import com.google.pubsub.v1.PubsubMessage;
@@ -715,6 +717,45 @@ class PubSubSubscriberControllerTest {
         assertEquals(created, getObserver.values.get(0));
         assertEquals(Map.of("minimumBackoff", "1s", "maximumBackoff", "5.500s"),
                 service.getSubscription("projects/p1/subscriptions/s1").getRetryPolicy());
+    }
+
+    @Test
+    void createSubscriptionOverGrpcPreservesStorageAndRetentionSettings() {
+        service.createTopic("projects/p1/topics/t1");
+
+        RecordingObserver<Subscription> createObserver = new RecordingObserver<>();
+        controller.createSubscription(Subscription.newBuilder()
+                .setName("projects/p1/subscriptions/s1")
+                .setTopic("projects/p1/topics/t1")
+                .putLabels("team", "analytics")
+                .setRetainAckedMessages(true)
+                .setMessageRetentionDuration(com.google.protobuf.Duration.newBuilder().setSeconds(604800))
+                .setBigqueryConfig(BigQueryConfig.newBuilder()
+                        .setTable("p1.dataset.events")
+                        .setUseTableSchema(true)
+                        .setWriteMetadata(true)
+                        .setDropUnknownFields(true))
+                .setExpirationPolicy(ExpirationPolicy.newBuilder()
+                        .setTtl(com.google.protobuf.Duration.newBuilder().setSeconds(2678400)))
+                .build(), createObserver);
+
+        assertNull(createObserver.error.get());
+        Subscription created = createObserver.values.get(0);
+        assertEquals(Map.of("team", "analytics"), created.getLabelsMap());
+        assertTrue(created.getRetainAckedMessages());
+        assertEquals(604800, created.getMessageRetentionDuration().getSeconds());
+        assertEquals("p1.dataset.events", created.getBigqueryConfig().getTable());
+        assertTrue(created.getBigqueryConfig().getUseTableSchema());
+        assertTrue(created.getBigqueryConfig().getWriteMetadata());
+        assertTrue(created.getBigqueryConfig().getDropUnknownFields());
+        assertEquals(BigQueryConfig.State.ACTIVE, created.getBigqueryConfig().getState());
+        assertEquals(2678400, created.getExpirationPolicy().getTtl().getSeconds());
+
+        RecordingObserver<Subscription> getObserver = new RecordingObserver<>();
+        controller.getSubscription(GetSubscriptionRequest.newBuilder()
+                .setSubscription("projects/p1/subscriptions/s1").build(), getObserver);
+        assertNull(getObserver.error.get());
+        assertEquals(created, getObserver.values.get(0));
     }
 
     @Test

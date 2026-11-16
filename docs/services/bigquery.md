@@ -173,7 +173,8 @@ REST paths live under `/bigquery/v2/projects/{project}/...`.
   `SELECT j['a']` keeps the generated name, as BigQuery keeps it. A script variable in `LIMIT` or
   `OFFSET` is rejected, `Query error: LIMIT expects an integer literal or parameter`, as BigQuery
   rejects it, and a query parameter is accepted there; the `OFFSET(i)` array subscript is an
-  expression, so a variable is read there.
+  expression, so a variable is read there. `OFFSET` is not reserved, so a variable may be named
+  `offset`; the `WITH OFFSET` of an `UNNEST` stays the clause.
   `EXECUTE IMMEDIATE` supports a single query, supported DDL or DML statement, or `BEGIN`
   block. `USING` binds named or positional query
   parameters, and `INTO` assigns a zero- or one-row result to declared variables. SQL-text expressions can use

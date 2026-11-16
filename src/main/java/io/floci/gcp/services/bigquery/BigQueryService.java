@@ -4112,9 +4112,13 @@ public class BigQueryService {
     /** The keywords that put a name in a table position a query reads. */
     private static final Set<String> SCRIPT_SOURCE_KEYWORDS = Set.of("FROM", "JOIN", "USING");
 
-    /** The keywords that name a table or declare a column, where a script variable cannot stand. */
+    /**
+     * The keywords that name a table or declare a column, where a script variable cannot stand. A name after
+     * {@code WITH} is a CTE name or the {@code OFFSET} of {@code UNNEST ... WITH OFFSET}, which BigQuery does
+     * not reserve and so may also name a variable.
+     */
     private static final Set<String> SCRIPT_DECLARATION_KEYWORDS = Set.of("FROM", "JOIN", "INTO", "UPDATE",
-            "TABLE", "AS");
+            "TABLE", "AS", "WITH");
 
     private static int nextSignificantToken(List<SqlDialectTranslator.Token> tokens, int from) {
         for (int index = from; index < tokens.size(); index++) {

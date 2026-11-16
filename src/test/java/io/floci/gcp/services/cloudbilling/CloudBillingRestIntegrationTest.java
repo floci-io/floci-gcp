@@ -138,6 +138,38 @@ class CloudBillingRestIntegrationTest {
     }
 
     @Test
+    void listsDefaultToAndAreCappedAtOneHundredItems() {
+        String account = "billingAccounts/AAAAAA-100100-100100";
+        for (int i = 0; i < 101; i++) {
+            linkProject(String.format("billing-cap-%03d", i), account);
+        }
+
+        given().when().get("/v1/" + account + "/projects")
+                .then().statusCode(200)
+                .body("projectBillingInfo", hasSize(100))
+                .body("nextPageToken", not(equalTo("")));
+
+        String token = given().when().get("/v1/" + account + "/projects?pageSize=500")
+                .then().statusCode(200)
+                .body("projectBillingInfo", hasSize(100))
+                .extract().path("nextPageToken");
+
+        given().when().get("/v1/" + account + "/projects?pageToken=" + token)
+                .then().statusCode(200)
+                .body("projectBillingInfo.projectId", contains("billing-cap-100"))
+                .body("nextPageToken", equalTo(""));
+
+        for (int i = 0; i < 100; i++) {
+            linkProject(String.format("billing-cap-accounts-%03d", i),
+                    String.format("billingAccounts/AAAAAA-200200-%06d", i));
+        }
+        given().when().get("/v1/billingAccounts")
+                .then().statusCode(200)
+                .body("billingAccounts", hasSize(100))
+                .body("nextPageToken", not(equalTo("")));
+    }
+
+    @Test
     void malformedBillingAccountIdIsAnInvalidArgument() {
         given().when().get("/v1/billingAccounts/not-an-id")
                 .then().statusCode(400)

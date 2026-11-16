@@ -14,9 +14,11 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.HexFormat;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.StringJoiner;
@@ -47,20 +49,21 @@ final class GcsMediaResponses {
      */
     static Response mediaResponse(byte[] data, GcsObjectMeta meta, String rangeHeader,
             String acceptEncoding) {
-        return mediaResponse(data, meta, rangeHeader, acceptEncoding, meta.getEtag());
+        return mediaResponse(data, meta, rangeHeader, acceptEncoding, meta.getEtag(), false);
     }
 
     static Response xmlMediaResponse(byte[] data, GcsObjectMeta meta, String rangeHeader,
             String acceptEncoding) {
-        return mediaResponse(data, meta, rangeHeader, acceptEncoding, xmlEtag(meta));
+        return mediaResponse(data, meta, rangeHeader, acceptEncoding, xmlEtag(meta), true);
     }
 
     private static Response mediaResponse(byte[] data, GcsObjectMeta meta, String rangeHeader,
-            String acceptEncoding, String etag) {
+            String acceptEncoding, String etag, boolean acceptRanges) {
         if (shouldTranscode(meta, acceptEncoding)) {
             byte[] decompressed = gunzip(data);
             if (decompressed != null) {
-                return withMetadataHeaders(Response.ok(decompressed).type(meta.getContentType()), meta, etag)
+                return withMetadataHeaders(Response.ok(decompressed).type(meta.getContentType()), meta, etag,
+                        acceptRanges)
                         .header(HttpHeaders.CONTENT_LENGTH, decompressed.length)
                         .build();
             }
@@ -70,11 +73,11 @@ final class GcsMediaResponses {
 
         Response.ResponseBuilder builder;
         int contentLength;
-        if (rangeHeader == null || rangeHeader.isBlank()) {
+        Range range = parseRange(rangeHeader, data.length);
+        if (range == null) {
             builder = Response.ok(data);
             contentLength = data.length;
         } else {
-            Range range = parseRange(rangeHeader, data.length);
             byte[] partial = Arrays.copyOfRange(data, range.start(), range.end() + 1);
             builder = Response.status(Response.Status.PARTIAL_CONTENT)
                     .entity(partial)
@@ -88,7 +91,7 @@ final class GcsMediaResponses {
         // Set rather than left to the HTTP layer: for an implicit HEAD it strips the body and with
         // it the Content-Length it would have generated, and a HEAD is how a client reads an
         // object's size without transferring it.
-        return withMetadataHeaders(builder.type(meta.getContentType()), meta, etag)
+        return withMetadataHeaders(builder.type(meta.getContentType()), meta, etag, acceptRanges)
                 .header(HttpHeaders.CONTENT_LENGTH, contentLength)
                 .build();
     }
@@ -233,9 +236,13 @@ final class GcsMediaResponses {
     }
 
     private static Response.ResponseBuilder withMetadataHeaders(Response.ResponseBuilder builder,
-            GcsObjectMeta meta, String etag) {
+            GcsObjectMeta meta, String etag, boolean acceptRanges) {
         addHeaderIfPresent(builder, "ETag", etag);
         addHeaderIfPresent(builder, HttpHeaders.LAST_MODIFIED, lastModified(meta));
+        // The XML API advertises byte ranges and the JSON API does not, which is what GCS does.
+        if (acceptRanges) {
+            builder.header("Accept-Ranges", "bytes");
+        }
         addHeaderIfPresent(builder, "x-goog-generation", meta.getGeneration());
         addHeaderIfPresent(builder, "x-goog-metageneration", meta.getMetageneration());
         addHeaderIfPresent(builder, "x-goog-stored-content-length", meta.getSize());
@@ -325,47 +332,103 @@ final class GcsMediaResponses {
         return true;
     }
 
+    /**
+     * Reads the {@code Range} header the way GCS reads it, which is mostly the RFC 7233 rule that a
+     * range a server cannot make sense of is ignored rather than rejected.
+     *
+     * <p>An unknown unit, an unparseable set, an empty set, or a range whose last byte precedes its
+     * first all serve the whole object with a 200. A set of ranges that overlap is ignored as well.
+     * What stays an error is a set of two or more disjoint ranges, which GCS answers with 400, and
+     * a range that cannot be satisfied, which is a 416.
+     *
+     * @return the range to serve, or null when the header is to be ignored
+     */
     private static Range parseRange(String rangeHeader, int length) {
-        if (!rangeHeader.startsWith("bytes=")) {
-            throw GcpException.invalidArgument("invalid Range header: " + rangeHeader);
+        if (rangeHeader == null || rangeHeader.isBlank()) {
+            return null;
         }
-        String spec = rangeHeader.substring("bytes=".length());
-        int dash = spec.indexOf('-');
-        if (dash < 0 || spec.indexOf(',', dash) >= 0) {
-            throw GcpException.invalidArgument("invalid Range header: " + rangeHeader);
+        int separator = rangeHeader.indexOf('=');
+        if (separator < 0 || !rangeHeader.substring(0, separator).trim().equalsIgnoreCase("bytes")) {
+            return null;
         }
-
-        int start;
-        int end;
-        if (dash == 0) {
-            int suffixLength = parseRangeInt(spec.substring(1), rangeHeader);
-            if (suffixLength <= 0) {
-                throw GcpException.invalidArgument("invalid Range header: " + rangeHeader);
+        List<Range> ranges = new ArrayList<>();
+        for (String element : rangeHeader.substring(separator + 1).split(",", -1)) {
+            Range range = parseByteRange(element.trim(), length, rangeHeader);
+            if (range == null) {
+                return null;
             }
-            start = Math.max(0, length - suffixLength);
-            end = length - 1;
-        } else {
-            start = parseRangeInt(spec.substring(0, dash), rangeHeader);
-            end = dash == spec.length() - 1 ? length - 1 : parseRangeInt(spec.substring(dash + 1), rangeHeader);
+            ranges.add(range);
         }
+        if (ranges.size() == 1) {
+            return ranges.get(0);
+        }
+        for (int i = 0; i < ranges.size(); i++) {
+            for (int j = i + 1; j < ranges.size(); j++) {
+                if (ranges.get(i).overlaps(ranges.get(j))) {
+                    return null;
+                }
+            }
+        }
+        throw GcpException.invalidArgument("multiple ranges are not supported: " + rangeHeader);
+    }
 
+    /**
+     * One element of the range set, with {@code null} for an element that makes the whole header
+     * ignorable. A suffix of zero and a first byte past the end are the two unsatisfiable cases,
+     * which RFC 7233 answers with 416 rather than treating as malformed.
+     */
+    private static Range parseByteRange(String element, int length, String rangeHeader) {
+        int dash = element.indexOf('-');
+        if (dash < 0 || element.indexOf('-', dash + 1) >= 0) {
+            return null;
+        }
+        String first = element.substring(0, dash).trim();
+        String last = element.substring(dash + 1).trim();
+        if (first.isEmpty()) {
+            int suffixLength = parseRangeInt(last);
+            if (suffixLength < 0) {
+                return null;
+            }
+            if (suffixLength == 0 || length == 0) {
+                throw GcpException.outOfRange("Range not satisfiable: " + rangeHeader);
+            }
+            return new Range(Math.max(0, length - suffixLength), length - 1);
+        }
+        int start = parseRangeInt(first);
+        if (start < 0) {
+            return null;
+        }
         if (start >= length) {
             throw GcpException.outOfRange("Range not satisfiable: " + rangeHeader);
         }
-        if (start < 0 || end < start) {
-            throw GcpException.invalidArgument("invalid Range header: " + rangeHeader);
+        int end = last.isEmpty() ? length - 1 : parseRangeInt(last);
+        if (end < start) {
+            return null;
         }
-        end = Math.min(end, length - 1);
-        return new Range(start, end);
+        return new Range(start, Math.min(end, length - 1));
     }
 
-    private static int parseRangeInt(String value, String rangeHeader) {
+    // Digit-only, so a value the ABNF does not allow is malformed rather than silently accepted
+    // the way parseInt would take a leading plus sign. -1 means "not a count".
+    private static int parseRangeInt(String value) {
+        if (value.isEmpty()) {
+            return -1;
+        }
+        for (int i = 0; i < value.length(); i++) {
+            if (!Character.isDigit(value.charAt(i))) {
+                return -1;
+            }
+        }
         try {
             return Integer.parseInt(value);
         } catch (NumberFormatException e) {
-            throw GcpException.invalidArgument("invalid Range header: " + rangeHeader);
+            return -1;
         }
     }
 
-    private record Range(int start, int end) {}
+    private record Range(int start, int end) {
+        boolean overlaps(Range other) {
+            return start <= other.end && other.start <= end;
+        }
+    }
 }

@@ -2,16 +2,20 @@ package io.floci.gcp.services.pubsub;
 
 import com.google.protobuf.ByteString;
 import com.google.protobuf.Empty;
+import com.google.protobuf.FieldMask;
 import com.google.protobuf.Timestamp;
 import com.google.pubsub.v1.DeadLetterPolicy;
+import com.google.pubsub.v1.GetSubscriptionRequest;
 import com.google.pubsub.v1.ModifyAckDeadlineRequest;
 import com.google.pubsub.v1.PubsubMessage;
 import com.google.pubsub.v1.ReceivedMessage;
+import com.google.pubsub.v1.RetryPolicy;
 import com.google.pubsub.v1.SeekRequest;
 import com.google.pubsub.v1.SeekResponse;
 import com.google.pubsub.v1.StreamingPullRequest;
 import com.google.pubsub.v1.StreamingPullResponse;
 import com.google.pubsub.v1.Subscription;
+import com.google.pubsub.v1.UpdateSubscriptionRequest;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.services.iam.IamServices;
@@ -26,6 +30,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
@@ -677,6 +682,103 @@ class PubSubSubscriberControllerTest {
         assertEquals(5, responseObserver.values.get(0).getDeadLetterPolicy().getMaxDeliveryAttempts());
         assertEquals("projects/p1/topics/dlq",
                 service.getSubscription("projects/p1/subscriptions/s1").getDeadLetterTopic());
+    }
+
+    @Test
+    void createSubscriptionOverGrpcStoresOrderingExactlyOnceAndRetryPolicy() {
+        service.createTopic("projects/p1/topics/t1");
+
+        RecordingObserver<Subscription> responseObserver = new RecordingObserver<>();
+        controller.createSubscription(Subscription.newBuilder()
+                .setName("projects/p1/subscriptions/s1")
+                .setTopic("projects/p1/topics/t1")
+                .setEnableMessageOrdering(true)
+                .setEnableExactlyOnceDelivery(true)
+                .setRetryPolicy(RetryPolicy.newBuilder()
+                        // Qualified: com.google.protobuf.Duration clashes with the imported java.time.Duration.
+                        .setMinimumBackoff(com.google.protobuf.Duration.newBuilder().setSeconds(1))
+                        .setMaximumBackoff(com.google.protobuf.Duration.newBuilder().setSeconds(5).setNanos(500_000_000)))
+                .build(), responseObserver);
+
+        assertNull(responseObserver.error.get());
+        Subscription created = responseObserver.values.get(0);
+        assertTrue(created.getEnableMessageOrdering());
+        assertTrue(created.getEnableExactlyOnceDelivery());
+        assertEquals(1, created.getRetryPolicy().getMinimumBackoff().getSeconds());
+        assertEquals(5, created.getRetryPolicy().getMaximumBackoff().getSeconds());
+        assertEquals(500_000_000, created.getRetryPolicy().getMaximumBackoff().getNanos());
+
+        RecordingObserver<Subscription> getObserver = new RecordingObserver<>();
+        controller.getSubscription(GetSubscriptionRequest.newBuilder()
+                .setSubscription("projects/p1/subscriptions/s1").build(), getObserver);
+        assertNull(getObserver.error.get());
+        assertEquals(created, getObserver.values.get(0));
+        assertEquals(Map.of("minimumBackoff", "1s", "maximumBackoff", "5.500s"),
+                service.getSubscription("projects/p1/subscriptions/s1").getRetryPolicy());
+    }
+
+    @Test
+    void getSubscriptionOverGrpcReturnsARetryPolicyStoredOverRest() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10,
+                null, false, null, null, null, null, null,
+                Map.of("minimumBackoff", "2s", "maximumBackoff", "30s"), null, 0, false, false);
+
+        RecordingObserver<Subscription> responseObserver = new RecordingObserver<>();
+        controller.getSubscription(GetSubscriptionRequest.newBuilder()
+                .setSubscription("projects/p1/subscriptions/s1").build(), responseObserver);
+
+        assertNull(responseObserver.error.get());
+        RetryPolicy policy = responseObserver.values.get(0).getRetryPolicy();
+        assertEquals(2, policy.getMinimumBackoff().getSeconds());
+        assertEquals(30, policy.getMaximumBackoff().getSeconds());
+    }
+
+    @Test
+    void updateSubscriptionOverGrpcReplacesTheRetryPolicy() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10);
+
+        RecordingObserver<Subscription> responseObserver = new RecordingObserver<>();
+        controller.updateSubscription(UpdateSubscriptionRequest.newBuilder()
+                .setSubscription(Subscription.newBuilder()
+                        .setName("projects/p1/subscriptions/s1")
+                        .setRetryPolicy(RetryPolicy.newBuilder()
+                                .setMinimumBackoff(com.google.protobuf.Duration.newBuilder().setSeconds(3))))
+                .setUpdateMask(FieldMask.newBuilder().addPaths("retry_policy"))
+                .build(), responseObserver);
+
+        assertNull(responseObserver.error.get());
+        assertEquals(3, responseObserver.values.get(0).getRetryPolicy().getMinimumBackoff().getSeconds());
+        assertEquals(600, responseObserver.values.get(0).getRetryPolicy().getMaximumBackoff().getSeconds());
+        assertEquals(Map.of("minimumBackoff", "3s", "maximumBackoff", "600s"),
+                service.getSubscription("projects/p1/subscriptions/s1").getRetryPolicy());
+    }
+
+    @Test
+    void createSubscriptionOverGrpcKeepsAnEmptyRetryPolicyWithItsDefaults() {
+        service.createTopic("projects/p1/topics/t1");
+
+        RecordingObserver<Subscription> withPolicy = new RecordingObserver<>();
+        controller.createSubscription(Subscription.newBuilder()
+                .setName("projects/p1/subscriptions/with-policy")
+                .setTopic("projects/p1/topics/t1")
+                .setRetryPolicy(RetryPolicy.getDefaultInstance())
+                .build(), withPolicy);
+        RecordingObserver<Subscription> withoutPolicy = new RecordingObserver<>();
+        controller.createSubscription(Subscription.newBuilder()
+                .setName("projects/p1/subscriptions/without-policy")
+                .setTopic("projects/p1/topics/t1")
+                .build(), withoutPolicy);
+
+        assertNull(withPolicy.error.get());
+        Subscription created = withPolicy.values.get(0);
+        assertTrue(created.hasRetryPolicy());
+        assertEquals(10, created.getRetryPolicy().getMinimumBackoff().getSeconds());
+        assertEquals(600, created.getRetryPolicy().getMaximumBackoff().getSeconds());
+        assertNull(withoutPolicy.error.get());
+        assertFalse(withoutPolicy.values.get(0).hasRetryPolicy());
+        assertNull(service.getSubscription("projects/p1/subscriptions/without-policy").getRetryPolicy());
     }
 
     @Test

@@ -394,7 +394,7 @@ service-account JWT for an access token with the `jwt-bearer` grant described in
 [Using OAuth 2.0 for Server to Server Applications](https://developers.google.com/identity/protocols/oauth2/service-account).
 With the default `disabled` mode it returns a token for any assertion, and that
 token is not a recognized identity. In `enforce` mode the assertion is checked
-as below, and every refusal is `400`. The checks run in the order Google's token
+as below, and every refusal is `400` except the disabled account's `401`. The checks run in the order Google's token
 endpoint runs them, so an assertion with several faults gets the answer of the first: an
 assertion signed with an unrelated key still gets the audience, timeframe,
 missing claim and empty scope answers below, and only one that passes them gets
@@ -441,6 +441,16 @@ measured against `https://oauth2.googleapis.com/token` in the review of
   Google documents for "one of the requested scopes doesn't exist (i.e. is
   invalid)." The scopes are checked against the bundled catalog described below,
   so a scope of an API Floci does not emulate is accepted.
+- The account must not be [disabled](#disabling-a-service-account); otherwise the
+  response is `401` with `disabled_client` and `The OAuth client was disabled.`, the
+  row of the "JWT error codes" table of
+  [Using OAuth 2.0 for Server to Server Applications](https://developers.google.com/identity/protocols/oauth2/service-account)
+  for "The key used to sign the JWT assertion is disabled", resolved by enabling the
+  service account. This answer comes from Google's documentation and was not
+  measured: the table gives no HTTP status, so Floci answers `401`, as Google does
+  for other client errors such as `invalid_client`, and checks it last. This check
+  and the one on `iss` run again under the lock that revocation takes, so an account
+  deleted or disabled while its assertion is checked gets no token.
 - The access token is valid for 3600 seconds and acts as the service account on
   every enforcing surface, like a token from IAM Credentials `generateAccessToken`.
 
@@ -564,7 +574,8 @@ as disabled or deleted". The response does not carry the `ErrorInfo` detail Goog
 attaches, whose metadata names the API service and method called. Deleting an account
 in `enforce` mode revokes its Floci-issued tokens, which are then refused the same way,
 also after an account with the same email is created again. Revocation is serialized
-with `generateAccessToken` and STS token exchanges, so a token minted while the account
+with `generateAccessToken`, the token endpoint's [`jwt-bearer` grant](#oauth-token-exchange)
+and STS token exchanges, so a token minted while the account
 is being deleted is revoked with the others, and one requested after it is refused.
 
 As the reference says "requests for new access tokens will fail", IAM Credentials

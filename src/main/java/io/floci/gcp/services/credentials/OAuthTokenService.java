@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.services.iam.IamService;
+import io.floci.gcp.services.iam.model.StoredServiceAccount;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
@@ -50,6 +51,12 @@ public class OAuthTokenService {
     static final String ISSUED_AT_NOT_SET = "Invalid JWT: iat (issued at) is not set.";
     static final String EXPIRATION_NOT_SET = "Invalid JWT: exp (expiration time) is not set.";
     static final String SCOPE_NOT_A_STRING = "Empty or missing scope not allowed.";
+    /**
+     * Google's "JWT error codes" table: {@code disabled_client}, "The key used to sign the JWT assertion is
+     * disabled", resolved by enabling the service account. The table gives no HTTP status; 401 is what Google
+     * answers for the other client errors such as {@code invalid_client}. Not measured.
+     */
+    static final String DISABLED_CLIENT = "The OAuth client was disabled.";
     /** Google documents that it refuses an {@code exp} more than 65 minutes after {@code iat}. */
     static final long MAX_ASSERTION_LIFETIME_SECONDS = 65 * 60;
     /**
@@ -161,9 +168,38 @@ public class OAuthTokenService {
         if (!Arrays.stream(scope.asText().trim().split("\\s+")).allMatch(GOOGLE_SCOPES::contains)) {
             return oauthError("invalid_scope", INVALID_SCOPE);
         }
-        StoredCredentialToken token = tokens.mintImpersonatedToken(email,
-                clock.instant().plusSeconds(TOKEN_LIFETIME_SECONDS));
+        StoredCredentialToken token;
+        try {
+            token = tokens.mintImpersonatedToken(email, clock.instant().plusSeconds(TOKEN_LIFETIME_SECONDS),
+                    () -> requireEnabledAccount(email));
+        } catch (RefusedAssertion refused) {
+            return refused.response;
+        }
         return tokenResponse(token.getTokenValue(), TOKEN_LIFETIME_SECONDS);
+    }
+
+    /**
+     * Run under the lock that revoking a deleted account's tokens takes, so an account deleted or disabled
+     * since its keys were read gets no token, and one deleted after this check has the token revoked.
+     */
+    private void requireEnabledAccount(String email) {
+        Optional<StoredServiceAccount> account = accounts.get().findServiceAccount(email);
+        if (account.isEmpty()) {
+            throw new RefusedAssertion(oauthError("invalid_grant", ACCOUNT_NOT_FOUND));
+        }
+        if (account.get().isDisabled()) {
+            throw new RefusedAssertion(oauthError(Response.Status.UNAUTHORIZED, "disabled_client", DISABLED_CLIENT));
+        }
+    }
+
+    /** Carries the token endpoint's refusal out of the check run under the issuance lock. */
+    private static final class RefusedAssertion extends RuntimeException {
+        private final transient Response response;
+
+        RefusedAssertion(Response response) {
+            super(null, null, false, false);
+            this.response = response;
+        }
     }
 
     /** Google: "If an incorrect Key ID is specified, all keys associated with the service account are tried." */
@@ -211,10 +247,14 @@ public class OAuthTokenService {
     }
 
     private static Response oauthError(String error, String description) {
+        return oauthError(Response.Status.BAD_REQUEST, error, description);
+    }
+
+    private static Response oauthError(Response.Status status, String error, String description) {
         Map<String, String> body = new LinkedHashMap<>();
         body.put("error", error);
         body.put("error_description", description);
-        return Response.status(Response.Status.BAD_REQUEST)
+        return Response.status(status)
                 .entity(body)
                 .build();
     }

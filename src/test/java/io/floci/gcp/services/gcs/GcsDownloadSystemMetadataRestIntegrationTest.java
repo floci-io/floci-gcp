@@ -21,6 +21,7 @@ import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
@@ -84,8 +85,39 @@ class GcsDownloadSystemMetadataRestIntegrationTest {
                 .when().get("/" + BUCKET + "/xml-obj")
                 .then().statusCode(200)
                 .header("x-goog-generation", equalTo(meta.get("generation")))
-                .header("x-goog-stored-content-length", equalTo(String.valueOf(BODY.length())))
-                .header("x-goog-hash", notNullValue());
+                .header("x-goog-stored-content-length", equalTo(String.valueOf(BODY.length())));
+    }
+
+    /**
+     * The hash header layout is per API: the XML API writes one field per algorithm, the JSON API a
+     * single comma-separated field and none at all on a partial read, as GCS does.
+     */
+    @Test
+    void hashHeadersFollowTheApiLayout() {
+        var meta = upload("hash-layout-obj");
+        List<String> separate = List.of("crc32c=" + meta.get("crc32c"), "md5=" + meta.get("md5Hash"));
+
+        Response xmlFull = given()
+                .when().get("/" + BUCKET + "/hash-layout-obj")
+                .then().statusCode(200).extract().response();
+        assertEquals(separate, xmlFull.headers().getValues("x-goog-hash"));
+
+        Response xmlPartial = given()
+                .header("Range", "bytes=0-4")
+                .when().get("/" + BUCKET + "/hash-layout-obj")
+                .then().statusCode(206).extract().response();
+        assertEquals(separate, xmlPartial.headers().getValues("x-goog-hash"));
+
+        Response jsonFull = given()
+                .when().get("/storage/v1/b/" + BUCKET + "/o/hash-layout-obj?alt=media")
+                .then().statusCode(200).extract().response();
+        assertEquals(List.of(String.join(",", separate)), jsonFull.headers().getValues("x-goog-hash"));
+
+        Response jsonPartial = given()
+                .header("Range", "bytes=0-4")
+                .when().get("/storage/v1/b/" + BUCKET + "/o/hash-layout-obj?alt=media")
+                .then().statusCode(206).extract().response();
+        assertNull(jsonPartial.header("x-goog-hash"));
     }
 
     @Test

@@ -58,12 +58,12 @@ final class GcsMediaResponses {
     }
 
     private static Response mediaResponse(byte[] data, GcsObjectMeta meta, String rangeHeader,
-            String acceptEncoding, String etag, boolean acceptRanges) {
+            String acceptEncoding, String etag, boolean xmlApi) {
         if (shouldTranscode(meta, acceptEncoding)) {
             byte[] decompressed = gunzip(data);
             if (decompressed != null) {
                 return withMetadataHeaders(Response.ok(decompressed).type(meta.getContentType()), meta, etag,
-                        acceptRanges)
+                        xmlApi, false)
                         .header(HttpHeaders.CONTENT_LENGTH, decompressed.length)
                         .build();
             }
@@ -91,7 +91,7 @@ final class GcsMediaResponses {
         // Set rather than left to the HTTP layer: for an implicit HEAD it strips the body and with
         // it the Content-Length it would have generated, and a HEAD is how a client reads an
         // object's size without transferring it.
-        return withMetadataHeaders(builder.type(meta.getContentType()), meta, etag, acceptRanges)
+        return withMetadataHeaders(builder.type(meta.getContentType()), meta, etag, xmlApi, range != null)
                 .header(HttpHeaders.CONTENT_LENGTH, contentLength)
                 .build();
     }
@@ -209,6 +209,9 @@ final class GcsMediaResponses {
         addHeaderIfPresent(builder, "ETag", xmlEtag(meta));
         addHeaderIfPresent(builder, "x-goog-generation", meta.getGeneration());
         addHeaderIfPresent(builder, "x-goog-metageneration", meta.getMetageneration());
+        // Left as one field: the XML API docs do not publish this response's header list, and the
+        // clients that read it here take the single comma-separated value. Media reads, whose
+        // layout is documented, follow it instead.
         addHeaderIfPresent(builder, "x-goog-hash", hashHeader(meta));
         addHeaderIfPresent(builder, "x-goog-stored-content-length", meta.getSize());
         builder.header("x-goog-stored-content-encoding",
@@ -236,11 +239,11 @@ final class GcsMediaResponses {
     }
 
     private static Response.ResponseBuilder withMetadataHeaders(Response.ResponseBuilder builder,
-            GcsObjectMeta meta, String etag, boolean acceptRanges) {
+            GcsObjectMeta meta, String etag, boolean xmlApi, boolean partial) {
         addHeaderIfPresent(builder, "ETag", etag);
         addHeaderIfPresent(builder, HttpHeaders.LAST_MODIFIED, lastModified(meta));
         // The XML API advertises byte ranges and the JSON API does not, which is what GCS does.
-        if (acceptRanges) {
+        if (xmlApi) {
             builder.header("Accept-Ranges", "bytes");
         }
         addHeaderIfPresent(builder, "x-goog-generation", meta.getGeneration());
@@ -249,7 +252,7 @@ final class GcsMediaResponses {
         builder.header("x-goog-stored-content-encoding",
                 meta.getContentEncoding() != null ? meta.getContentEncoding() : "identity");
         addHeaderIfPresent(builder, "x-goog-storage-class", meta.getStorageClass());
-        addHeaderIfPresent(builder, "x-goog-hash", hashHeader(meta));
+        addHashHeaders(builder, meta, xmlApi, partial);
         Map<String, String> metadata = meta.getMetadata();
         if (metadata != null) {
             for (Map.Entry<String, String> entry : metadata.entrySet()) {
@@ -283,6 +286,29 @@ final class GcsMediaResponses {
         if (value != null && !value.isEmpty()) {
             builder.header(name, value);
         }
+    }
+
+    /**
+     * GCS writes the XML API's checksums as one field per algorithm and the JSON API's as a single
+     * comma-separated field, and leaves them out of a JSON media read that is partial. Only the
+     * XML API's layout is documented, so only that one is copied here.
+     */
+    private static void addHashHeaders(Response.ResponseBuilder builder, GcsObjectMeta meta,
+            boolean xmlApi, boolean partial) {
+        if (xmlApi) {
+            addHeaderIfPresent(builder, "x-goog-hash", crc32cHash(meta));
+            addHeaderIfPresent(builder, "x-goog-hash", md5Hash(meta));
+        } else if (!partial) {
+            addHeaderIfPresent(builder, "x-goog-hash", hashHeader(meta));
+        }
+    }
+
+    private static String crc32cHash(GcsObjectMeta meta) {
+        return meta.getCrc32c() == null ? null : "crc32c=" + meta.getCrc32c();
+    }
+
+    private static String md5Hash(GcsObjectMeta meta) {
+        return meta.getMd5Hash() == null ? null : "md5=" + meta.getMd5Hash();
     }
 
     // Real GCS lists crc32c before md5 and omits md5 for composite objects.

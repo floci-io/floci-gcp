@@ -386,7 +386,8 @@ handles, or redirection. Unsupported RPCs return gRPC `UNIMPLEMENTED`.
   `x-goog-generation`, `x-goog-metageneration`, `x-goog-storage-class`, `x-goog-hash` and the
   `x-goog-stored-content-*` pair, plus the custom metadata as `x-goog-meta-*`. A client that
   reads an object's update time from the response header rather than the resource body relies
-  on `Last-Modified`
+  on `Last-Modified`. `x-goog-hash` is one field per algorithm on the XML API and a single
+  comma-separated field on the JSON API, which also omits it from a partial read
 - `Content-Length` on a media read is the length of the bytes that read returns: the stored
   size, the range length on a `206`, or the decompressed size when the read is transcoded. HEAD
   reports the same value the matching GET would

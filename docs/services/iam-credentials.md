@@ -19,6 +19,11 @@ account in an invalid state, as the
 says "requests for new access tokens will fail". In the default `disabled` mode a
 disabled account still gets tokens and signatures.
 
+In enforce mode, `generateAccessToken` for a target account that was never created
+is refused with `403 PERMISSION_DENIED`, as GCP answers for a missing account
+addressed through `-`; earlier releases minted a token for it, so setups that
+impersonate accounts they never create must create them first.
+
 ## Configuration
 
 | Variable | Default | Description |

@@ -1,11 +1,13 @@
 package io.floci.gcp.services.bigquery;
 
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.services.bigquery.model.TableFieldSchema;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -54,6 +56,80 @@ class SqlDialectTranslatorTest {
     private static String sql(String sql, Map<SqlDialectTranslator.TableRef, Set<String>> columns) {
         return SqlDialectTranslator.translate(sql, "test-project", null,
                 SqlDialectTranslator.QueryParameters.none(), columns::get).sql();
+    }
+
+    @Test
+    void lowercaseTimestampParameterIsUppercasedOnlyWhereComparedWithATemporalValue() {
+        SqlDialectTranslator.QueryParameters a = new SqlDialectTranslator.QueryParameters(List.of(Map.of("name", "a",
+                "parameterType", Map.of("type", "STRING"), "parameterValue", Map.of("value", "2014-09-27t12:30:00z"))),
+                "NAMED");
+        String compared = SqlDialectTranslator.translate("SELECT TIMESTAMP '2014-09-27 20:00:00+00' > @a AS v",
+                "test-project", null, a).sql();
+        assertTrue(compared.contains("> '2014-09-27T12:30:00Z'"), compared);
+        String grouped = SqlDialectTranslator.translate("SELECT TIMESTAMP '2014-09-27 20:00:00+00' > (@a) AS v,"
+                + " ((TIMESTAMP '2014-09-27 20:00:00+00')) >= ((@a)) AS w", "test-project", null, a).sql();
+        assertFalse(grouped.contains("t12:30"), grouped);
+        assertTrue(grouped.contains("> ('2014-09-27T12:30:00Z')"), grouped);
+        String negated = SqlDialectTranslator.translate("SELECT TIMESTAMP '2014-09-27 20:00:00+00' NOT BETWEEN @a"
+                + " AND TIMESTAMP '2014-09-28 00:00:00+00' AS v, TIMESTAMP '2014-09-29 00:00:00+00' NOT BETWEEN"
+                + " TIMESTAMP '2014-09-26 00:00:00+00' AND @a AS w", "test-project", null, a).sql();
+        assertFalse(negated.contains("t12:30"), negated);
+        String call = SqlDialectTranslator.translate("SELECT UPPER(@a) > TIMESTAMP '2014-09-27 20:00:00+00' AS v",
+                "test-project", null, a).sql();
+        assertFalse(call.contains("T12:30"), call);
+        String read = SqlDialectTranslator.translate("SELECT @a AS v, x = @a AS same FROM ds.t", "test-project", null, a)
+                .sql();
+        assertFalse(read.contains("T12:30"), read);
+        assertNull(SqlDialectTranslator.QueryParameters.lowercaseTemporal("CAST('buzz' AS VARCHAR)"));
+        assertEquals("2014-09-27T12:30:00", SqlDialectTranslator.QueryParameters.lowercaseTemporal(
+                "CAST('2014-09-27t12:30:00' AS VARCHAR)"));
+    }
+
+    @Test
+    void lowercaseTimestampParameterIsLeftAloneWhereASelectAliasRenamesTheColumn() {
+        SqlDialectTranslator.QueryParameters a = new SqlDialectTranslator.QueryParameters(List.of(Map.of("name", "a",
+                "parameterType", Map.of("type", "STRING"), "parameterValue", Map.of("value", "2014-09-27t12:30:00"))),
+                "NAMED");
+        TableFieldSchema ts = new TableFieldSchema();
+        ts.setName("ts");
+        ts.setType("TIMESTAMP");
+        TableFieldSchema s = new TableFieldSchema();
+        s.setName("s");
+        s.setType("STRING");
+        Function<SqlDialectTranslator.TableRef, List<TableFieldSchema>> fields = ref -> List.of(ts, s);
+        String renamed = SqlDialectTranslator.translate("SELECT s AS ts FROM ds.t ORDER BY ts = @a DESC",
+                "test-project", "test-project", null, a, ref -> null, fields).sql();
+        assertFalse(renamed.contains("T12:30"), renamed);
+        String passedThrough = SqlDialectTranslator.translate("SELECT t.ts FROM ds.t ORDER BY ts = @a DESC",
+                "test-project", "test-project", null, a, ref -> null, fields).sql();
+        assertTrue(passedThrough.contains("'2014-09-27T12:30:00'"), passedThrough);
+        String where = SqlDialectTranslator.translate("SELECT s AS ts FROM ds.t WHERE ts = @a", "test-project",
+                "test-project", null, a, ref -> null, fields).sql();
+        assertTrue(where.contains("'2014-09-27T12:30:00'"), where);
+        TableFieldSchema text = new TableFieldSchema();
+        text.setName("ts");
+        text.setType("STRING");
+        Function<SqlDialectTranslator.TableRef, List<TableFieldSchema>> byTable =
+                ref -> ref.tableId().equals("temporal") ? List.of(ts) : List.of(text);
+        String sibling = SqlDialectTranslator.translate(
+                "SELECT (SELECT COUNT(*) FROM ds.temporal) AS n FROM ds.strings WHERE (ts = @a)", "test-project",
+                "test-project", null, a, ref -> null, byTable).sql();
+        assertFalse(sibling.contains("T12:30"), sibling);
+        String owner = SqlDialectTranslator.translate(
+                "SELECT (SELECT COUNT(*) FROM ds.strings) AS n FROM ds.temporal WHERE (ts = @a)", "test-project",
+                "test-project", null, a, ref -> null, byTable).sql();
+        assertTrue(owner.contains("'2014-09-27T12:30:00'"), owner);
+        String laterBranch = SqlDialectTranslator.translate(
+                "SELECT ARRAY(SELECT ts = @a UNION ALL SELECT TRUE FROM ds.temporal) AS checks FROM ds.strings",
+                "test-project", "test-project", null, a, ref -> null, byTable).sql();
+        assertFalse(laterBranch.contains("T12:30"), laterBranch);
+        String ownBranch = SqlDialectTranslator.translate(
+                "SELECT ARRAY(SELECT TRUE FROM ds.strings UNION ALL SELECT ts = @a FROM ds.temporal) AS checks",
+                "test-project", "test-project", null, a, ref -> null, byTable).sql();
+        assertTrue(ownBranch.contains("'2014-09-27T12:30:00'"), ownBranch);
+        String using = SqlDialectTranslator.translate("SELECT ts > @a AS v FROM ds.temporal JOIN ds.other USING (ts)",
+                "test-project", "test-project", null, a, ref -> null, ref -> List.of(ts)).sql();
+        assertTrue(using.contains("> '2014-09-27T12:30:00'"), using);
     }
 
     private static GcpException invalid(String sql) {

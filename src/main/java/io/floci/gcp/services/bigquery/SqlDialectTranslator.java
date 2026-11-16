@@ -17,6 +17,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.function.Function;
 import java.util.regex.Matcher;
@@ -2819,6 +2820,7 @@ final class SqlDialectTranslator {
         prepare(sql);
         bindPositionalParameters();
         collectCteNames();
+        coerceLowercaseTemporalParameters();
         rewriteTypedArrayLiterals();
         rewriteTypedStructConstructors();
         rewriteArraySubscripts();
@@ -3850,6 +3852,7 @@ final class SqlDialectTranslator {
         }
         queryResult = true;
         collectCteNames();
+        coerceLowercaseTemporalParameters();
         topLevelOutputNames = topLevelOutputNames();
         duplicateOutputNames = duplicateNames(topLevelOutputNames);
         validateSelectNameAmbiguity();
@@ -10411,6 +10414,378 @@ final class SqlDialectTranslator {
      * out of order or copy their tokens. The bound literal stays on the token, so every later rendering
      * of that placeholder uses the same value.
      */
+    private static final Set<String> COMPARISON_OPERATORS = Set.of("=", "!=", "<>", "<", ">", "<=", ">=");
+    private static final Set<String> TEMPORAL_TYPES = Set.of("TIMESTAMP", "DATETIME", "DATE");
+    private static final Set<String> TEMPORAL_FUNCTIONS = Set.of("CURRENT_TIMESTAMP", "CURRENT_DATETIME",
+            "CURRENT_DATE", "TIMESTAMP", "DATETIME", "DATE", "TIMESTAMP_ADD", "TIMESTAMP_SUB", "TIMESTAMP_TRUNC",
+            "DATETIME_ADD", "DATETIME_SUB", "DATETIME_TRUNC", "DATE_ADD", "DATE_SUB", "DATE_TRUNC", "PARSE_TIMESTAMP",
+            "PARSE_DATETIME", "PARSE_DATE", "TIMESTAMP_SECONDS", "TIMESTAMP_MILLIS", "TIMESTAMP_MICROS");
+
+    /**
+     * BigQuery coerces a STRING parameter written like a timestamp with a lowercase {@code t} separator or
+     * {@code z} zone ({@code 2014-09-27t12:30:00z}) when it is compared with a TIMESTAMP, DATETIME or DATE.
+     * DuckDB cannot parse the lowercase forms, so such a parameter is rendered as the uppercased literal, which
+     * DuckDB casts implicitly as it does an uppercase one, but only where the other side of the comparison (or of
+     * a BETWEEN) is temporal as written: a typed literal, a temporal function or CAST, or a table column of that
+     * type. Read anywhere else, the value stays the STRING the caller passed.
+     */
+    private void coerceLowercaseTemporalParameters() {
+        for (int i = 0; i < tokens.size(); i++) {
+            Token t = tokens.get(i);
+            if (t.kind != Kind.NAMED_PARAM && t.kind != Kind.POSITIONAL_PARAM) {
+                continue;
+            }
+            String normalized = QueryParameters.lowercaseTemporal(
+                    t.kind == Kind.NAMED_PARAM ? parameters.named(t.value) : t.value);
+            if (normalized != null && comparedWithTemporal(i)) {
+                tokens.set(i, Token.raw(DuckTypes.quoteLiteral(normalized)));
+            }
+        }
+    }
+
+    private boolean comparedWithTemporal(int param) {
+        int first = param;
+        int last = param;
+        while (true) {
+            int open = significantBefore(first);
+            int close = nextSignificant(last + 1, tokens.size());
+            if (open < 0 || close < 0 || !tokens.get(open).isPunct("(") || !tokens.get(close).isPunct(")")
+                    || matchingParen(open) != close || !groupingParenthesis(open)) {
+                break;
+            }
+            first = open;
+            last = close;
+        }
+        int before = significantBefore(first);
+        int after = nextSignificant(last + 1, tokens.size());
+        if (after >= 0 && isComparison(tokens.get(after))) {
+            return startsTemporal(nextSignificant(after + 1, tokens.size()));
+        }
+        if (before < 0) {
+            return false;
+        }
+        if (isComparison(tokens.get(before))) {
+            return endsTemporal(significantBefore(before));
+        }
+        if (tokens.get(before).isKeyword("BETWEEN")) {
+            return endsTemporal(skipNot(significantBefore(before)));
+        }
+        if (tokens.get(before).isKeyword("AND")) {
+            // The upper bound of x BETWEEN low AND @a.
+            int low = operandStart(significantBefore(before));
+            int between = low < 0 ? -1 : significantBefore(low);
+            return between >= 0 && tokens.get(between).isKeyword("BETWEEN")
+                    && endsTemporal(skipNot(significantBefore(between)));
+        }
+        return false;
+    }
+
+    /** The token before an optional {@code NOT} at {@code index}, as in {@code x NOT BETWEEN a AND b}. */
+    private int skipNot(int index) {
+        return index >= 0 && tokens.get(index).isKeyword("NOT") ? significantBefore(index) : index;
+    }
+
+    private static boolean isComparison(Token token) {
+        return token.kind == Kind.PUNCT && COMPARISON_OPERATORS.contains(token.text);
+    }
+
+    /** Where the operand ending at {@code end} starts: a call, a typed literal, a dotted path or one token. */
+    private int operandStart(int end) {
+        if (end < 0) {
+            return -1;
+        }
+        Token token = tokens.get(end);
+        if (token.isPunct(")")) {
+            int open = openingFor(end, "(", ")");
+            int name = open < 0 ? -1 : significantBefore(open);
+            return name >= 0 && tokens.get(name).kind == Kind.IDENT ? name : open;
+        }
+        int before = significantBefore(end);
+        if (token.kind == Kind.STRING && before >= 0 && TEMPORAL_TYPES.contains(tokens.get(before).upper())) {
+            return before;
+        }
+        int start = end;
+        while (before >= 1 && tokens.get(before).isPunct(".")) {
+            start = significantBefore(before);
+            before = start < 0 ? -1 : significantBefore(start);
+        }
+        return start;
+    }
+
+    private boolean endsTemporal(int end) {
+        if (end >= 0 && tokens.get(end).isPunct(")")) {
+            int open = openingFor(end, "(", ")");
+            if (open >= 0 && groupingParenthesis(open)) {
+                return groupedOperandTemporal(open, end);
+            }
+        }
+        int start = operandStart(end);
+        return start >= 0 && operandTemporal(start, end);
+    }
+
+    private boolean startsTemporal(int start) {
+        if (start < 0) {
+            return false;
+        }
+        if (tokens.get(start).isPunct("(") && groupingParenthesis(start)) {
+            return groupedOperandTemporal(start, matchingParen(start));
+        }
+        int end = operandEnd(start);
+        return end >= start && operandTemporal(start, end);
+    }
+
+    /**
+     * Whether the parenthesis at {@code open} only groups, as in {@code (@a)} or {@code WHERE (ts) > @a}, rather than
+     * opening the arguments of a call such as {@code CAST(...)}.
+     */
+    private boolean groupingParenthesis(int open) {
+        int before = significantBefore(open);
+        return before < 0 || !isName(tokens.get(before));
+    }
+
+    /** Whether the parentheses from {@code open} to {@code close} hold exactly one temporal operand. */
+    private boolean groupedOperandTemporal(int open, int close) {
+        int inner = nextSignificant(open + 1, close);
+        int innerEnd = significantBefore(close);
+        if (inner < 0 || innerEnd < inner) {
+            return false;
+        }
+        if (tokens.get(inner).isPunct("(") && matchingParen(inner) == innerEnd && groupingParenthesis(inner)) {
+            return groupedOperandTemporal(inner, innerEnd);
+        }
+        return operandEnd(inner) == innerEnd && operandTemporal(inner, innerEnd);
+    }
+
+    /** Where the operand starting at {@code start} ends: a call, a typed literal, a dotted path or one token. */
+    private int operandEnd(int start) {
+        int end = start;
+        int next = nextSignificant(start + 1, tokens.size());
+        if (next >= 0 && tokens.get(next).isPunct("(")) {
+            end = matchingParen(next);
+        } else if (next >= 0 && tokens.get(next).kind == Kind.STRING) {
+            end = next;
+        } else {
+            while (next >= 0 && tokens.get(next).isPunct(".")) {
+                int part = nextSignificant(next + 1, tokens.size());
+                if (part < 0) {
+                    break;
+                }
+                end = part;
+                next = nextSignificant(part + 1, tokens.size());
+            }
+        }
+        return end;
+    }
+
+    /** Whether the operand from {@code start} to {@code end} is a TIMESTAMP, DATETIME or DATE as written. */
+    private boolean operandTemporal(int start, int end) {
+        Token first = tokens.get(start);
+        if (first.kind != Kind.IDENT && first.kind != Kind.QIDENT) {
+            return false;
+        }
+        boolean unquoted = first.kind == Kind.IDENT;
+        if (start == end && unquoted && TEMPORAL_FUNCTIONS.contains(first.upper())
+                && first.upper().startsWith("CURRENT_")) {
+            return true;
+        }
+        if (tokens.get(end).kind == Kind.STRING) {
+            return unquoted && TEMPORAL_TYPES.contains(first.upper());
+        }
+        if (tokens.get(end).isPunct(")")) {
+            if (first.isKeyword("CAST") || first.isKeyword("SAFE_CAST")) {
+                int type = significantBefore(end);
+                int as = type < 0 ? -1 : significantBefore(type);
+                return as >= 0 && tokens.get(as).isKeyword("AS") && TEMPORAL_TYPES.contains(tokens.get(type).upper());
+            }
+            return unquoted && TEMPORAL_FUNCTIONS.contains(first.upper());
+        }
+        List<String> path = new ArrayList<>();
+        for (int i = start; i <= end; i++) {
+            if (tokens.get(i).kind == Kind.IDENT || tokens.get(i).kind == Kind.QIDENT) {
+                path.add(tokens.get(i).identifierText());
+            }
+        }
+        int select = containingSelect(start);
+        if (select >= 0 && path.size() == 1 && selectAliasesVisible(select, start)
+                && renamedBySelectList(select, path.getFirst())) {
+            return false;
+        }
+        TableFieldSchema field = select < 0 ? dmlColumnField(path) : sourceColumnField(select, path);
+        return field != null && !"REPEATED".equals(field.getMode()) && field.getType() != null
+                && Set.of("TIMESTAMP", "DATETIME", "DATE").contains(field.getType());
+    }
+
+    /**
+     * The SELECT of the query that contains {@code position}: the nearest one, at the position's depth or outside it,
+     * whose query is still open there, so a sibling subquery that closed before it ({@code (SELECT ...) ... WHERE
+     * (ts = @a)}) is passed over.
+     */
+    private int containingSelect(int position) {
+        for (int depth = parenthesisDepth(position); depth >= 0; depth--) {
+            int select = precedingSelect(position, depth);
+            if (select >= 0 && !leavesDepth(select, position, depth)) {
+                return select;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * Whether a bare name at {@code position} reads the select list of the query at {@code select} first, as in its
+     * GROUP BY, HAVING, QUALIFY and ORDER BY; in the select list, FROM and WHERE it reads the sources.
+     */
+    private boolean selectAliasesVisible(int select, int position) {
+        int depth = parenthesisDepth(select);
+        for (int i = position - 1; i > select; i--) {
+            Token token = tokens.get(i);
+            if (parenthesisDepth(i) != depth || token.kind != Kind.IDENT) {
+                continue;
+            }
+            if (Set.of("GROUP", "HAVING", "QUALIFY", "ORDER").contains(token.upper())) {
+                return true;
+            }
+            if (Set.of("WHERE", "ON", "FROM").contains(token.upper())) {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Whether a select item outputs {@code name} from anything other than the column of that name itself
+     * ({@code s AS ts}), or the select list cannot be read; there the name is not the source column.
+     */
+    private boolean renamedBySelectList(int select, String name) {
+        List<int[]> items = selectItems(select);
+        if (items == null) {
+            return true;
+        }
+        for (int[] item : items) {
+            String output = expandsStar(item) ? null : outputNameText(item[0], item[1]);
+            if (output == null || !output.equalsIgnoreCase(name)) {
+                continue;
+            }
+            int as = topLevelAs(item[0], item[1]);
+            List<Token> expression = significant(item[0], as < 0 ? item[1] : as);
+            Token last = expression.isEmpty() ? null : expression.getLast();
+            boolean column = (expression.size() == 1 || expression.size() == 3 && expression.get(1).isPunct("."))
+                    && last != null && (last.kind == Kind.IDENT || last.kind == Kind.QIDENT)
+                    && last.identifierText().equalsIgnoreCase(name);
+            if (!column) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * The schema of a column read from a table source of the query at {@code select}, or null. The search stops at
+     * the end of that query's branch, so a later {@code UNION ALL} branch's sources are not read.
+     */
+    private TableFieldSchema sourceColumnField(int select, List<String> path) {
+        int depth = parenthesisDepth(select);
+        for (int i = select + 1; i < tokens.size(); i++) {
+            if (parenthesisDepth(i) < depth || parenthesisDepth(i) == depth && (tokens.get(i).isKeyword("UNION")
+                    || tokens.get(i).isKeyword("INTERSECT") || tokens.get(i).isKeyword("EXCEPT"))) {
+                break;
+            }
+            if (parenthesisDepth(i) != depth || !isFromClause(i)) {
+                continue;
+            }
+            return sourcesColumnField(projectionSources(i, depth), path);
+        }
+        return null;
+    }
+
+    /**
+     * The schema of {@code path} read from one of {@code sources}, or null when no table has it. BigQuery rejects an
+     * unqualified name several sources have unless a join's {@code USING} combines them into one column, so several
+     * matches of the same type and mode are that column; matches that differ are left untyped.
+     */
+    private TableFieldSchema sourcesColumnField(List<ProjectionSource> sources, List<String> path) {
+        boolean qualified = path.size() > 1 && sources.stream()
+                .anyMatch(source -> source.alias() != null && source.alias().equalsIgnoreCase(path.getFirst()));
+        List<String> columnPath = qualified ? path.subList(1, path.size()) : path;
+        TableFieldSchema found = null;
+        for (ProjectionSource source : sources) {
+            if (qualified && (source.alias() == null || !source.alias().equalsIgnoreCase(path.getFirst()))
+                    || !source.directTable()) {
+                continue;
+            }
+            TableRef ref = projectionSourceTable(source.startToken());
+            List<TableFieldSchema> fields = ref == null ? null : fieldsOf.apply(ref);
+            TableFieldSchema matching = null;
+            for (String segment : columnPath) {
+                matching = null;
+                for (TableFieldSchema field : fields == null ? List.<TableFieldSchema>of() : fields) {
+                    if (field.getName().equalsIgnoreCase(segment)) {
+                        matching = field;
+                        break;
+                    }
+                }
+                fields = matching == null ? null : matching.getFields();
+            }
+            if (matching != null) {
+                if (found != null && !(Objects.equals(found.getType(), matching.getType())
+                        && Objects.equals(found.getMode(), matching.getMode()))) {
+                    return null;
+                }
+                found = matching;
+            }
+        }
+        return found;
+    }
+
+    /**
+     * The schema of a column read outside any SELECT of a DML statement: from the {@code UPDATE} or {@code DELETE}
+     * target and an {@code UPDATE ... FROM} source, or from the {@code MERGE} target and its {@code USING} source.
+     */
+    private TableFieldSchema dmlColumnField(List<String> path) {
+        int verb = nextSignificant(0, tokens.size());
+        if (verb < 0 || tokens.get(verb).kind != Kind.IDENT) {
+            return null;
+        }
+        String statement = tokens.get(verb).upper();
+        if (!Set.of("UPDATE", "DELETE", "MERGE").contains(statement)) {
+            return null;
+        }
+        List<ProjectionSource> sources = new ArrayList<>();
+        int target = nextSignificant(verb + 1, tokens.size());
+        if (target >= 0 && (tokens.get(target).isKeyword("FROM") || tokens.get(target).isKeyword("INTO"))) {
+            target = nextSignificant(target + 1, tokens.size());
+        }
+        addDmlSource(target, sources);
+        for (int i = target + 1; target >= 0 && i < tokens.size(); i++) {
+            if (parenthesisDepth(i) != 0) {
+                continue;
+            }
+            if (statement.equals("UPDATE") && tokens.get(i).isKeyword("FROM")) {
+                sources.addAll(projectionSources(i, 0));
+                break;
+            }
+            if (statement.equals("MERGE") && tokens.get(i).isKeyword("USING")) {
+                addDmlSource(nextSignificant(i + 1, tokens.size()), sources);
+                break;
+            }
+        }
+        return sourcesColumnField(sources, path);
+    }
+
+    /** Adds the table source at {@code start}; {@code SET} right after an UPDATE target is not its alias. */
+    private void addDmlSource(int start, List<ProjectionSource> sources) {
+        ProjectionSource source = start < 0 ? null : parseProjectionSource(start);
+        if (source == null) {
+            return;
+        }
+        if (source.alias() != null && source.alias().equalsIgnoreCase("SET")) {
+            TableRef ref = projectionSourceTable(start);
+            source = new ProjectionSource(ref == null ? null : ref.tableId(), source.directTable(),
+                    source.wildcardTable(), source.structAliasCollision(), source.nextToken(),
+                    source.offsetValueColumn(), source.startToken());
+        }
+        sources.add(source);
+    }
+
     private void bindPositionalParameters() {
         for (int i = 0; i < tokens.size(); i++) {
             Token token = tokens.get(i);
@@ -15887,6 +16262,24 @@ final class SqlDialectTranslator {
 
         static QueryParameters none() {
             return new QueryParameters(List.of(), null);
+        }
+
+        private static final Pattern LOWERCASE_T = Pattern.compile("^(\\d{4}-\\d{1,2}-\\d{1,2})t(?=\\d)");
+
+        /**
+         * For a STRING parameter written like a timestamp with a lowercase {@code t} separator or a trailing
+         * {@code z}, as {@link #literal} renders it, the value with those uppercased; null for any other literal.
+         */
+        static String lowercaseTemporal(String literal) {
+            String value = stringLiteralValue(literal);
+            if (value == null) {
+                return null;
+            }
+            String normalized = LOWERCASE_T.matcher(value).replaceFirst("$1T");
+            if (normalized.endsWith("z")) {
+                normalized = normalized.substring(0, normalized.length() - 1) + "Z";
+            }
+            return !normalized.equals(value) && TEMPORAL_STRING.matcher(normalized).matches() ? normalized : null;
         }
 
         private static final Pattern STRING_LITERAL = Pattern.compile(

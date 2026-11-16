@@ -310,7 +310,7 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript(request.sql(),
                 request.projectId(), request.jobProjectId(), request.defaultDatasetId(),
                 new SqlDialectTranslator.QueryParameters(request.queryParameters(), request.parameterMode()),
-                ref -> columnNames(tables, ref));
+                ref -> columnNames(tables, ref), ref -> columnFields(tables, ref));
         SqlDialectTranslator.Statement statement = script.finalStatement();
         if (!statement.isDml()) {
             throw SqlDialectTranslator.invalidQuery("A DML script must end with INSERT, UPDATE, DELETE or MERGE.");
@@ -325,7 +325,7 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
             script = SqlDialectTranslator.translateScript(request.sql(),
                     request.projectId(), request.jobProjectId(), request.defaultDatasetId(),
                     new SqlDialectTranslator.QueryParameters(request.queryParameters(), request.parameterMode()),
-                    ref -> dmlColumnNames(tables, ref, target, targetTable));
+                    ref -> dmlColumnNames(tables, ref, target, targetTable), ref -> columnFields(tables, ref));
             statement = script.finalStatement();
         }
         String flociEndpoint = flociEndpoint();

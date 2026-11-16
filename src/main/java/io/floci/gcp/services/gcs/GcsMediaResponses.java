@@ -6,19 +6,34 @@ import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
+import org.jboss.logging.Logger;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.HexFormat;
+import java.util.Locale;
 import java.util.Map;
 import java.util.StringJoiner;
 import java.util.zip.GZIPInputStream;
 
 final class GcsMediaResponses {
 
+    private static final Logger LOG = Logger.getLogger(GcsMediaResponses.class);
+
     static final String META_HEADER_PREFIX = "x-goog-meta-";
+
+    // IMF-fixdate, the only format RFC 7231 allows a recipient to be required to parse. Not
+    // DateTimeFormatter.RFC_1123_DATE_TIME, which writes a single-digit day unpadded
+    // ("Fri, 6 Feb 2026 ...") and is therefore not the format GCS sends.
+    private static final DateTimeFormatter HTTP_DATE = DateTimeFormatter
+            .ofPattern("EEE, dd MMM uuuu HH:mm:ss 'GMT'", Locale.ENGLISH)
+            .withZone(ZoneOffset.UTC);
 
     private GcsMediaResponses() {}
 
@@ -46,7 +61,7 @@ final class GcsMediaResponses {
             byte[] decompressed = gunzip(data);
             if (decompressed != null) {
                 return withMetadataHeaders(Response.ok(decompressed).type(meta.getContentType()), meta, etag)
-                        .header("Content-Length", decompressed.length)
+                        .header(HttpHeaders.CONTENT_LENGTH, decompressed.length)
                         .build();
             }
             // Not actually gzip despite the declared encoding: serve the stored bytes rather
@@ -54,19 +69,28 @@ final class GcsMediaResponses {
         }
 
         Response.ResponseBuilder builder;
+        int contentLength;
         if (rangeHeader == null || rangeHeader.isBlank()) {
             builder = Response.ok(data);
+            contentLength = data.length;
         } else {
             Range range = parseRange(rangeHeader, data.length);
+            byte[] partial = Arrays.copyOfRange(data, range.start(), range.end() + 1);
             builder = Response.status(Response.Status.PARTIAL_CONTENT)
-                    .entity(Arrays.copyOfRange(data, range.start(), range.end() + 1))
+                    .entity(partial)
                     .header("Content-Range", "bytes " + range.start() + "-" + range.end() + "/" + data.length);
+            contentLength = partial.length;
         }
         if (isGzipStored(meta)) {
             // Served as stored, so the client must be told to inflate it.
             builder.header("Content-Encoding", "gzip");
         }
-        return withMetadataHeaders(builder.type(meta.getContentType()), meta, etag).build();
+        // Set rather than left to the HTTP layer: for an implicit HEAD it strips the body and with
+        // it the Content-Length it would have generated, and a HEAD is how a client reads an
+        // object's size without transferring it.
+        return withMetadataHeaders(builder.type(meta.getContentType()), meta, etag)
+                .header(HttpHeaders.CONTENT_LENGTH, contentLength)
+                .build();
     }
 
     /**
@@ -211,6 +235,7 @@ final class GcsMediaResponses {
     private static Response.ResponseBuilder withMetadataHeaders(Response.ResponseBuilder builder,
             GcsObjectMeta meta, String etag) {
         addHeaderIfPresent(builder, "ETag", etag);
+        addHeaderIfPresent(builder, HttpHeaders.LAST_MODIFIED, lastModified(meta));
         addHeaderIfPresent(builder, "x-goog-generation", meta.getGeneration());
         addHeaderIfPresent(builder, "x-goog-metageneration", meta.getMetageneration());
         addHeaderIfPresent(builder, "x-goog-stored-content-length", meta.getSize());
@@ -227,6 +252,24 @@ final class GcsMediaResponses {
             }
         }
         return builder;
+    }
+
+    /**
+     * The object's update time as an HTTP-date. GCS sends this on every media read, and a client
+     * that takes the update time from the response header rather than the resource body requires
+     * it.
+     */
+    private static String lastModified(GcsObjectMeta meta) {
+        String updated = meta.getUpdated() != null ? meta.getUpdated() : meta.getTimeCreated();
+        if (updated == null) {
+            return null;
+        }
+        try {
+            return HTTP_DATE.format(Instant.parse(updated));
+        } catch (DateTimeParseException e) {
+            LOG.debugf("omitting Last-Modified, unparseable timestamp %s on %s", updated, meta.getName());
+            return null;
+        }
     }
 
     private static void addHeaderIfPresent(Response.ResponseBuilder builder, String name, String value) {

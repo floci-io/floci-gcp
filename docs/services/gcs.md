@@ -381,6 +381,15 @@ handles, or redirection. Unsupported RPCs return gRPC `UNIMPLEMENTED`.
 - `CopyObject`
 - `MoveObject`
 - `HeadObject`
+- Media reads (`alt=media` downloads, `/download/storage/v1/...`, and XML API GET and HEAD)
+  carry the object's system metadata: `ETag`, `Last-Modified` in IMF-fixdate form,
+  `x-goog-generation`, `x-goog-metageneration`, `x-goog-storage-class`, `x-goog-hash` and the
+  `x-goog-stored-content-*` pair, plus the custom metadata as `x-goog-meta-*`. A client that
+  reads an object's update time from the response header rather than the resource body relies
+  on `Last-Modified`
+- `Content-Length` on a media read is the length of the bytes that read returns: the stored
+  size, the range length on a `206`, or the decompressed size when the read is transcoded. HEAD
+  reports the same value the matching GET would
 - `PatchObject` (update metadata: `contentType`, `contentDisposition`, `contentEncoding`, `contentLanguage`, `cacheControl`, `customTime`, custom metadata)
 - System metadata at upload time (`contentEncoding`, `contentDisposition`, `contentLanguage`,
   `cacheControl`, `customTime`, `storageClass`) in the JSON metadata part of a

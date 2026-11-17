@@ -34,6 +34,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -1652,6 +1653,96 @@ class BigQueryServiceTest {
         service.deleteJob(PROJECT, job.getJobId());
         assertThrows(GcpException.class, () -> service.getJob(PROJECT, job.getJobId()));
         assertThrows(GcpException.class, () -> service.getTable(PROJECT, anonDataset, anonTable));
+    }
+
+    @Test
+    void appendToTheDestinationOfAWriteTruncateQueryWaitsForTheReplacement() throws Exception {
+        // The job reads ds1.t1 and replaces it, so an append acknowledged between the read and the replacement
+        // would be dropped; it has to wait and land after the replacement instead.
+        CountDownLatch queryStarted = new CountDownLatch(1);
+        CountDownLatch finishQuery = new CountDownLatch(1);
+        BigQuerySqlEngine blockingEngine = mock(BigQuerySqlEngine.class);
+        when(blockingEngine.execute(any(), any())).thenAnswer(invocation -> {
+            queryStarted.countDown();
+            if (!finishQuery.await(10, TimeUnit.SECONDS)) {
+                throw new AssertionError("timed out waiting to finish the destination query");
+            }
+            return new BigQuerySqlEngine.Result(newTable(DATASET, TABLE).getSchema(),
+                    List.of(Map.of("name", "from-query", "age", 2)), "SELECT", 0);
+        });
+        BigQueryService concurrentService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), blockingEngine);
+        concurrentService.createDataset(PROJECT, newDataset(DATASET));
+        concurrentService.createTable(PROJECT, DATASET, newTable(DATASET, TABLE));
+        concurrentService.appendRows(PROJECT, DATASET, TABLE, List.of(Map.of("name", "before", "age", 1)));
+        BigQueryService.QueryOptions options = new BigQueryService.QueryOptions(
+                "SELECT * FROM ds1.t1", null, List.of(), null, false, false,
+                new TableReference(PROJECT, DATASET, TABLE), "WRITE_TRUNCATE", null);
+
+        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
+            Future<StoredJob> query = executor.submit(() -> concurrentService.query(PROJECT, "US", null, options));
+            assertTrue(queryStarted.await(5, TimeUnit.SECONDS));
+            FutureTask<Void> append = new FutureTask<>(() -> concurrentService.appendRows(PROJECT, DATASET, TABLE,
+                    List.of(Map.of("name", "after", "age", 3))), null);
+            Thread appendThread = new Thread(append, "append-to-destination");
+            appendThread.start();
+            try {
+                // The append must be parked on writeLock, which the query holds, not merely not yet scheduled.
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+                while (appendThread.getState() != Thread.State.BLOCKED && !append.isDone()
+                        && System.nanoTime() < deadline) {
+                    Thread.onSpinWait();
+                }
+                assertEquals(Thread.State.BLOCKED, appendThread.getState(),
+                        "an append to a WRITE_TRUNCATE destination must wait for the replacement");
+            } finally {
+                finishQuery.countDown();
+            }
+            query.get(5, TimeUnit.SECONDS);
+            append.get(5, TimeUnit.SECONDS);
+        }
+
+        List<String> names = concurrentService.listTableData(PROJECT, DATASET, TABLE).rows().stream()
+                .map(row -> row.getF().getFirst().getV().toString()).toList();
+        assertEquals(List.of("from-query", "after"), names);
+    }
+
+    @Test
+    void appendDoesNotWaitForAWriteTruncateQueryThatDoesNotReadItsDestination() throws Exception {
+        CountDownLatch queryStarted = new CountDownLatch(1);
+        CountDownLatch finishQuery = new CountDownLatch(1);
+        BigQuerySqlEngine blockingEngine = mock(BigQuerySqlEngine.class);
+        when(blockingEngine.execute(any(), any())).thenAnswer(invocation -> {
+            queryStarted.countDown();
+            if (!finishQuery.await(10, TimeUnit.SECONDS)) {
+                throw new AssertionError("timed out waiting to finish the destination query");
+            }
+            return new BigQuerySqlEngine.Result(new TableSchema(List.of(field("value", "INTEGER", null))),
+                    List.of(Map.of("value", 1)), "SELECT", 0);
+        });
+        BigQueryService concurrentService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), blockingEngine);
+        concurrentService.createDataset(PROJECT, newDataset(DATASET));
+        concurrentService.createTable(PROJECT, DATASET, newTable(DATASET, TABLE));
+        BigQueryService.QueryOptions options = new BigQueryService.QueryOptions(
+                "SELECT 1 AS value", null, List.of(), null, false, false,
+                new TableReference(PROJECT, DATASET, "output"), "WRITE_TRUNCATE", null);
+
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
+            Future<StoredJob> query = executor.submit(() -> concurrentService.query(PROJECT, "US", null, options));
+            assertTrue(queryStarted.await(5, TimeUnit.SECONDS));
+            Future<?> append = executor.submit(() -> concurrentService.appendRows(PROJECT, DATASET, TABLE,
+                    List.of(Map.of("name", "concurrent", "age", 1))));
+            try {
+                append.get(3, TimeUnit.SECONDS);
+            } finally {
+                finishQuery.countDown();
+            }
+            query.get(5, TimeUnit.SECONDS);
+        }
+
+        assertEquals(1, concurrentService.listTableData(PROJECT, DATASET, TABLE).rows().size());
+        assertEquals(1, concurrentService.listTableData(PROJECT, DATASET, "output").rows().size());
     }
 
     @Test

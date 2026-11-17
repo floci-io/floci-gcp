@@ -359,13 +359,15 @@ final class GcsMediaResponses {
     }
 
     /**
-     * Reads the {@code Range} header the way GCS reads it, which is mostly the RFC 7233 rule that a
-     * range a server cannot make sense of is ignored rather than rejected.
+     * Reads the {@code Range} header the way GCS reads it, which is mostly the RFC 7233 rule that
+     * a range a server cannot make sense of is ignored rather than rejected.
      *
-     * <p>An unknown unit, an unparseable set, an empty set, or a range whose last byte precedes its
-     * first all serve the whole object with a 200. A set of ranges that overlap is ignored as well.
-     * What stays an error is a set of two or more disjoint ranges, which GCS answers with 400, and
-     * a range that cannot be satisfied, which is a 416.
+     * <p>An element GCS cannot read makes the whole header ignorable, wherever in the set it sits:
+     * an unknown unit, an empty set, a range whose last byte precedes its first, or a position that
+     * does not fit a signed 64-bit integer. The same goes for a set of several ranges that does not
+     * walk forward. What stays an error is a single range that cannot be satisfied, a first byte at
+     * or past the end or a suffix of zero, which is a 416, and a set whose every range begins after
+     * the previous one ends, which is a 400.
      *
      * @return the range to serve, or null when the header is to be ignored
      */
@@ -377,84 +379,103 @@ final class GcsMediaResponses {
         if (separator < 0 || !rangeHeader.substring(0, separator).trim().equalsIgnoreCase("bytes")) {
             return null;
         }
-        List<Range> ranges = new ArrayList<>();
+        List<RangeSpec> specs = new ArrayList<>();
         for (String element : rangeHeader.substring(separator + 1).split(",", -1)) {
-            Range range = parseByteRange(element.trim(), length, rangeHeader);
-            if (range == null) {
+            RangeSpec spec = RangeSpec.parse(element.trim());
+            if (spec == null) {
                 return null;
             }
-            ranges.add(range);
+            specs.add(spec);
         }
-        if (ranges.size() == 1) {
-            return ranges.get(0);
+        if (specs.size() == 1) {
+            RangeSpec spec = specs.get(0);
+            if (!spec.isSatisfiable(length)) {
+                throw GcpException.outOfRange("Range not satisfiable: " + rangeHeader);
+            }
+            return spec.resolve(length);
         }
-        for (int i = 0; i < ranges.size(); i++) {
-            for (int j = i + 1; j < ranges.size(); j++) {
-                if (ranges.get(i).overlaps(ranges.get(j))) {
-                    return null;
-                }
+        for (int i = 1; i < specs.size(); i++) {
+            if (specs.get(i).start(length) <= specs.get(i - 1).end(length)) {
+                return null;
             }
         }
         throw GcpException.invalidArgument("multiple ranges are not supported: " + rangeHeader);
     }
 
-    /**
-     * One element of the range set, with {@code null} for an element that makes the whole header
-     * ignorable. A suffix of zero and a first byte past the end are the two unsatisfiable cases,
-     * which RFC 7233 answers with 416 rather than treating as malformed.
-     */
-    private static Range parseByteRange(String element, int length, String rangeHeader) {
-        int dash = element.indexOf('-');
-        if (dash < 0 || element.indexOf('-', dash + 1) >= 0) {
-            return null;
-        }
-        String first = element.substring(0, dash).trim();
-        String last = element.substring(dash + 1).trim();
-        if (first.isEmpty()) {
-            int suffixLength = parseRangeInt(last);
-            if (suffixLength < 0) {
-                return null;
-            }
-            if (suffixLength == 0 || length == 0) {
-                throw GcpException.outOfRange("Range not satisfiable: " + rangeHeader);
-            }
-            return new Range(Math.max(0, length - suffixLength), length - 1);
-        }
-        int start = parseRangeInt(first);
-        if (start < 0) {
-            return null;
-        }
-        if (start >= length) {
-            throw GcpException.outOfRange("Range not satisfiable: " + rangeHeader);
-        }
-        int end = last.isEmpty() ? length - 1 : parseRangeInt(last);
-        if (end < start) {
-            return null;
-        }
-        return new Range(start, Math.min(end, length - 1));
-    }
-
-    // Digit-only, so a value the ABNF does not allow is malformed rather than silently accepted
-    // the way parseInt would take a leading plus sign. -1 means "not a count".
-    private static int parseRangeInt(String value) {
+    // Digit-only, so a value the ABNF does not allow is malformed rather than silently accepted the
+    // way a number parser would take a leading plus sign. -1 means "not a position", which covers
+    // text GCS cannot read and a value past the signed 64-bit range it can.
+    private static long parsePosition(String value) {
         if (value.isEmpty()) {
             return -1;
         }
+        long position = 0;
         for (int i = 0; i < value.length(); i++) {
-            if (!Character.isDigit(value.charAt(i))) {
+            char c = value.charAt(i);
+            if (c < '0' || c > '9') {
                 return -1;
             }
+            int digit = c - '0';
+            if (position > (Long.MAX_VALUE - digit) / 10) {
+                return -1;
+            }
+            position = position * 10 + digit;
         }
-        try {
-            return Integer.parseInt(value);
-        } catch (NumberFormatException e) {
-            return -1;
+        return position;
+    }
+
+    /**
+     * One element of the range set: a suffix length when {@code suffix} is set, and otherwise a
+     * first byte with an optional last. The constructor's fields stay unresolved because whether a
+     * position is satisfiable depends on the object's length.
+     */
+    private record RangeSpec(long first, long last, boolean suffix) {
+
+        /** The element, or null when GCS would not read it. */
+        static RangeSpec parse(String element) {
+            int dash = element.indexOf('-');
+            if (dash < 0 || element.indexOf('-', dash + 1) >= 0) {
+                return null;
+            }
+            String from = element.substring(0, dash).trim();
+            String to = element.substring(dash + 1).trim();
+            if (from.isEmpty()) {
+                long suffixLength = parsePosition(to);
+                return suffixLength < 0 ? null : new RangeSpec(-1, suffixLength, true);
+            }
+            long first = parsePosition(from);
+            if (first < 0) {
+                return null;
+            }
+            if (to.isEmpty()) {
+                return new RangeSpec(first, -1, false);
+            }
+            long last = parsePosition(to);
+            if (last < 0 || last < first) {
+                return null;
+            }
+            return new RangeSpec(first, last, false);
+        }
+
+        long start(int length) {
+            return suffix ? Math.max(0, length - last) : first;
+        }
+
+        long end(int length) {
+            if (suffix) {
+                return length - 1L;
+            }
+            return last < 0 ? length - 1L : Math.min(last, length - 1L);
+        }
+
+        boolean isSatisfiable(int length) {
+            return length > 0 && start(length) <= end(length);
+        }
+
+        Range resolve(int length) {
+            return new Range((int) start(length), (int) end(length));
         }
     }
 
-    private record Range(int start, int end) {
-        boolean overlaps(Range other) {
-            return start <= other.end && other.start <= end;
-        }
-    }
+    private record Range(int start, int end) {}
 }

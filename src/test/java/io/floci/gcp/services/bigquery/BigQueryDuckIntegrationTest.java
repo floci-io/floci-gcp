@@ -3275,6 +3275,24 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(5)
+    void generateUuidIsAStringLikeBigQuery() {
+        query(Map.of("query", "SELECT LENGTH(GENERATE_UUID()) AS l, UPPER(SUBSTR(GENERATE_UUID(), 9, 1)) AS d,"
+                + " STARTS_WITH(GENERATE_UUID(), '-') AS s, REGEXP_CONTAINS(GENERATE_UUID(), r'^[0-9a-f]{8}-') AS r,"
+                + " GENERATE_UUID() AS u", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of("INTEGER", "STRING", "BOOLEAN", "BOOLEAN", "STRING")))
+                .body("rows[0].f[0].v", equalTo("36"))
+                .body("rows[0].f[1].v", equalTo("-"))
+                .body("rows[0].f[2].v", equalTo("false"))
+                .body("rows[0].f[3].v", equalTo("true"));
+        query(Map.of("query", "SELECT COUNT(DISTINCT SUBSTR(GENERATE_UUID(), 1, 8)) AS n FROM UNNEST([1, 2, 3, 4, 5])",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("5"));
+    }
+
+    @Test
+    @Order(5)
     void nanSortsJustAfterNullLikeBigQuery() {
         String values = "UNNEST([1.0, CAST('NaN' AS FLOAT64), NULL, -1.0]) x";
         String[][] cases = {

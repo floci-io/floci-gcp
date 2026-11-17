@@ -766,7 +766,7 @@ class SqlDialectTranslatorTest {
 
     @Test
     void translatesTypedEmptyArrayLiteralAndGenerateUuid() {
-        assertEquals("SELECT CAST([] AS STRUCT(\"key\" VARCHAR, \"value\" VARCHAR)[]) AS metadata, uuid() AS id",
+        assertEquals("SELECT CAST([] AS STRUCT(\"key\" VARCHAR, \"value\" VARCHAR)[]) AS metadata, CAST(uuid() AS VARCHAR) AS id",
                 sql("SELECT ARRAY<STRUCT<key STRING, value STRING>>[] AS metadata, GENERATE_UUID() AS id"));
     }
 

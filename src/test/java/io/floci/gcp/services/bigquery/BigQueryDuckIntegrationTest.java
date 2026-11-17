@@ -2010,6 +2010,15 @@ class BigQueryDuckIntegrationTest {
                 """, "useLegacySql", false))
                 .then().statusCode(400)
                 .body("error.message", containsString("Integer Overflow"));
+        // NUMERIC coerces to FLOAT64, so a NUMERIC the engine computes is stored too: live BigQuery answers 2.5.
+        query(Map.of("query", """
+                DECLARE f FLOAT64;
+                SET f = CAST(2.5 AS NUMERIC);
+                SELECT f;
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].type", equalTo("FLOAT"))
+                .body("rows[0].f[0].v", equalTo("2.5"));
     }
 
     @Test

@@ -2436,6 +2436,25 @@ class BigQueryServiceTest {
     }
 
     @Test
+    void aNumericTheEngineComputesIsAssignedToAFloat64Variable() {
+        // NUMERIC coerces to FLOAT64; live BigQuery stores 2.5 for SET f = CAST(2.5 AS NUMERIC).
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        when(engine.execute(any(), any())).thenReturn(
+                new BigQuerySqlEngine.Result(new TableSchema(List.of(field("_floci_script_value", "NUMERIC", null))),
+                        List.of(Map.of("_floci_script_value", "2.5")), "SELECT", 0),
+                new BigQuerySqlEngine.Result(new TableSchema(List.of(field("f", "FLOAT", null))),
+                        List.of(Map.of("f", 2.5)), "SELECT", 0));
+        BigQueryService numericService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), engine);
+
+        numericService.query(PROJECT, "US", null, "DECLARE f FLOAT64; SET f = CAST(2.5 AS NUMERIC); SELECT f;", null);
+
+        ArgumentCaptor<BigQuerySqlEngine.Request> request = ArgumentCaptor.forClass(BigQuerySqlEngine.Request.class);
+        verify(engine, times(2)).execute(request.capture(), any());
+        assertTrue(request.getAllValues().get(1).sql().contains("2.5"), request.getAllValues().get(1).sql());
+    }
+
+    @Test
     void aScriptVariableIsRefusedInLimitAndOffset() {
         // Live BigQuery: "LIMIT expects an integer literal or parameter". A query parameter is allowed there.
         GcpException limit = assertThrows(GcpException.class, () -> service.query(PROJECT, "US", null,

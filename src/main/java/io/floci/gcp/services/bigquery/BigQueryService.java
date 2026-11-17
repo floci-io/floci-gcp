@@ -1778,13 +1778,26 @@ public class BigQueryService {
         return scriptResultValue(value, field);
     }
 
-    /** A result's value as a script holds it: a TIMESTAMP result is decimal epoch seconds. */
+    /**
+     * A result's value as a script holds it: a TIMESTAMP result is decimal epoch seconds, and a NUMERIC or
+     * BIGNUMERIC result a {@link BigDecimal}, as a NUMERIC the script computes itself is, so it coerces to
+     * FLOAT64 like one.
+     */
     private static Object scriptResultValue(Object value, TableFieldSchema field) {
         if (value == null || field == null) {
             return value;
         }
         if ("TIMESTAMP".equals(field.getType()) && !"REPEATED".equals(field.getMode())) {
             return resultTimestamp(value);
+        }
+        if (("NUMERIC".equals(field.getType()) || "BIGNUMERIC".equals(field.getType()))
+                && !"REPEATED".equals(field.getMode()) && !(value instanceof BigDecimal)) {
+            try {
+                return new BigDecimal(value.toString().trim());
+            } catch (NumberFormatException e) {
+                LOG.debugf("Keeping %s result %s as returned: not a decimal", field.getType(), value);
+                return value;
+            }
         }
         if ("REPEATED".equals(field.getMode()) && value instanceof List<?> values) {
             TableFieldSchema element = new TableFieldSchema();

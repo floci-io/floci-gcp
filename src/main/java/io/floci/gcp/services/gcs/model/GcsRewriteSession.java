@@ -17,13 +17,21 @@ package io.floci.gcp.services.gcs.model;
  * error that the rewriteToken is invalid", and later calls "can omit all other request fields".
  */
 public record GcsRewriteSession(String srcBucket, String srcObject, String srcGeneration,
-        String dstBucket, String dstObject, String destinationStorageClass, long objectSize,
-        long bytesRewritten, Long maxBytesPerCall, GcsObjectPreconditions preconditions) {
+        boolean explicitSourceGeneration, String dstBucket, String dstObject,
+        String destinationStorageClass, long objectSize, long bytesRewritten,
+        Long maxBytesPerCall, GcsObjectPreconditions preconditions) {
+
+    public GcsRewriteSession(String srcBucket, String srcObject, String srcGeneration,
+            String dstBucket, String dstObject, String destinationStorageClass, long objectSize,
+            long bytesRewritten, Long maxBytesPerCall, GcsObjectPreconditions preconditions) {
+        this(srcBucket, srcObject, srcGeneration, false, dstBucket, dstObject,
+                destinationStorageClass, objectSize, bytesRewritten, maxBytesPerCall, preconditions);
+    }
 
     public GcsRewriteSession advancedBy(long bytes) {
-        return new GcsRewriteSession(srcBucket, srcObject, srcGeneration, dstBucket, dstObject,
-                destinationStorageClass, objectSize, Math.min(objectSize, bytesRewritten + bytes),
-                maxBytesPerCall, preconditions);
+        return new GcsRewriteSession(srcBucket, srcObject, srcGeneration, explicitSourceGeneration,
+                dstBucket, dstObject, destinationStorageClass, objectSize,
+                Math.min(objectSize, bytesRewritten + bytes), maxBytesPerCall, preconditions);
     }
 
     public boolean complete() {

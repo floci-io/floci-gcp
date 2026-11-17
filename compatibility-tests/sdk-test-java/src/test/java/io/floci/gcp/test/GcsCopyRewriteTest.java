@@ -85,4 +85,33 @@ class GcsCopyRewriteTest {
                 .isInstanceOf(StorageException.class)
                 .satisfies(e -> assertThat(((StorageException) e).getCode()).isEqualTo(412));
     }
+
+    @Test
+    void copyRestoresArchivedGenerationWhenSourceGenerationIsSpecified() {
+        String versionedBucket = TestFixtures.uniqueName("copy-versioned-bucket");
+        storage.create(BucketInfo.newBuilder(versionedBucket).setVersioningEnabled(true).build());
+        try {
+            Blob first = storage.create(
+                    BlobInfo.newBuilder(versionedBucket, "source.txt").setContentType("text/plain").build(),
+                    "first".getBytes(StandardCharsets.UTF_8));
+            Blob second = storage.create(
+                    BlobInfo.newBuilder(versionedBucket, "source.txt").setContentType("text/plain").build(),
+                    "second".getBytes(StandardCharsets.UTF_8));
+
+            Storage.CopyRequest restoreRequest = Storage.CopyRequest.newBuilder()
+                    .setSource(BlobId.of(versionedBucket, "source.txt", first.getGeneration()))
+                    .setTarget(BlobId.of(versionedBucket, "source.txt"),
+                            Storage.BlobTargetOption.generationMatch(second.getGeneration()))
+                    .build();
+            storage.copy(restoreRequest).getResult();
+
+            assertThat(new String(storage.readAllBytes(versionedBucket, "source.txt"), StandardCharsets.UTF_8))
+                    .isEqualTo("first");
+        } finally {
+            for (Blob blob : storage.list(versionedBucket, Storage.BlobListOption.versions(true)).iterateAll()) {
+                storage.delete(blob.getBlobId());
+            }
+            storage.delete(versionedBucket);
+        }
+    }
 }

@@ -482,6 +482,7 @@ public class GcsObjectController {
             @PathParam("srcObject") String srcObjectPath,
             @PathParam("dstBucket") String dstBucket,
             @PathParam("dstObject") String dstObjectPath,
+            @QueryParam("sourceGeneration") String sourceGeneration,
             @QueryParam("ifGenerationMatch") Long ifGenerationMatch,
             @QueryParam("ifGenerationNotMatch") Long ifGenerationNotMatch,
             @QueryParam("ifMetagenerationMatch") Long ifMetagenerationMatch,
@@ -494,7 +495,7 @@ public class GcsObjectController {
                 authorization, srcBucket, srcObjectPath, dstBucket, dstObjectPath,
                 requireOverwritePermission -> {
                     GcsObjectMeta meta = service.copyObject(
-                            srcBucket, srcObjectPath, dstBucket, dstObjectPath,
+                            srcBucket, srcObjectPath, sourceGeneration, dstBucket, dstObjectPath,
                             preconditions, requestBaseUrl(headers), requireOverwritePermission);
                     return Response.ok(meta).build();
                 });
@@ -536,6 +537,7 @@ public class GcsObjectController {
             @PathParam("srcObject") String srcObjectPath,
             @PathParam("dstBucket") String dstBucket,
             @PathParam("dstObject") String dstObjectPath,
+            @QueryParam("sourceGeneration") String sourceGeneration,
             @QueryParam("ifGenerationMatch") Long ifGenerationMatch,
             @QueryParam("ifGenerationNotMatch") Long ifGenerationNotMatch,
             @QueryParam("ifMetagenerationMatch") Long ifMetagenerationMatch,
@@ -551,7 +553,7 @@ public class GcsObjectController {
                 authorization, srcBucket, srcObjectPath, dstBucket, dstObjectPath,
                 requireOverwritePermission -> {
                     GcsRewriteResult result = service.rewriteObject(
-                            srcBucket, srcObjectPath, dstBucket, dstObjectPath,
+                            srcBucket, srcObjectPath, sourceGeneration, dstBucket, dstObjectPath,
                             maxBytesRewrittenPerCall, rewriteToken, destinationStorageClass(body), preconditions,
                             requestBaseUrl(headers), requireOverwritePermission);
 

@@ -1786,6 +1786,9 @@ public class BigQueryService {
         if ("TIMESTAMP".equals(field.getType()) && !"REPEATED".equals(field.getMode())) {
             return resultTimestamp(value);
         }
+        if ("NUMERIC".equals(field.getType()) && !"REPEATED".equals(field.getMode())) {
+            return coerceScriptNumeric(value);
+        }
         if ("REPEATED".equals(field.getMode()) && value instanceof List<?> values) {
             TableFieldSchema element = new TableFieldSchema();
             element.setName(field.getName());

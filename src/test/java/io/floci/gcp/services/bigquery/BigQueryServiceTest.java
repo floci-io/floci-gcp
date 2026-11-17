@@ -2285,6 +2285,21 @@ class BigQueryServiceTest {
     }
 
     @Test
+    void numericSqlExpressionsCanBeAssignedToFloat64Variables() {
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        when(engine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("_floci_script_value", "NUMERIC", null))),
+                List.of(Map.of("_floci_script_value", "2.5")), "SELECT", 0));
+        BigQueryService expressionService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), engine);
+
+        StoredJob job = expressionService.query(PROJECT, "US", null,
+                "DECLARE f FLOAT64; SET f = CAST(2.5 AS NUMERIC); SELECT f;", null);
+
+        assertEquals("DONE", job.getState());
+    }
+
+    @Test
     void temporaryFunctionBodiesCannotReadScriptVariables() {
         // Live BigQuery: "Invalid reference to script variable v; in function f". A temporary function
         // resolves against its parameters and the tables its body reads, never the script around it.

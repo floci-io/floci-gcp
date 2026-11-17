@@ -86,6 +86,52 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void stringParameterComparedWithATemporalValueIsRefusedWhereBigQueryCannotCoerceIt() {
+        // Live BigQuery (REST jobs.query, named STRING parameter @a, 2026-11-16) refuses each of these.
+        String[][] refused = {
+                {"SELECT DATE '2014-09-28' > @a AS r", "2014-09-27T12:30:00", "Invalid date: '2014-09-27T12:30:00'"},
+                {"SELECT DATE '2014-09-28' > @a AS r", "2014-09-27 12:30:00", "Invalid date: '2014-09-27 12:30:00'"},
+                {"SELECT CURRENT_DATE() > @a AS r", "2014-09-27 12:30:00", "Invalid date: '2014-09-27 12:30:00'"},
+                {"SELECT DATETIME '2014-09-27 20:00:00' > @a AS r", "2014-09-27T12:30:00Z",
+                        "Invalid datetime string \"2014-09-27T12:30:00Z\""},
+                {"SELECT DATETIME '2014-09-27 20:00:00' > @a AS r", "2014-09-27 12:30:00+00",
+                        "Invalid datetime string \"2014-09-27 12:30:00+00\""},
+                {"SELECT TIMESTAMP '2014-09-27 20:00:00+00' > @a AS r", "2014-09-27T12:30",
+                        "Invalid timestamp: '2014-09-27T12:30'"},
+                {"SELECT TIMESTAMP '2014-09-27 20:00:00+00' > @a AS r", "2014-09-27 12:30:00 utc",
+                        "Invalid time zone: utc"},
+                {"SELECT DATE '2014-09-27' BETWEEN @a AND DATE '2014-09-28' AS r", "2014-09-26 12:30:00",
+                        "Invalid date: '2014-09-26 12:30:00'"},
+        };
+        for (String[] c : refused) {
+            GcpException e = assertThrows(GcpException.class, () -> withStringParameter(c[0], c[1]), c[0]);
+            assertTrue(e.getMessage().contains(c[2]), c[0] + " with " + c[1] + ": " + e.getMessage());
+        }
+        // Accepted by BigQuery: a date alone against a DATE, a zone name against a TIMESTAMP, a lowercase t or z.
+        assertTrue(withStringParameter("SELECT DATE '2014-09-28' > @a AS r", "2014-09-27").contains("'2014-09-27'"));
+        withStringParameter("SELECT TIMESTAMP '2014-09-27 20:00:00+00' > @a AS r", "2014-09-27 12:30:00 UTC");
+        withStringParameter("SELECT TIMESTAMP '2014-09-27 20:00:00+00' > @a AS r",
+                "2014-09-27 12:30:00 America/Los_Angeles");
+        withStringParameter("SELECT DATETIME '2014-09-27 20:00:00' > @a AS r", "2014-09-27t12:30:00");
+        withStringParameter("SELECT TIMESTAMP '2014-09-27 20:00:00+00' > @a AS r", "2014-09-27 12:30:00.45z");
+        // Not compared with a temporal value as written: the STRING is passed on unchecked.
+        withStringParameter("SELECT @a AS r, UPPER(@a) > 'A' AS s", "2014-09-27 12:30:00 utc");
+        withStringParameter("SELECT DATE_TRUNC(TIMESTAMP '2014-09-27 20:00:00+00', DAY) > @a AS r",
+                "2014-09-27 12:30:00");
+        // A temporal operand that is one term of + or - arithmetic does not type the side: DATE + INTERVAL is a
+        // DATETIME in BigQuery, so a value with a time part is valid there.
+        withStringParameter("SELECT @a = DATE '2014-09-27' + INTERVAL 1 DAY AS r", "2014-09-28 00:00:00");
+        withStringParameter("SELECT @a = (DATE '2014-09-27') - INTERVAL 1 DAY AS r", "2014-09-26 00:00:00");
+        withStringParameter("SELECT INTERVAL 1 DAY + DATE '2014-09-27' = @a AS r", "2014-09-28 00:00:00");
+    }
+
+    private static String withStringParameter(String sql, String value) {
+        return SqlDialectTranslator.translate(sql, "test-project", null, new SqlDialectTranslator.QueryParameters(
+                List.of(Map.of("name", "a", "parameterType", Map.of("type", "STRING"),
+                        "parameterValue", Map.of("value", value))), "NAMED")).sql();
+    }
+
+    @Test
     void lowercaseTimestampParameterIsLeftAloneWhereASelectAliasRenamesTheColumn() {
         SqlDialectTranslator.QueryParameters a = new SqlDialectTranslator.QueryParameters(List.of(Map.of("name", "a",
                 "parameterType", Map.of("type", "STRING"), "parameterValue", Map.of("value", "2014-09-27t12:30:00"))),

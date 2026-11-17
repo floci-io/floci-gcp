@@ -5,6 +5,7 @@ import io.floci.gcp.services.bigquery.model.TableFieldSchema;
 
 import java.math.BigDecimal;
 import java.time.DateTimeException;
+import java.time.ZoneId;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -10422,12 +10423,20 @@ final class SqlDialectTranslator {
             "PARSE_DATETIME", "PARSE_DATE", "TIMESTAMP_SECONDS", "TIMESTAMP_MILLIS", "TIMESTAMP_MICROS");
 
     /**
-     * BigQuery coerces a STRING parameter written like a timestamp with a lowercase {@code t} separator or
-     * {@code z} zone ({@code 2014-09-27t12:30:00z}) when it is compared with a TIMESTAMP, DATETIME or DATE.
-     * DuckDB cannot parse the lowercase forms, so such a parameter is rendered as the uppercased literal, which
-     * DuckDB casts implicitly as it does an uppercase one, but only where the other side of the comparison (or of
-     * a BETWEEN) is temporal as written: a typed literal, a temporal function or CAST, or a table column of that
-     * type. Read anywhere else, the value stays the STRING the caller passed.
+     * The type of an operand that is temporal as written but whose type cannot be told from the text:
+     * {@code DATE_TRUNC} returns a DATE, DATETIME or TIMESTAMP, the type of its argument.
+     */
+    private static final String UNKNOWN_TEMPORAL = "";
+
+    /**
+     * BigQuery coerces a STRING parameter compared with a TIMESTAMP, DATETIME or DATE to that type, and refuses a
+     * value that is not valid for it ({@code Invalid date: '2014-09-27T12:30:00'}). DuckDB casts an untyped literal
+     * more loosely, dropping a time part or a zone, so the value is checked here against the type of the other side
+     * of the comparison (or of a BETWEEN) where that side is temporal as written: a typed literal, a temporal
+     * function or CAST, or a table column of that type. A value written with a lowercase {@code t} separator or
+     * {@code z} zone ({@code 2014-09-27t12:30:00z}), which DuckDB cannot parse, is rendered there as the uppercased
+     * literal, which DuckDB casts implicitly as it does an uppercase one. Read anywhere else, the value stays the
+     * STRING the caller passed.
      */
     private void coerceLowercaseTemporalParameters() {
         for (int i = 0; i < tokens.size(); i++) {
@@ -10435,15 +10444,25 @@ final class SqlDialectTranslator {
             if (t.kind != Kind.NAMED_PARAM && t.kind != Kind.POSITIONAL_PARAM) {
                 continue;
             }
-            String normalized = QueryParameters.lowercaseTemporal(
-                    t.kind == Kind.NAMED_PARAM ? parameters.named(t.value) : t.value);
-            if (normalized != null && comparedWithTemporal(i)) {
+            String literal = t.kind == Kind.NAMED_PARAM ? parameters.named(t.value) : t.value;
+            String value = QueryParameters.stringLiteralValue(literal);
+            String type = value == null ? null : comparedTemporalType(i);
+            if (type == null) {
+                continue;
+            }
+            QueryParameters.requireTemporalValue(value, type);
+            String normalized = QueryParameters.lowercaseTemporal(literal);
+            if (normalized != null) {
                 tokens.set(i, Token.raw(DuckTypes.quoteLiteral(normalized)));
             }
         }
     }
 
-    private boolean comparedWithTemporal(int param) {
+    /**
+     * The type of the temporal operand the parameter at {@code param} is compared with: TIMESTAMP, DATETIME,
+     * DATE, {@link #UNKNOWN_TEMPORAL}, or null where the other side is not temporal as written.
+     */
+    private String comparedTemporalType(int param) {
         int first = param;
         int last = param;
         while (true) {
@@ -10462,7 +10481,7 @@ final class SqlDialectTranslator {
             return startsTemporal(nextSignificant(after + 1, tokens.size()));
         }
         if (before < 0) {
-            return false;
+            return null;
         }
         if (isComparison(tokens.get(before))) {
             return endsTemporal(significantBefore(before));
@@ -10475,9 +10494,9 @@ final class SqlDialectTranslator {
             int low = operandStart(significantBefore(before));
             int between = low < 0 ? -1 : significantBefore(low);
             return between >= 0 && tokens.get(between).isKeyword("BETWEEN")
-                    && endsTemporal(skipNot(significantBefore(between)));
+                    ? endsTemporal(skipNot(significantBefore(between))) : null;
         }
-        return false;
+        return null;
     }
 
     /** The token before an optional {@code NOT} at {@code index}, as in {@code x NOT BETWEEN a AND b}. */
@@ -10512,26 +10531,45 @@ final class SqlDialectTranslator {
         return start;
     }
 
-    private boolean endsTemporal(int end) {
+    /** The temporal type of the operand ending at {@code end}, as {@link #comparedTemporalType} reports it. */
+    private String endsTemporal(int end) {
         if (end >= 0 && tokens.get(end).isPunct(")")) {
             int open = openingFor(end, "(", ")");
             if (open >= 0 && groupingParenthesis(open)) {
-                return groupedOperandTemporal(open, end);
+                return inArithmetic(open, end, groupedOperandTemporal(open, end));
             }
         }
         int start = operandStart(end);
-        return start >= 0 && operandTemporal(start, end);
+        return start >= 0 ? inArithmetic(start, end, operandTemporal(start, end)) : null;
     }
 
-    private boolean startsTemporal(int start) {
+    /** The temporal type of the operand starting at {@code start}, as {@link #comparedTemporalType} reports it. */
+    private String startsTemporal(int start) {
         if (start < 0) {
-            return false;
+            return null;
         }
         if (tokens.get(start).isPunct("(") && groupingParenthesis(start)) {
-            return groupedOperandTemporal(start, matchingParen(start));
+            int close = matchingParen(start);
+            return inArithmetic(start, close, groupedOperandTemporal(start, close));
         }
         int end = operandEnd(start);
-        return end >= start && operandTemporal(start, end);
+        return end >= start ? inArithmetic(start, end, operandTemporal(start, end)) : null;
+    }
+
+    /**
+     * The type of the comparison's side where the temporal operand from {@code start} to {@code end} is only one term
+     * of it: a {@code +} or {@code -} next to it makes the side an arithmetic expression, whose type the operand does
+     * not tell ({@code DATE '2014-09-27' + INTERVAL 1 DAY} is a DATETIME), so it is {@link #UNKNOWN_TEMPORAL}.
+     */
+    private String inArithmetic(int start, int end, String type) {
+        if (type == null) {
+            return null;
+        }
+        int before = significantBefore(start);
+        int after = nextSignificant(end + 1, tokens.size());
+        boolean arithmetic = before >= 0 && (tokens.get(before).isPunct("+") || tokens.get(before).isPunct("-"))
+                || after >= 0 && (tokens.get(after).isPunct("+") || tokens.get(after).isPunct("-"));
+        return arithmetic ? UNKNOWN_TEMPORAL : type;
     }
 
     /**
@@ -10543,17 +10581,17 @@ final class SqlDialectTranslator {
         return before < 0 || !isName(tokens.get(before));
     }
 
-    /** Whether the parentheses from {@code open} to {@code close} hold exactly one temporal operand. */
-    private boolean groupedOperandTemporal(int open, int close) {
+    /** The temporal type of the one operand the parentheses from {@code open} to {@code close} hold, or null. */
+    private String groupedOperandTemporal(int open, int close) {
         int inner = nextSignificant(open + 1, close);
         int innerEnd = significantBefore(close);
         if (inner < 0 || innerEnd < inner) {
-            return false;
+            return null;
         }
         if (tokens.get(inner).isPunct("(") && matchingParen(inner) == innerEnd && groupingParenthesis(inner)) {
             return groupedOperandTemporal(inner, innerEnd);
         }
-        return operandEnd(inner) == innerEnd && operandTemporal(inner, innerEnd);
+        return operandEnd(inner) == innerEnd ? operandTemporal(inner, innerEnd) : null;
     }
 
     /** Where the operand starting at {@code start} ends: a call, a typed literal, a dotted path or one token. */
@@ -10577,27 +10615,31 @@ final class SqlDialectTranslator {
         return end;
     }
 
-    /** Whether the operand from {@code start} to {@code end} is a TIMESTAMP, DATETIME or DATE as written. */
-    private boolean operandTemporal(int start, int end) {
+    /**
+     * The type of the operand from {@code start} to {@code end} where it is a TIMESTAMP, DATETIME or DATE as written,
+     * {@link #UNKNOWN_TEMPORAL} where it is temporal but of a type the text does not tell, otherwise null.
+     */
+    private String operandTemporal(int start, int end) {
         Token first = tokens.get(start);
         if (first.kind != Kind.IDENT && first.kind != Kind.QIDENT) {
-            return false;
+            return null;
         }
         boolean unquoted = first.kind == Kind.IDENT;
         if (start == end && unquoted && TEMPORAL_FUNCTIONS.contains(first.upper())
                 && first.upper().startsWith("CURRENT_")) {
-            return true;
+            return temporalFunctionType(first.upper());
         }
         if (tokens.get(end).kind == Kind.STRING) {
-            return unquoted && TEMPORAL_TYPES.contains(first.upper());
+            return unquoted && TEMPORAL_TYPES.contains(first.upper()) ? first.upper() : null;
         }
         if (tokens.get(end).isPunct(")")) {
             if (first.isKeyword("CAST") || first.isKeyword("SAFE_CAST")) {
                 int type = significantBefore(end);
                 int as = type < 0 ? -1 : significantBefore(type);
-                return as >= 0 && tokens.get(as).isKeyword("AS") && TEMPORAL_TYPES.contains(tokens.get(type).upper());
+                return as >= 0 && tokens.get(as).isKeyword("AS") && TEMPORAL_TYPES.contains(tokens.get(type).upper())
+                        ? tokens.get(type).upper() : null;
             }
-            return unquoted && TEMPORAL_FUNCTIONS.contains(first.upper());
+            return unquoted && TEMPORAL_FUNCTIONS.contains(first.upper()) ? temporalFunctionType(first.upper()) : null;
         }
         List<String> path = new ArrayList<>();
         for (int i = start; i <= end; i++) {
@@ -10608,11 +10650,24 @@ final class SqlDialectTranslator {
         int select = containingSelect(start);
         if (select >= 0 && path.size() == 1 && selectAliasesVisible(select, start)
                 && renamedBySelectList(select, path.getFirst())) {
-            return false;
+            return null;
         }
         TableFieldSchema field = select < 0 ? dmlColumnField(path) : sourceColumnField(select, path);
         return field != null && !"REPEATED".equals(field.getMode()) && field.getType() != null
-                && Set.of("TIMESTAMP", "DATETIME", "DATE").contains(field.getType());
+                && TEMPORAL_TYPES.contains(field.getType()) ? field.getType() : null;
+    }
+
+    /** The type a function in {@link #TEMPORAL_FUNCTIONS} returns, from its name. */
+    private static String temporalFunctionType(String function) {
+        if (function.equals("DATE_TRUNC")) {
+            return UNKNOWN_TEMPORAL;
+        }
+        String name = function.startsWith("CURRENT_") ? function.substring("CURRENT_".length())
+                : function.startsWith("PARSE_") ? function.substring("PARSE_".length()) : function;
+        if (name.startsWith("TIMESTAMP")) {
+            return "TIMESTAMP";
+        }
+        return name.startsWith("DATETIME") ? "DATETIME" : "DATE";
     }
 
     /**
@@ -16280,6 +16335,50 @@ final class SqlDialectTranslator {
                 normalized = normalized.substring(0, normalized.length() - 1) + "Z";
             }
             return !normalized.equals(value) && TEMPORAL_STRING.matcher(normalized).matches() ? normalized : null;
+        }
+
+        private static final String DATE_FORM = "\\d{4}-\\d{1,2}-\\d{1,2}";
+        private static final String TIME_FORM = "[ Tt]\\d{1,2}:\\d{1,2}:\\d{1,2}(?:\\.\\d{1,9})?";
+        private static final Pattern DATE_VALUE = Pattern.compile(DATE_FORM);
+        private static final Pattern DATETIME_VALUE = Pattern.compile(DATE_FORM + "(?:" + TIME_FORM + ")?");
+        private static final Pattern TIMESTAMP_VALUE = Pattern.compile(DATE_FORM + "(?:" + TIME_FORM + ")?"
+                + "\\s*(?:[Zz]|[+-]\\d{1,2}(?::?\\d{2})?|([A-Za-z][A-Za-z0-9_+-]*(?:/[A-Za-z0-9_+-]+)*))?");
+
+        /**
+         * Refuses a STRING parameter value that BigQuery cannot coerce to the {@code type} it is compared with, with
+         * BigQuery's message: a DATE takes a date alone, a DATETIME no zone, and a TIMESTAMP needs the seconds of any
+         * time and a zone name BigQuery knows, matched by case ({@code utc} is refused). An unknown temporal type
+         * checks nothing.
+         */
+        static void requireTemporalValue(String value, String type) {
+            switch (type) {
+                case "DATE" -> {
+                    if (!DATE_VALUE.matcher(value).matches()) {
+                        throw invalidQuery("Invalid date: '" + value + "'");
+                    }
+                }
+                case "DATETIME" -> {
+                    if (!DATETIME_VALUE.matcher(value).matches()) {
+                        throw invalidQuery("Invalid datetime string \"" + value + "\"");
+                    }
+                }
+                case "TIMESTAMP" -> {
+                    Matcher matcher = TIMESTAMP_VALUE.matcher(value);
+                    if (!matcher.matches()) {
+                        throw invalidQuery("Invalid timestamp: '" + value + "'");
+                    }
+                    String zone = matcher.group(1);
+                    if (zone != null && !zone.equals("UTC")) {
+                        try {
+                            ZoneId.of(zone);
+                        } catch (DateTimeException e) {
+                            throw invalidQuery("Invalid time zone: " + zone);
+                        }
+                    }
+                }
+                default -> {
+                }
+            }
         }
 
         private static final Pattern STRING_LITERAL = Pattern.compile(

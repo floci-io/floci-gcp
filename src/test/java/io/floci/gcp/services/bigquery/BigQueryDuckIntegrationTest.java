@@ -3006,6 +3006,49 @@ class BigQueryDuckIntegrationTest {
     }
 
     @Test
+    void stringParameterComparedWithATemporalValueIsRefusedWhereBigQueryCannotCoerceIt() {
+        // Live BigQuery (REST jobs.query, named STRING parameter @a, 2026-11-16) refuses each of these, where DuckDB's
+        // implicit cast dropped the time part or zone and answered true.
+        for (String[] c : new String[][] {
+                {"SELECT DATE '2014-09-28' > @a AS r", "2014-09-27T12:30:00", "Invalid date: '2014-09-27T12:30:00'"},
+                {"SELECT CURRENT_DATE() > @a AS r", "2014-09-27 12:30:00", "Invalid date: '2014-09-27 12:30:00'"},
+                {"SELECT DATETIME '2014-09-27 20:00:00' > @a AS r", "2014-09-27T12:30:00Z",
+                        "Invalid datetime string \"2014-09-27T12:30:00Z\""},
+                {"SELECT TIMESTAMP '2014-09-27 20:00:00+00' > @a AS r", "2014-09-27T12:30",
+                        "Invalid timestamp: '2014-09-27T12:30'"},
+                {"SELECT TIMESTAMP '2014-09-27 20:00:00+00' > @a AS r", "2014-09-27 12:30:00 utc",
+                        "Invalid time zone: utc"},
+        }) {
+            query(Map.of("query", c[0], "useLegacySql", false, "parameterMode", "NAMED",
+                    "queryParameters", List.of(Map.of("name", "a", "parameterType", Map.of("type", "STRING"),
+                            "parameterValue", Map.of("value", c[1])))))
+                    .then().statusCode(400)
+                    .body("error.errors[0].reason", equalTo("invalidQuery"))
+                    .body("error.message", containsString(c[2]));
+        }
+        // A date alone against a DATE is accepted by both.
+        query(Map.of("query", "SELECT DATE '2014-09-28' > @a AS r", "useLegacySql", false, "parameterMode", "NAMED",
+                "queryParameters", List.of(Map.of("name", "a", "parameterType", Map.of("type", "STRING"),
+                        "parameterValue", Map.of("value", "2014-09-27")))))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("true"));
+        // DATE + INTERVAL is a DATETIME in BigQuery, so a value with a time part is not checked as a DATE, whether
+        // the DATE is a literal or a column.
+        given().contentType("application/json").body("{\"datasetReference\": {\"datasetId\": \"param_dates\"}}")
+                .when().post(BASE + "/datasets").then().statusCode(200);
+        query(Map.of("query", "CREATE TABLE param_dates.d AS SELECT DATE '2014-09-27' AS d", "useLegacySql", false))
+                .then().statusCode(200);
+        for (String sql : List.of("SELECT @a = DATE '2014-09-27' + INTERVAL 1 DAY AS r",
+                "SELECT @a = d + INTERVAL 1 DAY AS r FROM param_dates.d")) {
+            query(Map.of("query", sql, "useLegacySql", false, "parameterMode", "NAMED",
+                    "queryParameters", List.of(Map.of("name", "a", "parameterType", Map.of("type", "STRING"),
+                            "parameterValue", Map.of("value", "2014-09-28 00:00:00")))))
+                    .then().statusCode(200)
+                    .body("rows[0].f[0].v", equalTo("true"));
+        }
+    }
+
+    @Test
     @Order(5)
     void orderByAMissingFieldOfASourceStructNamesTheFieldLikeBigQuery() {
         String source = "(SELECT STRUCT(1 AS n, STRUCT('a' AS k) AS m) AS s) t";

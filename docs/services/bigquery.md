@@ -757,9 +757,6 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
   type STRING which does not coerce to INT64`), and one BigQuery rejects but DuckDB can cast, such as
   `STRUCT<n INT64>('1')`, succeeds. A value for a nested `STRUCT<...>` field must use the declared field
   names, since DuckDB casts structs by name where BigQuery matches them by position.
-- A `STRUCT<...>` type with an unnamed field, such as `CAST(STRUCT(1) AS STRUCT<INT64>)` or the nested
-  `STRUCT<a STRUCT<INT64>>` of a typed constructor, fails with `Syntax error in type: expected ">"`, where
-  BigQuery names the field `_field_1`. Name each field of a nested `STRUCT` type.
 - A `STRING` query parameter shaped like a timestamp is coerced to `DATE`, `DATETIME` or `TIMESTAMP` when
   compared with one, with an uppercase `T` and `Z`, `UTC` or a numeric offset, and to `TIMESTAMP` with a
   time zone name (`America/Los_Angeles`, `EST5EDT`), as in BigQuery. A lowercase `t` or `z`

@@ -16066,11 +16066,18 @@ final class SqlDialectTranslator {
             }
             StringBuilder fields = new StringBuilder("STRUCT(");
             boolean first = true;
+            int position = 0;
             while (pos[0] < type.size() && !type.get(pos[0]).isPunct(">")) {
                 if (!first) {
                     expect(type, pos, ",");
                 }
-                String fieldName = type.get(pos[0]++).identifierText();
+                position++;
+                // A field written as a type alone (STRUCT<INT64>, STRUCT<ARRAY<INT64>>) is unnamed, and BigQuery
+                // calls it _field_ and its position; a named field's name is followed by its type's name.
+                Token after = pos[0] + 1 < type.size() ? type.get(pos[0] + 1) : null;
+                boolean unnamed = after == null || after.isPunct(",") || after.isPunct(">") || after.isPunct("<")
+                        || after.isPunct("(");
+                String fieldName = unnamed ? "_field_" + position : type.get(pos[0]++).identifierText();
                 fields.append(first ? "" : ", ").append(DuckTypes.quoteIdentifier(fieldName)).append(' ')
                         .append(parseTypeTokens(type, pos));
                 first = false;

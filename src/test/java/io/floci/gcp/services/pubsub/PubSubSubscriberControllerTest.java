@@ -5,6 +5,7 @@ import com.google.protobuf.Empty;
 import com.google.protobuf.FieldMask;
 import com.google.protobuf.Timestamp;
 import com.google.pubsub.v1.DeadLetterPolicy;
+import com.google.pubsub.v1.ExpirationPolicy;
 import com.google.pubsub.v1.GetSubscriptionRequest;
 import com.google.pubsub.v1.ModifyAckDeadlineRequest;
 import com.google.pubsub.v1.PubsubMessage;
@@ -20,6 +21,7 @@ import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.services.iam.IamServices;
 import io.floci.gcp.services.iam.authorization.IamGrpcDeliveryAuthorization;
+import io.floci.gcp.services.pubsub.model.StoredSubscription;
 import io.grpc.Context;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
@@ -732,6 +734,54 @@ class PubSubSubscriberControllerTest {
         RetryPolicy policy = responseObserver.values.get(0).getRetryPolicy();
         assertEquals(2, policy.getMinimumBackoff().getSeconds());
         assertEquals(30, policy.getMaximumBackoff().getSeconds());
+    }
+
+    @Test
+    void createSubscriptionOverGrpcStoresLabelsRetentionAndExpirationPolicy() {
+        service.createTopic("projects/p1/topics/t1");
+
+        RecordingObserver<Subscription> responseObserver = new RecordingObserver<>();
+        controller.createSubscription(Subscription.newBuilder()
+                .setName("projects/p1/subscriptions/s1")
+                .setTopic("projects/p1/topics/t1")
+                .putLabels("env", "dev")
+                .setRetainAckedMessages(true)
+                // Qualified: com.google.protobuf.Duration clashes with the imported java.time.Duration.
+                .setMessageRetentionDuration(com.google.protobuf.Duration.newBuilder().setSeconds(3600))
+                .setExpirationPolicy(ExpirationPolicy.newBuilder()
+                        .setTtl(com.google.protobuf.Duration.newBuilder().setSeconds(172800)))
+                .build(), responseObserver);
+
+        assertNull(responseObserver.error.get());
+        Subscription created = responseObserver.values.get(0);
+        assertEquals(Map.of("env", "dev"), created.getLabelsMap());
+        assertTrue(created.getRetainAckedMessages());
+        assertEquals(3600, created.getMessageRetentionDuration().getSeconds());
+        assertEquals(172800, created.getExpirationPolicy().getTtl().getSeconds());
+
+        RecordingObserver<Subscription> getObserver = new RecordingObserver<>();
+        controller.getSubscription(GetSubscriptionRequest.newBuilder()
+                .setSubscription("projects/p1/subscriptions/s1").build(), getObserver);
+        assertNull(getObserver.error.get());
+        assertEquals(created, getObserver.values.get(0));
+        // Stored in the REST shapes, so a REST read sees the same values.
+        StoredSubscription stored = service.getSubscription("projects/p1/subscriptions/s1");
+        assertEquals("3600s", stored.getMessageRetentionDuration());
+        assertEquals(Map.of("ttl", "172800s"), stored.getExpirationPolicy());
+    }
+
+    @Test
+    void getSubscriptionOverGrpcReturnsAnExpirationPolicyStoredOverRest() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10,
+                null, false, null, null, null, null, Map.of("ttl", "86400s"), null, null, 0, false, false);
+
+        RecordingObserver<Subscription> responseObserver = new RecordingObserver<>();
+        controller.getSubscription(GetSubscriptionRequest.newBuilder()
+                .setSubscription("projects/p1/subscriptions/s1").build(), responseObserver);
+
+        assertNull(responseObserver.error.get());
+        assertEquals(86400, responseObserver.values.get(0).getExpirationPolicy().getTtl().getSeconds());
     }
 
     @Test

@@ -8,6 +8,7 @@ import com.google.pubsub.v1.CreateSnapshotRequest;
 import com.google.pubsub.v1.DeadLetterPolicy;
 import com.google.pubsub.v1.DeleteSnapshotRequest;
 import com.google.pubsub.v1.DeleteSubscriptionRequest;
+import com.google.pubsub.v1.ExpirationPolicy;
 import com.google.pubsub.v1.GetSnapshotRequest;
 import com.google.pubsub.v1.GetSubscriptionRequest;
 import com.google.pubsub.v1.ListSnapshotsRequest;
@@ -66,9 +67,13 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
             DeadLetterPolicy deadLetterPolicy = request.getDeadLetterPolicy();
             StoredSubscription stored = service.createSubscription(
                     request.getName(), request.getTopic(), request.getAckDeadlineSeconds(),
-                    null, false, null, request.getFilter(),
+                    new LinkedHashMap<>(request.getLabelsMap()), request.getRetainAckedMessages(),
+                    request.hasMessageRetentionDuration()
+                            ? request.getMessageRetentionDuration().getSeconds() + "s" : null,
+                    request.getFilter(),
                     request.hasPushConfig() ? request.getPushConfig().getPushEndpoint() : null,
-                    null, null,
+                    null,
+                    SubscriptionExpirationPolicy.toStored(request.hasExpirationPolicy(), request.getExpirationPolicy()),
                     SubscriptionRetryPolicy.toStored(request.hasRetryPolicy(), request.getRetryPolicy()),
                     deadLetterPolicy.getDeadLetterTopic(), deadLetterPolicy.getMaxDeliveryAttempts(),
                     request.getEnableMessageOrdering(), request.getEnableExactlyOnceDelivery());
@@ -510,6 +515,10 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
         RetryPolicy retryPolicy = SubscriptionRetryPolicy.toProto(stored.getRetryPolicy());
         if (retryPolicy != null) {
             builder.setRetryPolicy(retryPolicy);
+        }
+        ExpirationPolicy expirationPolicy = SubscriptionExpirationPolicy.toProto(stored.getExpirationPolicy());
+        if (expirationPolicy != null) {
+            builder.setExpirationPolicy(expirationPolicy);
         }
         return builder.build();
     }

@@ -34,4 +34,31 @@ describe('GCS copy/rewrite metadata', () => {
     const [metadata] = await bucket.file('dst-copy').getMetadata();
     expect(metadata.metadata).toMatchObject({ tag: 'keep-me' });
   });
+
+  it('copy restores noncurrent generation when source file specifies generation', async () => {
+    const versionedBucketName = uniqueName('copy-ver-bucket');
+    const [versionedBucket] = await storage.createBucket(versionedBucketName, {
+      versioning: { enabled: true },
+    });
+    try {
+      const liveFile = versionedBucket.file('source.txt');
+      await liveFile.save('first', { contentType: 'text/plain' });
+      const [firstMeta] = await liveFile.getMetadata();
+
+      await liveFile.save('second', { contentType: 'text/plain' });
+      const [secondMeta] = await liveFile.getMetadata();
+
+      await versionedBucket
+        .file('source.txt', { generation: firstMeta.generation })
+        .copy(liveFile, {
+          preconditionOpts: { ifGenerationMatch: secondMeta.generation },
+        });
+
+      const [contents] = await liveFile.download();
+      expect(contents.toString('utf8')).toBe('first');
+    } finally {
+      await versionedBucket.deleteFiles({ versions: true, force: true }).catch(() => {});
+      await versionedBucket.delete().catch(() => {});
+    }
+  });
 });

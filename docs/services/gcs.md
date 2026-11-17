@@ -378,7 +378,7 @@ handles, or redirection. Unsupported RPCs return gRPC `UNIMPLEMENTED`.
 - Decompressive transcoding (an object stored with `contentEncoding: gzip` is served
   decompressed to a client that did not send `Accept-Encoding: gzip`, and as stored to one
   that did; `Range` is ignored on a transcoded read)
-- `CopyObject`
+- `CopyObject` (including `sourceGeneration` to copy or restore a noncurrent version)
 - `MoveObject`
 - `HeadObject`
 - `PatchObject` (update metadata: `contentType`, `contentDisposition`, `contentEncoding`, `contentLanguage`, `cacheControl`, `customTime`, custom metadata)

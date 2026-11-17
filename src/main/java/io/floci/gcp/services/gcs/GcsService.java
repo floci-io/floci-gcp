@@ -1675,21 +1675,29 @@ public class GcsService {
     public GcsRewriteResult rewriteObject(String srcBucket, String srcObject, String dstBucket, String dstObject,
             Long maxBytesPerCall, String rewriteToken, String destinationStorageClass,
             GcsObjectPreconditions preconditions, String baseUrl) {
-        return rewriteObject(srcBucket, srcObject, dstBucket, dstObject, maxBytesPerCall, rewriteToken,
+        return rewriteObject(srcBucket, srcObject, null, dstBucket, dstObject, maxBytesPerCall, rewriteToken,
                 destinationStorageClass, preconditions, baseUrl, null);
     }
 
     public GcsRewriteResult rewriteObject(String srcBucket, String srcObject, String dstBucket, String dstObject,
             Long maxBytesPerCall, String rewriteToken, String destinationStorageClass,
             GcsObjectPreconditions preconditions, String baseUrl, Runnable requireOverwritePermission) {
+        return rewriteObject(srcBucket, srcObject, null, dstBucket, dstObject, maxBytesPerCall, rewriteToken,
+                destinationStorageClass, preconditions, baseUrl, requireOverwritePermission);
+    }
+
+    public GcsRewriteResult rewriteObject(String srcBucket, String srcObject, String srcGeneration,
+            String dstBucket, String dstObject, Long maxBytesPerCall, String rewriteToken,
+            String destinationStorageClass, GcsObjectPreconditions preconditions, String baseUrl,
+            Runnable requireOverwritePermission) {
         if (maxBytesPerCall != null && (maxBytesPerCall <= 0 || maxBytesPerCall % ONE_MIB != 0)) {
             throw GcpException.invalidArgument(
                     "maxBytesRewrittenPerCall must be an integral multiple of 1 MiB (1048576), got: " + maxBytesPerCall);
         }
-        GcsObjectMeta source = getObjectMeta(srcBucket, srcObject);
-        long objectSize = source.getSize() != null ? Long.parseLong(source.getSize()) : 0L;
 
         GcsRewriteSession session;
+        GcsObjectMeta source;
+        long objectSize;
         if (rewriteToken != null && !rewriteToken.isBlank()) {
             session = rewriteSessions.get(rewriteToken);
             if (session == null) {
@@ -1700,6 +1708,14 @@ public class GcsService {
                 throw GcpException.invalidArgument(
                         "rewriteToken does not match the requested source and destination");
             }
+            if (srcGeneration != null && !srcGeneration.isBlank()
+                    && !session.sourceGenerationUnchanged(srcGeneration)) {
+                throw GcpException.invalidArgument(
+                        "Invalid rewriteToken: sourceGeneration must not change across rewrite calls");
+            }
+            source = session.explicitSourceGeneration()
+                    ? getObjectMeta(srcBucket, srcObject, session.srcGeneration())
+                    : getObjectMeta(srcBucket, srcObject);
             if (!session.sourceGenerationUnchanged(source.getGeneration())) {
                 throw GcpException.invalidArgument(
                         "rewriteToken refers to a source generation that has since been replaced");
@@ -1712,10 +1728,16 @@ public class GcsService {
             }
             // Later calls may omit the request fields; the first call's values stand.
             destinationStorageClass = session.destinationStorageClass();
+            objectSize = session.objectSize();
         } else {
+            boolean explicitSourceGeneration = srcGeneration != null && !srcGeneration.isBlank();
+            source = explicitSourceGeneration
+                    ? getObjectMeta(srcBucket, srcObject, srcGeneration)
+                    : getObjectMeta(srcBucket, srcObject);
+            objectSize = source.getSize() != null ? Long.parseLong(source.getSize()) : 0L;
             session = new GcsRewriteSession(srcBucket, srcObject, source.getGeneration(),
-                    dstBucket, dstObject, destinationStorageClass, objectSize, 0L, maxBytesPerCall,
-                    preconditions);
+                    explicitSourceGeneration, dstBucket, dstObject, destinationStorageClass,
+                    objectSize, 0L, maxBytesPerCall, preconditions);
         }
 
         // The per-call limit "only applies to requests where the source and destination span
@@ -1776,6 +1798,14 @@ public class GcsService {
     public GcsObjectMeta copyObject(String srcBucket, String srcObject, String srcGeneration,
             String dstBucket, String dstObject, GcsObjectPreconditions preconditions, String baseUrl) {
         return copyObject(srcBucket, srcObject, srcGeneration, dstBucket, dstObject, null, preconditions, baseUrl);
+    }
+
+    public GcsObjectMeta copyObject(String srcBucket, String srcObject, String srcGeneration,
+            String dstBucket, String dstObject, GcsObjectPreconditions preconditions, String baseUrl,
+            Runnable requireOverwritePermission) {
+        String normalizedGeneration = srcGeneration != null && !srcGeneration.isBlank() ? srcGeneration : null;
+        return copyObject(srcBucket, srcObject, normalizedGeneration, dstBucket, dstObject, null, preconditions,
+                baseUrl, requireOverwritePermission);
     }
 
     /**

@@ -36,6 +36,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
@@ -1867,6 +1868,369 @@ class BigQueryServiceTest {
     }
 
     @Test
+    void streamingAppendDoesNotWaitForAReadOnlyProceduralQuery() throws Exception {
+        CountDownLatch queryStarted = new CountDownLatch(1);
+        CountDownLatch finishQuery = new CountDownLatch(1);
+        BigQuerySqlEngine blockingEngine = mock(BigQuerySqlEngine.class);
+        when(blockingEngine.execute(any(), any())).thenAnswer(invocation -> {
+            queryStarted.countDown();
+            if (!finishQuery.await(10, TimeUnit.SECONDS)) {
+                throw new AssertionError("timed out waiting to finish the procedural query");
+            }
+            return new BigQuerySqlEngine.Result(new TableSchema(List.of(field("value", "INTEGER", null))),
+                    List.of(Map.of("value", 1)), "SELECT", 0);
+        });
+        BigQueryService concurrentService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), blockingEngine);
+        concurrentService.createDataset(PROJECT, newDataset(DATASET));
+        concurrentService.createTable(PROJECT, DATASET, newTable(DATASET, TABLE));
+
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
+            Future<StoredJob> query = executor.submit(() -> concurrentService.query(PROJECT, null, null,
+                    BigQueryService.QueryOptions.of("DECLARE tier INT64 DEFAULT 1; SELECT tier AS value;", null)));
+            assertTrue(queryStarted.await(5, TimeUnit.SECONDS));
+            Future<?> append = executor.submit(() -> concurrentService.appendRows(PROJECT, DATASET, TABLE,
+                    List.of(Map.of("name", "concurrent", "age", 1))));
+            try {
+                append.get(3, TimeUnit.SECONDS);
+            } finally {
+                finishQuery.countDown();
+            }
+            query.get(5, TimeUnit.SECONDS);
+        }
+
+        assertEquals(1, concurrentService.listTableData(PROJECT, DATASET, TABLE).rows().size());
+    }
+
+    @Test
+    void streamingAppendDoesNotWaitForCreateTableQueryExecution() throws Exception {
+        CountDownLatch queryStarted = new CountDownLatch(1);
+        CountDownLatch finishQuery = new CountDownLatch(1);
+        BigQuerySqlEngine blockingEngine = mock(BigQuerySqlEngine.class);
+        when(blockingEngine.execute(any(), any())).thenAnswer(invocation -> {
+            queryStarted.countDown();
+            if (!finishQuery.await(10, TimeUnit.SECONDS)) {
+                throw new AssertionError("timed out waiting to finish the table query");
+            }
+            return new BigQuerySqlEngine.Result(new TableSchema(List.of(field("value", "INTEGER", null))),
+                    List.of(Map.of("value", 1)), "SELECT", 0);
+        });
+        BigQueryService concurrentService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), blockingEngine);
+        concurrentService.createDataset(PROJECT, newDataset(DATASET));
+        concurrentService.createTable(PROJECT, DATASET, newTable(DATASET, TABLE));
+
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
+            Future<StoredJob> query = executor.submit(() -> concurrentService.query(PROJECT, null, null,
+                    "CREATE TABLE ds1.output AS SELECT 1 AS value", null));
+            assertTrue(queryStarted.await(5, TimeUnit.SECONDS));
+            Future<?> append = executor.submit(() -> concurrentService.appendRows(PROJECT, DATASET, TABLE,
+                    List.of(Map.of("name", "concurrent", "age", 1))));
+            try {
+                append.get(3, TimeUnit.SECONDS);
+            } finally {
+                finishQuery.countDown();
+            }
+            query.get(5, TimeUnit.SECONDS);
+        }
+
+        assertEquals(1, concurrentService.listTableData(PROJECT, DATASET, TABLE).rows().size());
+        assertEquals(1, concurrentService.listTableData(PROJECT, DATASET, "output").rows().size());
+    }
+
+    @Test
+    void appendToSelfReferencedCreateReplaceWaitsForTablePublication() throws Exception {
+        CountDownLatch queryStarted = new CountDownLatch(1);
+        CountDownLatch finishQuery = new CountDownLatch(1);
+        CountDownLatch appendStarted = new CountDownLatch(1);
+        CountDownLatch appendFinished = new CountDownLatch(1);
+        BigQuerySqlEngine blockingEngine = mock(BigQuerySqlEngine.class);
+        when(blockingEngine.execute(any(), any())).thenAnswer(invocation -> {
+            queryStarted.countDown();
+            if (!finishQuery.await(10, TimeUnit.SECONDS)) {
+                throw new AssertionError("timed out waiting to finish the self-referencing table query");
+            }
+            return new BigQuerySqlEngine.Result(newTable(DATASET, TABLE).getSchema(),
+                    List.of(Map.of("name", "from-query", "age", 2)), "SELECT", 0);
+        });
+        BigQueryService concurrentService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), blockingEngine);
+        concurrentService.createDataset(PROJECT, newDataset(DATASET));
+        concurrentService.createTable(PROJECT, DATASET, newTable(DATASET, TABLE));
+        concurrentService.appendRows(PROJECT, DATASET, TABLE, List.of(Map.of("name", "before", "age", 1)));
+
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
+            Future<StoredJob> query = executor.submit(() -> concurrentService.query(PROJECT, null, null,
+                    "CREATE OR REPLACE TABLE ds1.t1 AS SELECT * FROM ds1.t1", null));
+            assertTrue(queryStarted.await(5, TimeUnit.SECONDS));
+            Future<?> append = executor.submit(() -> {
+                appendStarted.countDown();
+                concurrentService.appendRows(PROJECT, DATASET, TABLE, List.of(Map.of("name", "after", "age", 3)));
+                appendFinished.countDown();
+            });
+            assertTrue(appendStarted.await(5, TimeUnit.SECONDS));
+            try {
+                assertFalse(appendFinished.await(100, TimeUnit.MILLISECONDS),
+                        "self-referencing replacement must serialize with appends to its source table");
+            } finally {
+                finishQuery.countDown();
+            }
+            query.get(5, TimeUnit.SECONDS);
+            append.get(5, TimeUnit.SECONDS);
+        }
+
+        assertEquals(List.of("from-query", "after"), concurrentService.listTableData(PROJECT, DATASET, TABLE)
+                .rows().stream().map(row -> String.valueOf(row.getF().getFirst().getV())).toList());
+    }
+
+    @Test
+    void beginBlockCreatesTableAfterDeclaringFunctions() {
+        BigQuerySqlEngine blockingEngine = mock(BigQuerySqlEngine.class);
+        when(blockingEngine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
+                newTable(DATASET, TABLE).getSchema(), List.of(Map.of("name", "output-row", "age", 2)),
+                "SELECT", 0));
+        BigQueryService scriptService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), blockingEngine);
+        scriptService.createDataset(PROJECT, newDataset(DATASET));
+        scriptService.createTable(PROJECT, DATASET, newTable(DATASET, "source_table"));
+
+        StoredJob job = scriptService.query(PROJECT, null, null, """
+                BEGIN
+                  CREATE TEMP FUNCTION first_function(input INT64) RETURNS INT64 AS (input);
+                  CREATE TEMP FUNCTION second_function(input INT64) RETURNS INT64 AS (input);
+                  CREATE TEMP FUNCTION transform_value(input INT64) RETURNS INT64 AS (input);
+                  CREATE OR REPLACE TABLE ds1.output_table AS
+                  SELECT name, transform_value(age) AS age FROM ds1.source_table;
+                END;
+                """, null);
+
+        assertEquals("SCRIPT", job.getStatementType());
+        assertEquals(List.of("output-row"), scriptService.listTableData(PROJECT, DATASET, "output_table").rows()
+                .stream().map(row -> String.valueOf(row.getF().getFirst().getV())).toList());
+    }
+
+    @Test
+    void appendToAViewSourceWaitsForTheReplacementThatReadsIt() throws Exception {
+        CountDownLatch queryStarted = new CountDownLatch(1);
+        CountDownLatch finishQuery = new CountDownLatch(1);
+        CountDownLatch appendFinished = new CountDownLatch(1);
+        BigQuerySqlEngine blockingEngine = mock(BigQuerySqlEngine.class);
+        // createTable validates a view's query, so the engine answers that one before it starts blocking.
+        when(blockingEngine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
+                newTable(DATASET, TABLE).getSchema(), List.of(), "SELECT", 0));
+        BigQueryService concurrentService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), blockingEngine);
+        concurrentService.createDataset(PROJECT, newDataset(DATASET));
+        concurrentService.createTable(PROJECT, DATASET, newTable(DATASET, TABLE));
+        concurrentService.appendRows(PROJECT, DATASET, TABLE, List.of(Map.of("name", "before", "age", 1)));
+        Table view = newView(DATASET, "source_view", "SELECT * FROM ds1.t1");
+        concurrentService.createTable(PROJECT, DATASET, view);
+        when(blockingEngine.execute(any(), any())).thenAnswer(invocation -> {
+            queryStarted.countDown();
+            if (!finishQuery.await(10, TimeUnit.SECONDS)) {
+                throw new AssertionError("timed out waiting to finish the view query");
+            }
+            return new BigQuerySqlEngine.Result(newTable(DATASET, TABLE).getSchema(),
+                    List.of(Map.of("name", "from-query", "age", 2)), "SELECT", 0);
+        });
+
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
+            Future<StoredJob> query = executor.submit(() -> concurrentService.query(PROJECT, null, null,
+                    "CREATE OR REPLACE TABLE ds1.t1 AS SELECT * FROM ds1.source_view", null));
+            assertTrue(queryStarted.await(5, TimeUnit.SECONDS));
+            Future<?> append = executor.submit(() -> {
+                concurrentService.appendRows(PROJECT, DATASET, TABLE, List.of(Map.of("name", "after", "age", 3)));
+                appendFinished.countDown();
+            });
+            try {
+                assertFalse(appendFinished.await(100, TimeUnit.MILLISECONDS),
+                        "a replacement that reads the target through a view must serialize with its appends");
+            } finally {
+                finishQuery.countDown();
+            }
+            query.get(5, TimeUnit.SECONDS);
+            append.get(5, TimeUnit.SECONDS);
+        }
+
+        assertEquals(List.of("from-query", "after"), concurrentService.listTableData(PROJECT, DATASET, TABLE)
+                .rows().stream().map(row -> String.valueOf(row.getF().getFirst().getV())).toList());
+    }
+
+    @Test
+    void appendToATargetReadThroughAViewInAnotherDatasetWaitsForTheReplacement() throws Exception {
+        CountDownLatch queryStarted = new CountDownLatch(1);
+        CountDownLatch finishQuery = new CountDownLatch(1);
+        CountDownLatch appendFinished = new CountDownLatch(1);
+        BigQuerySqlEngine blockingEngine = mock(BigQuerySqlEngine.class);
+        // createTable validates a view's query, so the engine answers that one before it starts blocking.
+        when(blockingEngine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
+                newTable(DATASET, TABLE).getSchema(), List.of(), "SELECT", 0));
+        BigQueryService concurrentService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), blockingEngine);
+        concurrentService.createDataset(PROJECT, newDataset(DATASET));
+        concurrentService.createDataset(PROJECT, newDataset("ds2"));
+        concurrentService.createTable(PROJECT, DATASET, newTable(DATASET, TABLE));
+        concurrentService.createTable(PROJECT, "ds2", newView("ds2", "other_view", "SELECT * FROM ds1.t1"));
+        when(blockingEngine.execute(any(), any())).thenAnswer(invocation -> {
+            queryStarted.countDown();
+            if (!finishQuery.await(10, TimeUnit.SECONDS)) {
+                throw new AssertionError("timed out waiting to finish the cross-dataset view query");
+            }
+            return new BigQuerySqlEngine.Result(newTable(DATASET, TABLE).getSchema(),
+                    List.of(Map.of("name", "from-query", "age", 2)), "SELECT", 0);
+        });
+
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
+            Future<StoredJob> query = executor.submit(() -> concurrentService.query(PROJECT, null, null,
+                    "CREATE OR REPLACE TABLE ds1.t1 AS SELECT * FROM ds2.other_view", null));
+            assertTrue(queryStarted.await(5, TimeUnit.SECONDS));
+            Future<?> append = executor.submit(() -> {
+                concurrentService.appendRows(PROJECT, DATASET, TABLE, List.of(Map.of("name", "after", "age", 3)));
+                appendFinished.countDown();
+            });
+            try {
+                assertFalse(appendFinished.await(100, TimeUnit.MILLISECONDS),
+                        "a view in another dataset that reads the target must serialize with its appends");
+            } finally {
+                finishQuery.countDown();
+            }
+            query.get(5, TimeUnit.SECONDS);
+            append.get(5, TimeUnit.SECONDS);
+        }
+
+        assertEquals(List.of("from-query", "after"), concurrentService.listTableData(PROJECT, DATASET, TABLE)
+                .rows().stream().map(row -> String.valueOf(row.getF().getFirst().getV())).toList());
+    }
+
+    @Test
+    void appendsAreRejectedOnceTheWritesAreStopped() {
+        seedTable();
+
+        service.stopAppends();
+
+        GcpException rejected = assertThrows(GcpException.class, () -> service.appendRows(PROJECT, DATASET, TABLE,
+                List.of(Map.of("name", "after-shutdown", "age", 1))));
+        assertEquals(503, rejected.getHttpStatus());
+        assertEquals(0, service.listTableData(PROJECT, DATASET, TABLE).rows().size());
+    }
+
+    @Test
+    void appendToATableAViewDoesNotReadDoesNotWaitForTheReplacement() throws Exception {
+        CountDownLatch queryStarted = new CountDownLatch(1);
+        CountDownLatch finishQuery = new CountDownLatch(1);
+        BigQuerySqlEngine blockingEngine = mock(BigQuerySqlEngine.class);
+        // createTable validates a view's query, so the engine answers that one before it starts blocking.
+        when(blockingEngine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
+                newTable(DATASET, TABLE).getSchema(), List.of(), "SELECT", 0));
+        BigQueryService concurrentService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), blockingEngine);
+        concurrentService.createDataset(PROJECT, newDataset(DATASET));
+        concurrentService.createTable(PROJECT, DATASET, newTable(DATASET, TABLE));
+        concurrentService.createTable(PROJECT, DATASET, newTable(DATASET, "other_table"));
+        concurrentService.createTable(PROJECT, DATASET,
+                newView(DATASET, "other_view", "SELECT * FROM ds1.other_table"));
+        when(blockingEngine.execute(any(), any())).thenAnswer(invocation -> {
+            queryStarted.countDown();
+            if (!finishQuery.await(10, TimeUnit.SECONDS)) {
+                throw new AssertionError("timed out waiting to finish the view query");
+            }
+            return new BigQuerySqlEngine.Result(newTable(DATASET, TABLE).getSchema(),
+                    List.of(Map.of("name", "other-row", "age", 2)), "SELECT", 0);
+        });
+
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
+            Future<StoredJob> query = executor.submit(() -> concurrentService.query(PROJECT, null, null,
+                    "CREATE OR REPLACE TABLE ds1.replacement AS SELECT * FROM ds1.other_view", null));
+            assertTrue(queryStarted.await(5, TimeUnit.SECONDS));
+            Future<?> append = executor.submit(() -> concurrentService.appendRows(PROJECT, DATASET, TABLE,
+                    List.of(Map.of("name", "concurrent", "age", 1))));
+            try {
+                append.get(3, TimeUnit.SECONDS);
+            } finally {
+                finishQuery.countDown();
+            }
+            query.get(5, TimeUnit.SECONDS);
+        }
+
+        assertEquals(1, concurrentService.listTableData(PROJECT, DATASET, "replacement").rows().size());
+        assertEquals(1, concurrentService.listTableData(PROJECT, DATASET, TABLE).rows().size());
+    }
+
+    @Test
+    void replacementStagesTheViewDefinitionThatLetItRunUnlocked() {
+        AtomicReference<BigQuerySqlEngine.Tables> staged = new AtomicReference<>();
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        // createTable validates a view's query, so the engine answers that one before the replacement runs.
+        when(engine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
+                newTable(DATASET, TABLE).getSchema(), List.of(), "SELECT", 0));
+        BigQueryService concurrentService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), engine);
+        concurrentService.createDataset(PROJECT, newDataset(DATASET));
+        concurrentService.createTable(PROJECT, DATASET, newTable(DATASET, TABLE));
+        concurrentService.createTable(PROJECT, DATASET, newTable(DATASET, "other_table"));
+        concurrentService.createTable(PROJECT, DATASET,
+                newView(DATASET, "other_view", "SELECT * FROM ds1.other_table"));
+        when(engine.execute(any(), any())).thenAnswer(invocation -> {
+            // A query replaces the view so that it reads the target, after the definition was checked and
+            // before the engine stages it. Staging that definition would read rows the replacement erases.
+            Table changed = new Table();
+            changed.setExtra("view", Map.of("query", "SELECT * FROM ds1.t1"));
+            concurrentService.patchTable(PROJECT, DATASET, "other_view", changed);
+            staged.set(invocation.getArgument(1));
+            return new BigQuerySqlEngine.Result(newTable(DATASET, TABLE).getSchema(),
+                    List.of(Map.of("name", "other-row", "age", 2)), "SELECT", 0);
+        });
+
+        concurrentService.query(PROJECT, null, null,
+                "CREATE OR REPLACE TABLE ds1.replacement AS SELECT * FROM ds1.other_view", null);
+
+        assertEquals("SELECT * FROM ds1.other_table", staged.get().table(DATASET, "other_view").viewQuery(),
+                "the replacement must stage the view definition that decided it could run unlocked");
+    }
+
+    @Test
+    void appendToAMatchingWildcardSourceWaitsForTheReplacement() throws Exception {
+        CountDownLatch queryStarted = new CountDownLatch(1);
+        CountDownLatch finishQuery = new CountDownLatch(1);
+        CountDownLatch appendFinished = new CountDownLatch(1);
+        BigQuerySqlEngine blockingEngine = mock(BigQuerySqlEngine.class);
+        when(blockingEngine.execute(any(), any())).thenAnswer(invocation -> {
+            queryStarted.countDown();
+            if (!finishQuery.await(10, TimeUnit.SECONDS)) {
+                throw new AssertionError("timed out waiting to finish the wildcard query");
+            }
+            return new BigQuerySqlEngine.Result(newTable(DATASET, TABLE).getSchema(),
+                    List.of(Map.of("name", "from-wildcard", "age", 2)), "SELECT", 0);
+        });
+        BigQueryService concurrentService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), blockingEngine);
+        concurrentService.createDataset(PROJECT, newDataset(DATASET));
+        concurrentService.createTable(PROJECT, DATASET, newTable(DATASET, TABLE));
+        concurrentService.createTable(PROJECT, DATASET, newTable(DATASET, "t2"));
+
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
+            Future<StoredJob> query = executor.submit(() -> concurrentService.query(PROJECT, null, null,
+                    "CREATE OR REPLACE TABLE ds1.t1 AS SELECT * FROM `ds1.t*`", null));
+            assertTrue(queryStarted.await(5, TimeUnit.SECONDS));
+            Future<?> append = executor.submit(() -> {
+                concurrentService.appendRows(PROJECT, DATASET, TABLE, List.of(Map.of("name", "after", "age", 3)));
+                appendFinished.countDown();
+            });
+            try {
+                assertFalse(appendFinished.await(100, TimeUnit.MILLISECONDS),
+                        "a replacement through a wildcard that matches the target must serialize with its appends");
+            } finally {
+                finishQuery.countDown();
+            }
+            query.get(5, TimeUnit.SECONDS);
+            append.get(5, TimeUnit.SECONDS);
+        }
+
+        assertEquals(List.of("from-wildcard", "after"), concurrentService.listTableData(PROJECT, DATASET, TABLE)
+                .rows().stream().map(row -> String.valueOf(row.getF().getFirst().getV())).toList());
+    }
+
+    @Test
     void wholeTableDeleteWaitsForAnInFlightAppendAndWins() throws Exception {
         CountDownLatch writeStarted = new CountDownLatch(1);
         CountDownLatch allowWrite = new CountDownLatch(1);
@@ -2787,6 +3151,13 @@ class BigQueryServiceTest {
                 field("name", "STRING", null),
                 field("age", "INTEGER", null))));
         return t;
+    }
+
+    private Table newView(String datasetId, String tableId, String query) {
+        Table view = newTable(datasetId, tableId);
+        view.setType("VIEW");
+        view.setViewDefinition(new LinkedHashMap<>(Map.of("query", query)));
+        return view;
     }
 
     private static TableFieldSchema field(String name, String type, String mode) {

@@ -52,6 +52,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collection;
 import java.util.Deque;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -392,10 +393,14 @@ public class BigQueryService {
     }
 
     public Table getTable(String projectId, String datasetId, String tableId) {
+        return storedTable(datasetId, tableId).orElseThrow(() -> GcpException.notFound(
+                "Not found: Table " + projectId + ":" + datasetId + "." + tableId));
+    }
+
+    /** The stored table, unless it has expired; a missing or expired one is empty. */
+    private Optional<Table> storedTable(String datasetId, String tableId) {
         return tableStore.get(tableKey(datasetId, tableId))
-                .filter(table -> !expire(datasetId, tableId, table))
-                .orElseThrow(() -> GcpException.notFound(
-                        "Not found: Table " + projectId + ":" + datasetId + "." + tableId));
+                .filter(table -> !expire(datasetId, tableId, table));
     }
 
     public List<Table> listTables(String projectId, String datasetId) {
@@ -574,7 +579,8 @@ public class BigQueryService {
 
     /**
      * Appends rows and, in the same write, records {@code streamRows}: for each Storage Write
-     * stream, how many of its rows the table now holds in total.
+     * stream, how many of its rows the table now holds in total. Rejected once {@link #stopAppends}
+     * has run, so a worker still waiting for the lock cannot write after the final flush.
      */
     void appendRows(String projectId, String datasetId, String tableId, List<Map<String, Object>> rows,
                     Map<String, Long> streamRows) {
@@ -583,6 +589,9 @@ public class BigQueryService {
         }
         String key = tableKey(datasetId, tableId);
         synchronized (writeLock) {
+            if (appendsStopped) {
+                throw GcpException.unavailable("BigQuery table writes are stopped: the emulator is shutting down");
+            }
             Table table = getTable(projectId, datasetId, tableId);
             StoredTableData data = dataStore.get(key).orElseGet(StoredTableData::new);
             synchronized (data) {
@@ -599,6 +608,17 @@ public class BigQueryService {
             table.setNumRows(String.valueOf(allRows(data).size()));
             table.setLastModifiedTime(nowMillis());
             tableStore.put(key, table);
+        }
+    }
+
+    /**
+     * Stops table appends for the rest of the process. It takes {@code writeLock}, so it returns only once an
+     * append that already holds the lock has finished, and every later one is rejected: nothing can write rows
+     * after the emulator's final flush, even a worker that a bounded join could not stop.
+     */
+    void stopAppends() {
+        synchronized (writeLock) {
+            appendsStopped = true;
         }
     }
 
@@ -854,9 +874,9 @@ public class BigQueryService {
                 job.setDryRun(true);
                 return job;
             }
-            synchronized (writeLock) {
-                executeProceduralScript(dataProjectId, projectId, procedural, options, job, jobLocation);
-            }
+            // Request-local script queries and temporary tables can wait on DuckDB. Persistent mutations
+            // acquire writeLock in their operation-specific critical section, not for the whole script.
+            executeProceduralScript(dataProjectId, projectId, procedural, options, job, jobLocation);
             job.setLocation(jobLocation.resolved());
             jobStore.put(job.getJobId(), job);
             return job;
@@ -877,13 +897,11 @@ public class BigQueryService {
                 job.setDryRun(true);
                 return job;
             }
-            synchronized (writeLock) {
-                inProject(projectId, targetProjectId, () -> {
-                    admitWrittenDataset(statement, jobLocation);
-                    executeStatement(targetProjectId, projectId, statement, options, job, jobLocation);
-                    return null;
-                });
-            }
+            inProject(projectId, targetProjectId, () -> {
+                admitWrittenDataset(statement, jobLocation);
+                executeStatement(targetProjectId, projectId, statement, options, job, jobLocation);
+                return null;
+            });
             job.setLocation(jobLocation.resolved());
             jobStore.put(job.getJobId(), job);
             return job;
@@ -981,6 +999,7 @@ public class BigQueryService {
     // ── DML / DDL ────────────────────────────────────────────────────────────────
 
     private final Object writeLock = new Object();
+    private volatile boolean appendsStopped;
 
     /**
      * The resource checks {@link #executeStatement} makes, without any of its writes. A dry run
@@ -5109,70 +5128,92 @@ public class BigQueryService {
         SqlDialectTranslator.TableRef target = statement.target();
         switch (statement.kind()) {
             case INSERT, UPDATE, DELETE, MERGE -> {
-                BigQuerySqlEngine.DmlResult result = engine.executeDml(request(projectId, jobProjectId,
-                        options.sql(), options, false), tables(projectId, jobLocation));
-                replaceRows(projectId, target, result.tableRows());
-                recordDmlStatistics(job, statement.kind(), result);
+                // DML publishes a full replacement row set, so serialize it with appends through staging.
+                synchronized (writeLock) {
+                    BigQuerySqlEngine.DmlResult result = engine.executeDml(request(projectId, jobProjectId, options.sql(), options,
+                            false), tables(projectId, jobLocation));
+                    replaceRows(projectId, target, result.tableRows());
+                    recordDmlStatistics(job, statement.kind(), result);
+                }
             }
             case TRUNCATE -> {
-                Table table = getTable(projectId, target.datasetId(), target.tableId());
-                if (table.viewQuery() != null) {
-                    throw QueryEngine.invalidQuery("Cannot truncate view " + qualified(projectId, target));
-                }
-                int removed = storedRows(projectId, target.datasetId(), target.tableId()).size();
-                replaceRows(projectId, target, List.of());
-                job.setDmlStats(Map.of("deletedRowCount", String.valueOf(removed)));
-            }
-            case CREATE_TABLE, CREATE_VIEW -> createFromStatement(projectId, jobProjectId, statement, options, job,
-                    jobLocation);
-            case ALTER_TABLE, ALTER_VIEW -> alterOptions(projectId, jobProjectId, statement, options, job, jobLocation);
-            case DROP_TABLE, DROP_VIEW -> {
-                job.setDdlTargetTable(new TableReference(projectId, target.datasetId(), target.tableId()));
-                Optional<Table> existing = tableStore.get(tableKey(target.datasetId(), target.tableId()));
-                if (existing.isEmpty()) {
-                    if (!statement.ifExists()) {
-                        throw GcpException.notFound("Not found: Table " + qualified(projectId, target));
+                synchronized (writeLock) {
+                    Table table = getTable(projectId, target.datasetId(), target.tableId());
+                    if (table.viewQuery() != null) {
+                        throw QueryEngine.invalidQuery("Cannot truncate view " + qualified(projectId, target));
                     }
-                    job.setDdlOperationPerformed("SKIP");
-                    return;
+                    int removed = storedRows(projectId, target.datasetId(), target.tableId()).size();
+                    replaceRows(projectId, target, List.of());
+                    job.setDmlStats(Map.of("deletedRowCount", String.valueOf(removed)));
                 }
-                boolean isView = existing.get().viewQuery() != null;
-                if (isView != (statement.kind() == SqlDialectTranslator.StatementKind.DROP_VIEW)) {
-                    throw QueryEngine.invalidQuery(qualified(projectId, target) + " is " + (isView
-                            ? "a view; use DROP VIEW" : "a table; use DROP TABLE"));
-                }
-                deleteTable(projectId, target.datasetId(), target.tableId());
-                job.setDdlOperationPerformed("DROP");
             }
-            case CREATE_SCHEMA -> {
-                String datasetId = statement.datasetTarget();
-                job.setDdlTargetDataset(new DatasetReference(projectId, datasetId));
-                if (datasetStore.get(datasetId).isPresent()) {
-                    if (statement.ifNotExists()) {
+            case CREATE_TABLE, CREATE_VIEW -> {
+                if (statement.copySource() != null) {
+                    synchronized (writeLock) {
+                        createFromStatement(projectId, jobProjectId, statement, options, job, jobLocation);
+                    }
+                } else {
+                    createFromStatement(projectId, jobProjectId, statement, options, job, jobLocation);
+                }
+            }
+            case ALTER_TABLE, ALTER_VIEW -> {
+                synchronized (writeLock) {
+                    alterOptions(projectId, jobProjectId, statement, options, job, jobLocation);
+                }
+            }
+            case DROP_TABLE, DROP_VIEW -> {
+                synchronized (writeLock) {
+                    job.setDdlTargetTable(new TableReference(projectId, target.datasetId(), target.tableId()));
+                    Optional<Table> existing = tableStore.get(tableKey(target.datasetId(), target.tableId()));
+                    if (existing.isEmpty()) {
+                        if (!statement.ifExists()) {
+                            throw GcpException.notFound("Not found: Table " + qualified(projectId, target));
+                        }
                         job.setDdlOperationPerformed("SKIP");
                         return;
                     }
-                    throw GcpException.alreadyExists("Already Exists: Dataset " + projectId + ":" + datasetId)
-                            .withReason("duplicate");
+                    boolean isView = existing.get().viewQuery() != null;
+                    if (isView != (statement.kind() == SqlDialectTranslator.StatementKind.DROP_VIEW)) {
+                        throw QueryEngine.invalidQuery(qualified(projectId, target) + " is " + (isView
+                                ? "a view; use DROP VIEW" : "a table; use DROP TABLE"));
+                    }
+                    deleteTable(projectId, target.datasetId(), target.tableId());
+                    job.setDdlOperationPerformed("DROP");
                 }
-                Dataset dataset = new Dataset();
-                dataset.setDatasetReference(new DatasetReference(projectId, datasetId));
-                dataset.setLocation(job.getLocation());
-                createDataset(projectId, dataset);
-                job.setDdlOperationPerformed("CREATE");
+            }
+            case CREATE_SCHEMA -> {
+                synchronized (writeLock) {
+                    String datasetId = statement.datasetTarget();
+                    job.setDdlTargetDataset(new DatasetReference(projectId, datasetId));
+                    if (datasetStore.get(datasetId).isPresent()) {
+                        if (statement.ifNotExists()) {
+                            job.setDdlOperationPerformed("SKIP");
+                            return;
+                        }
+                        throw GcpException.alreadyExists("Already Exists: Dataset " + projectId + ":" + datasetId)
+                                .withReason("duplicate");
+                    }
+                    Dataset dataset = new Dataset();
+                    dataset.setDatasetReference(new DatasetReference(projectId, datasetId));
+                    dataset.setLocation(job.getLocation());
+                    createDataset(projectId, dataset);
+                    job.setDdlOperationPerformed("CREATE");
+                }
             }
             case DROP_SCHEMA -> {
-                String datasetId = statement.datasetTarget();
-                job.setDdlTargetDataset(new DatasetReference(projectId, datasetId));
-                if (datasetStore.get(datasetId).isEmpty()) {
-                    if (!statement.ifExists()) {
-                        throw GcpException.notFound("Not found: Dataset " + projectId + ":" + datasetId);
+                synchronized (writeLock) {
+                    String datasetId = statement.datasetTarget();
+                    job.setDdlTargetDataset(new DatasetReference(projectId, datasetId));
+                    if (datasetStore.get(datasetId).isEmpty()) {
+                        if (!statement.ifExists()) {
+                            throw GcpException.notFound("Not found: Dataset " + projectId + ":" + datasetId);
+                        }
+                        job.setDdlOperationPerformed("SKIP");
+                        return;
                     }
-                    job.setDdlOperationPerformed("SKIP");
-                    return;
+                    deleteDataset(projectId, datasetId, statement.cascade());
+                    job.setDdlOperationPerformed("DROP");
                 }
-                deleteDataset(projectId, datasetId, statement.cascade());
-                job.setDdlOperationPerformed("DROP");
             }
             default -> throw QueryEngine.invalidQuery("Unsupported statement " + statement.statementType());
         }
@@ -5206,6 +5247,29 @@ public class BigQueryService {
     private void createFromStatement(String projectId, String jobProjectId, SqlDialectTranslator.Statement statement,
                                      QueryOptions options, StoredJob job,
                                      JobLocation jobLocation) {
+        createFromStatement(projectId, jobProjectId, statement, options, job, jobLocation, null);
+    }
+
+    /**
+     * {@code pinned} holds the table metadata {@link #queryReadsTarget} resolved for the statement's
+     * sources, so the engine stages the definitions that decided it may run unlocked; null reads the
+     * store live.
+     */
+    private void createFromStatement(String projectId, String jobProjectId, SqlDialectTranslator.Statement statement,
+                                     QueryOptions options, StoredJob job,
+                                     JobLocation jobLocation, Map<String, Optional<Table>> pinned) {
+        if (pinned == null && statement.copySource() == null && statement.querySql() != null
+                && !Thread.holdsLock(writeLock)) {
+            SourceCheck sources = queryReadsTarget(projectId, statement.querySql(), options, statement.target());
+            if (sources.readsTarget()) {
+                synchronized (writeLock) {
+                    createFromStatement(projectId, jobProjectId, statement, options, job, jobLocation);
+                }
+            } else {
+                createFromStatement(projectId, jobProjectId, statement, options, job, jobLocation, sources.pinned());
+            }
+            return;
+        }
         SqlDialectTranslator.TableRef target = statement.target();
         Dataset destinationDataset = getDataset(projectId, target.datasetId());
         if (statement.copySource() != null) {
@@ -5228,7 +5292,7 @@ public class BigQueryService {
         StoredTableData copiedData = null;
         if (statement.kind() == SqlDialectTranslator.StatementKind.CREATE_VIEW) {
             BigQuerySqlEngine.Result described = engine.execute(request(projectId, jobProjectId, statement.querySql(),
-                    options, true), tables(projectId, jobLocation));
+                    options, true), tables(projectId, jobLocation, pinned));
             rejectDuplicateQueryColumns(statement, described);
             Map<String, Object> definition = new LinkedHashMap<>();
             definition.put("query", statement.querySql());
@@ -5257,8 +5321,9 @@ public class BigQueryService {
             copiedData = copyTableData(sourceData);
             rows = allRows(copiedData);
         } else if (statement.querySql() != null) {
+            // Query evaluation is read-only until the destination is published below.
             BigQuerySqlEngine.Result result = engine.execute(request(projectId, jobProjectId, statement.querySql(),
-                    options, false), tables(projectId, jobLocation));
+                    options, false), tables(projectId, jobLocation, pinned));
             rejectDuplicateQueryColumns(statement, result);
             table.setSchema(result.schema());
             rows = result.rows();
@@ -5274,27 +5339,115 @@ public class BigQueryService {
         }
         BigQueryMetadata.validateTable(table.getExtra(), schemaFields(table));
         validateCreateTablePartitioning(statement, table);
-        if (statement.kind() == SqlDialectTranslator.StatementKind.CREATE_TABLE
-                && existingTable.isPresent() && !samePartitioning(existingTable.get(), table)) {
-            throw QueryEngine.invalidQuery("CREATE OR REPLACE TABLE cannot change the partitioning specification");
+        synchronized (writeLock) {
+            Dataset currentDestinationDataset = getDataset(projectId, target.datasetId());
+            Optional<Table> currentTable = tableStore.get(tableKey(target.datasetId(), target.tableId()));
+            boolean currentlyExists = currentTable.isPresent();
+            if (currentlyExists && statement.ifNotExists()) {
+                job.setDdlOperationPerformed("SKIP");
+                return;
+            }
+            if (currentlyExists && !statement.orReplace()) {
+                throw GcpException.alreadyExists("Already Exists: Table " + qualified(projectId, target))
+                        .withReason("duplicate");
+            }
+            if (statement.kind() == SqlDialectTranslator.StatementKind.CREATE_TABLE && currentlyExists
+                    && !samePartitioning(currentTable.get(), table)) {
+                throw QueryEngine.invalidQuery("CREATE OR REPLACE TABLE cannot change the partitioning specification");
+            }
+            if (statement.copySource() != null) {
+                BigQueryMetadata.applyDatasetDefaults(table, currentDestinationDataset, System.currentTimeMillis());
+                if (statement.options() != null) {
+                    applyTableOptions(table, evaluateOptions(projectId, jobProjectId, statement.options(), options,
+                            jobLocation));
+                }
+            }
+            if (currentlyExists) {
+                deleteTable(projectId, target.datasetId(), target.tableId());
+            }
+            putTable(projectId, target, table, rows);
+            if (copiedData != null) {
+                dataStore.put(tableKey(target.datasetId(), target.tableId()), copiedData);
+                table.setNumRows(String.valueOf(allRows(copiedData).size()));
+                tableStore.put(tableKey(target.datasetId(), target.tableId()), table);
+            }
+            job.setDdlOperationPerformed(currentlyExists ? "REPLACE" : "CREATE");
         }
-        if (statement.copySource() != null) {
-            BigQueryMetadata.applyDatasetDefaults(table, destinationDataset, System.currentTimeMillis());
-            if (statement.options() != null) {
-                applyTableOptions(table, evaluateOptions(projectId, jobProjectId, statement.options(), options,
-                        jobLocation));
+    }
+
+    /**
+     * The outcome of checking a statement's sources against its target, with the table metadata the check
+     * resolved, keyed like the table store and empty for a name that was missing there.
+     */
+    private record SourceCheck(boolean readsTarget, Map<String, Optional<Table>> pinned) {}
+
+    /**
+     * Whether the {@code SELECT} of a {@code CREATE TABLE ... AS} reads its own target, along with the table
+     * metadata it resolved on the way. The engine stages those sources itself, and reads their definitions
+     * from the store when it does, so a view another query replaces in between would otherwise be staged
+     * with a definition this check never saw: a {@code CREATE OR REPLACE VIEW ds.v AS SELECT * FROM ds.t}
+     * that lands after the check makes the replacement read {@code ds.t} unlocked and publish over rows an
+     * append already had acknowledged. Handing the engine the metadata the check resolved keeps the two
+     * looking at the same definitions, without holding {@code writeLock} across the query.
+     */
+    private SourceCheck queryReadsTarget(String projectId, String sql, QueryOptions options,
+                                         SqlDialectTranslator.TableRef target) {
+        String defaultDatasetId = options.defaultDatasetId() != null
+                ? options.defaultDatasetId() : target.datasetId();
+        List<Map<String, Object>> queryParameters = options.queryParameters() != null
+                ? options.queryParameters() : List.of();
+        Map<String, Optional<Table>> pinned = new LinkedHashMap<>();
+        boolean readsTarget = readsTarget(projectId, sql, target, defaultDatasetId,
+                new SqlDialectTranslator.QueryParameters(queryParameters, options.parameterMode()), pinned,
+                new HashSet<>());
+        return new SourceCheck(readsTarget, pinned);
+    }
+
+    private boolean readsTarget(String projectId, String sql, SqlDialectTranslator.TableRef target,
+                                String defaultDatasetId, SqlDialectTranslator.QueryParameters parameters,
+                                Map<String, Optional<Table>> pinned, Set<SqlDialectTranslator.TableRef> visited) {
+        SqlDialectTranslator.ScriptTranslation translation = SqlDialectTranslator.translateScript(sql, projectId,
+                defaultDatasetId, parameters);
+        for (SqlDialectTranslator.TableRef reference : translation.tables()) {
+            if (readsTarget(projectId, reference, target, pinned, visited)) {
+                return true;
             }
         }
-        if (exists) {
-            deleteTable(projectId, target.datasetId(), target.tableId());
+        return false;
+    }
+
+    /**
+     * Whether one table reference reads {@code target}: the table itself, a table a wildcard matches, or a
+     * view whose query reads it. The engine stages views and wildcards the same way, so a statement that
+     * reads the target through either one still has to hold {@code writeLock} to keep an append from
+     * landing between the rows it read and the replacement it publishes. A view carries its own dataset,
+     * so a view in another dataset is followed too, while a plain table there cannot be the target.
+     *
+     * <p>Every reference is pinned as a copy of the metadata it resolves to, because a PATCH or PUT of
+     * {@code view} rewrites the stored {@code Table} in place: the engine stages the pinned definitions,
+     * so what this check decided stays true until the replacement publishes.
+     */
+    private boolean readsTarget(String projectId, SqlDialectTranslator.TableRef reference,
+                                SqlDialectTranslator.TableRef target, Map<String, Optional<Table>> pinned,
+                                Set<SqlDialectTranslator.TableRef> visited) {
+        if (reference.datasetId().equalsIgnoreCase(target.datasetId())) {
+            if (reference.tableId().endsWith("*")) {
+                String prefix = reference.tableId().substring(0, reference.tableId().length() - 1);
+                return target.tableId().startsWith(prefix);
+            }
+            if (reference.tableId().equalsIgnoreCase(target.tableId())) {
+                return true;
+            }
         }
-        putTable(projectId, target, table, rows);
-        if (copiedData != null) {
-            dataStore.put(tableKey(target.datasetId(), target.tableId()), copiedData);
-            table.setNumRows(String.valueOf(allRows(copiedData).size()));
-            tableStore.put(tableKey(target.datasetId(), target.tableId()), table);
+        if (!visited.add(reference)) {
+            return false;
         }
-        job.setDdlOperationPerformed(exists ? "REPLACE" : "CREATE");
+        Table table = pinned.computeIfAbsent(tableKey(reference.datasetId(), reference.tableId()),
+                key -> storedTable(reference.datasetId(), reference.tableId())
+                        .map(stored -> deepCopy(stored, Table.class))).orElse(null);
+        String viewQuery = table != null ? table.viewQuery() : null;
+        return viewQuery != null && readsTarget(projectId, viewQuery, target, reference.datasetId(),
+                SqlDialectTranslator.QueryParameters.none(), pinned, visited);
     }
 
     private static Table createStatementTable(SqlDialectTranslator.Statement statement, TableSchema describedSchema) {
@@ -5993,11 +6146,25 @@ public class BigQueryService {
     }
 
     private BigQuerySqlEngine.Tables tables(String projectId, JobLocation jobLocation) {
+        return tables(projectId, jobLocation, null);
+    }
+
+    /**
+     * {@code pinned} answers {@code table} for the names it holds, {@code Optional#empty()} included, so a
+     * caller that resolved metadata first makes the engine stage exactly that; null reads the store live.
+     */
+    private BigQuerySqlEngine.Tables tables(String projectId, JobLocation jobLocation,
+                                            Map<String, Optional<Table>> pinned) {
         return new BigQuerySqlEngine.Tables() {
             @Override
             public Table table(String datasetId, String tableId) {
                 if (jobLocation != null) {
                     datasetStore.get(datasetId).ifPresent(jobLocation::admit);
+                }
+                Optional<Table> pinnedTable = pinned != null ? pinned.get(tableKey(datasetId, tableId)) : null;
+                if (pinnedTable != null) {
+                    return pinnedTable.orElseThrow(() -> GcpException.notFound(
+                            "Not found: Table " + projectId + ":" + datasetId + "." + tableId));
                 }
                 return getTable(projectId, datasetId, tableId);
             }
@@ -6642,9 +6809,7 @@ public class BigQueryService {
 
         List<String> fileIds = new ArrayList<>();
         try {
-            synchronized (writeLock) {
-                runLoad(projectId, config, destination, sourceUris, uploadedData, fileIds, job, jobLocation);
-            }
+            runLoad(projectId, config, destination, sourceUris, uploadedData, fileIds, job, jobLocation);
         } catch (GcpException e) {
             job.setErrorReason(loadErrorReason(e));
             job.setErrorMessage(e.getMessage());
@@ -6768,9 +6933,11 @@ public class BigQueryService {
         List<String> schemaUpdateOptions = config.get("schemaUpdateOptions") instanceof List<?> list
                 ? list.stream().filter(String.class::isInstance).map(String.class::cast).toList()
                 : List.of();
-        writeRows(projectId, destinationRef, write, (String) config.get("createDisposition"), schemaUpdateOptions,
-                mapValue(config.get("timePartitioning"), "timePartitioning"),
-                mapValue(config.get("rangePartitioning"), "rangePartitioning"), result);
+        synchronized (writeLock) {
+            writeRows(projectId, destinationRef, write, (String) config.get("createDisposition"), schemaUpdateOptions,
+                    mapValue(config.get("timePartitioning"), "timePartitioning"),
+                    mapValue(config.get("rangePartitioning"), "rangePartitioning"), result);
+        }
 
         long outputBytes = 0;
         for (Map<String, Object> row : result.rows()) {

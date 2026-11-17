@@ -6,19 +6,36 @@ import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
+import org.jboss.logging.Logger;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.HexFormat;
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.StringJoiner;
 import java.util.zip.GZIPInputStream;
 
 final class GcsMediaResponses {
 
+    private static final Logger LOG = Logger.getLogger(GcsMediaResponses.class);
+
     static final String META_HEADER_PREFIX = "x-goog-meta-";
+
+    // IMF-fixdate, the only format RFC 7231 allows a recipient to be required to parse. Not
+    // DateTimeFormatter.RFC_1123_DATE_TIME, which writes a single-digit day unpadded
+    // ("Fri, 6 Feb 2026 ...") and is therefore not the format GCS sends.
+    private static final DateTimeFormatter HTTP_DATE = DateTimeFormatter
+            .ofPattern("EEE, dd MMM uuuu HH:mm:ss 'GMT'", Locale.ENGLISH)
+            .withZone(ZoneOffset.UTC);
 
     private GcsMediaResponses() {}
 
@@ -32,21 +49,22 @@ final class GcsMediaResponses {
      */
     static Response mediaResponse(byte[] data, GcsObjectMeta meta, String rangeHeader,
             String acceptEncoding) {
-        return mediaResponse(data, meta, rangeHeader, acceptEncoding, meta.getEtag());
+        return mediaResponse(data, meta, rangeHeader, acceptEncoding, meta.getEtag(), false);
     }
 
     static Response xmlMediaResponse(byte[] data, GcsObjectMeta meta, String rangeHeader,
             String acceptEncoding) {
-        return mediaResponse(data, meta, rangeHeader, acceptEncoding, xmlEtag(meta));
+        return mediaResponse(data, meta, rangeHeader, acceptEncoding, xmlEtag(meta), true);
     }
 
     private static Response mediaResponse(byte[] data, GcsObjectMeta meta, String rangeHeader,
-            String acceptEncoding, String etag) {
+            String acceptEncoding, String etag, boolean xmlApi) {
         if (shouldTranscode(meta, acceptEncoding)) {
             byte[] decompressed = gunzip(data);
             if (decompressed != null) {
-                return withMetadataHeaders(Response.ok(decompressed).type(meta.getContentType()), meta, etag)
-                        .header("Content-Length", decompressed.length)
+                return withMetadataHeaders(Response.ok(decompressed).type(meta.getContentType()), meta, etag,
+                        xmlApi, false)
+                        .header(HttpHeaders.CONTENT_LENGTH, decompressed.length)
                         .build();
             }
             // Not actually gzip despite the declared encoding: serve the stored bytes rather
@@ -54,19 +72,28 @@ final class GcsMediaResponses {
         }
 
         Response.ResponseBuilder builder;
-        if (rangeHeader == null || rangeHeader.isBlank()) {
+        int contentLength;
+        Range range = parseRange(rangeHeader, data.length);
+        if (range == null) {
             builder = Response.ok(data);
+            contentLength = data.length;
         } else {
-            Range range = parseRange(rangeHeader, data.length);
+            byte[] partial = Arrays.copyOfRange(data, range.start(), range.end() + 1);
             builder = Response.status(Response.Status.PARTIAL_CONTENT)
-                    .entity(Arrays.copyOfRange(data, range.start(), range.end() + 1))
+                    .entity(partial)
                     .header("Content-Range", "bytes " + range.start() + "-" + range.end() + "/" + data.length);
+            contentLength = partial.length;
         }
         if (isGzipStored(meta)) {
             // Served as stored, so the client must be told to inflate it.
             builder.header("Content-Encoding", "gzip");
         }
-        return withMetadataHeaders(builder.type(meta.getContentType()), meta, etag).build();
+        // Set rather than left to the HTTP layer: for an implicit HEAD it strips the body and with
+        // it the Content-Length it would have generated, and a HEAD is how a client reads an
+        // object's size without transferring it.
+        return withMetadataHeaders(builder.type(meta.getContentType()), meta, etag, xmlApi, range != null)
+                .header(HttpHeaders.CONTENT_LENGTH, contentLength)
+                .build();
     }
 
     /**
@@ -182,6 +209,9 @@ final class GcsMediaResponses {
         addHeaderIfPresent(builder, "ETag", xmlEtag(meta));
         addHeaderIfPresent(builder, "x-goog-generation", meta.getGeneration());
         addHeaderIfPresent(builder, "x-goog-metageneration", meta.getMetageneration());
+        // Left as one field: the XML API docs do not publish this response's header list, and the
+        // clients that read it here take the single comma-separated value. Media reads, whose
+        // layout is documented, follow it instead.
         addHeaderIfPresent(builder, "x-goog-hash", hashHeader(meta));
         addHeaderIfPresent(builder, "x-goog-stored-content-length", meta.getSize());
         builder.header("x-goog-stored-content-encoding",
@@ -209,15 +239,20 @@ final class GcsMediaResponses {
     }
 
     private static Response.ResponseBuilder withMetadataHeaders(Response.ResponseBuilder builder,
-            GcsObjectMeta meta, String etag) {
+            GcsObjectMeta meta, String etag, boolean xmlApi, boolean partial) {
         addHeaderIfPresent(builder, "ETag", etag);
+        addHeaderIfPresent(builder, HttpHeaders.LAST_MODIFIED, lastModified(meta));
+        // The XML API advertises byte ranges and the JSON API does not, which is what GCS does.
+        if (xmlApi) {
+            builder.header("Accept-Ranges", "bytes");
+        }
         addHeaderIfPresent(builder, "x-goog-generation", meta.getGeneration());
         addHeaderIfPresent(builder, "x-goog-metageneration", meta.getMetageneration());
         addHeaderIfPresent(builder, "x-goog-stored-content-length", meta.getSize());
         builder.header("x-goog-stored-content-encoding",
                 meta.getContentEncoding() != null ? meta.getContentEncoding() : "identity");
         addHeaderIfPresent(builder, "x-goog-storage-class", meta.getStorageClass());
-        addHeaderIfPresent(builder, "x-goog-hash", hashHeader(meta));
+        addHashHeaders(builder, meta, xmlApi, partial);
         Map<String, String> metadata = meta.getMetadata();
         if (metadata != null) {
             for (Map.Entry<String, String> entry : metadata.entrySet()) {
@@ -229,10 +264,51 @@ final class GcsMediaResponses {
         return builder;
     }
 
+    /**
+     * The object's update time as an HTTP-date. GCS sends this on every media read, and a client
+     * that takes the update time from the response header rather than the resource body requires
+     * it.
+     */
+    private static String lastModified(GcsObjectMeta meta) {
+        String updated = meta.getUpdated() != null ? meta.getUpdated() : meta.getTimeCreated();
+        if (updated == null) {
+            return null;
+        }
+        try {
+            return HTTP_DATE.format(Instant.parse(updated));
+        } catch (DateTimeParseException e) {
+            LOG.debugf("omitting Last-Modified, unparseable timestamp %s on %s", updated, meta.getName());
+            return null;
+        }
+    }
+
     private static void addHeaderIfPresent(Response.ResponseBuilder builder, String name, String value) {
         if (value != null && !value.isEmpty()) {
             builder.header(name, value);
         }
+    }
+
+    /**
+     * GCS writes the XML API's checksums as one field per algorithm and the JSON API's as a single
+     * comma-separated field, and leaves them out of a JSON media read that is partial. Only the
+     * XML API's layout is documented, so only that one is copied here.
+     */
+    private static void addHashHeaders(Response.ResponseBuilder builder, GcsObjectMeta meta,
+            boolean xmlApi, boolean partial) {
+        if (xmlApi) {
+            addHeaderIfPresent(builder, "x-goog-hash", crc32cHash(meta));
+            addHeaderIfPresent(builder, "x-goog-hash", md5Hash(meta));
+        } else if (!partial) {
+            addHeaderIfPresent(builder, "x-goog-hash", hashHeader(meta));
+        }
+    }
+
+    private static String crc32cHash(GcsObjectMeta meta) {
+        return meta.getCrc32c() == null ? null : "crc32c=" + meta.getCrc32c();
+    }
+
+    private static String md5Hash(GcsObjectMeta meta) {
+        return meta.getMd5Hash() == null ? null : "md5=" + meta.getMd5Hash();
     }
 
     // Real GCS lists crc32c before md5 and omits md5 for composite objects.
@@ -282,45 +358,122 @@ final class GcsMediaResponses {
         return true;
     }
 
+    /**
+     * Reads the {@code Range} header the way GCS reads it, which is mostly the RFC 7233 rule that
+     * a range a server cannot make sense of is ignored rather than rejected.
+     *
+     * <p>An element GCS cannot read makes the whole header ignorable, wherever in the set it sits:
+     * an unknown unit, an empty set, a range whose last byte precedes its first, or a position that
+     * does not fit a signed 64-bit integer. The same goes for a set of several ranges that does not
+     * walk forward. What stays an error is a single range that cannot be satisfied, a first byte at
+     * or past the end or a suffix of zero, which is a 416, and a set whose every range begins after
+     * the previous one ends, which is a 400.
+     *
+     * @return the range to serve, or null when the header is to be ignored
+     */
     private static Range parseRange(String rangeHeader, int length) {
-        if (!rangeHeader.startsWith("bytes=")) {
-            throw GcpException.invalidArgument("invalid Range header: " + rangeHeader);
+        if (rangeHeader == null || rangeHeader.isBlank()) {
+            return null;
         }
-        String spec = rangeHeader.substring("bytes=".length());
-        int dash = spec.indexOf('-');
-        if (dash < 0 || spec.indexOf(',', dash) >= 0) {
-            throw GcpException.invalidArgument("invalid Range header: " + rangeHeader);
+        int separator = rangeHeader.indexOf('=');
+        if (separator < 0 || !rangeHeader.substring(0, separator).trim().equalsIgnoreCase("bytes")) {
+            return null;
         }
-
-        int start;
-        int end;
-        if (dash == 0) {
-            int suffixLength = parseRangeInt(spec.substring(1), rangeHeader);
-            if (suffixLength <= 0) {
-                throw GcpException.invalidArgument("invalid Range header: " + rangeHeader);
+        List<RangeSpec> specs = new ArrayList<>();
+        for (String element : rangeHeader.substring(separator + 1).split(",", -1)) {
+            RangeSpec spec = RangeSpec.parse(element.trim());
+            if (spec == null) {
+                return null;
             }
-            start = Math.max(0, length - suffixLength);
-            end = length - 1;
-        } else {
-            start = parseRangeInt(spec.substring(0, dash), rangeHeader);
-            end = dash == spec.length() - 1 ? length - 1 : parseRangeInt(spec.substring(dash + 1), rangeHeader);
+            specs.add(spec);
         }
-
-        if (start >= length) {
-            throw GcpException.outOfRange("Range not satisfiable: " + rangeHeader);
+        if (specs.size() == 1) {
+            RangeSpec spec = specs.get(0);
+            if (!spec.isSatisfiable(length)) {
+                throw GcpException.outOfRange("Range not satisfiable: " + rangeHeader);
+            }
+            return spec.resolve(length);
         }
-        if (start < 0 || end < start) {
-            throw GcpException.invalidArgument("invalid Range header: " + rangeHeader);
+        for (int i = 1; i < specs.size(); i++) {
+            if (specs.get(i).start(length) <= specs.get(i - 1).end(length)) {
+                return null;
+            }
         }
-        end = Math.min(end, length - 1);
-        return new Range(start, end);
+        throw GcpException.invalidArgument("multiple ranges are not supported: " + rangeHeader);
     }
 
-    private static int parseRangeInt(String value, String rangeHeader) {
-        try {
-            return Integer.parseInt(value);
-        } catch (NumberFormatException e) {
-            throw GcpException.invalidArgument("invalid Range header: " + rangeHeader);
+    // Digit-only, so a value the ABNF does not allow is malformed rather than silently accepted the
+    // way a number parser would take a leading plus sign. -1 means "not a position", which covers
+    // text GCS cannot read and a value past the signed 64-bit range it can.
+    private static long parsePosition(String value) {
+        if (value.isEmpty()) {
+            return -1;
+        }
+        long position = 0;
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c < '0' || c > '9') {
+                return -1;
+            }
+            int digit = c - '0';
+            if (position > (Long.MAX_VALUE - digit) / 10) {
+                return -1;
+            }
+            position = position * 10 + digit;
+        }
+        return position;
+    }
+
+    /**
+     * One element of the range set: a suffix length when {@code suffix} is set, and otherwise a
+     * first byte with an optional last. The constructor's fields stay unresolved because whether a
+     * position is satisfiable depends on the object's length.
+     */
+    private record RangeSpec(long first, long last, boolean suffix) {
+
+        /** The element, or null when GCS would not read it. */
+        static RangeSpec parse(String element) {
+            int dash = element.indexOf('-');
+            if (dash < 0 || element.indexOf('-', dash + 1) >= 0) {
+                return null;
+            }
+            String from = element.substring(0, dash).trim();
+            String to = element.substring(dash + 1).trim();
+            if (from.isEmpty()) {
+                long suffixLength = parsePosition(to);
+                return suffixLength < 0 ? null : new RangeSpec(-1, suffixLength, true);
+            }
+            long first = parsePosition(from);
+            if (first < 0) {
+                return null;
+            }
+            if (to.isEmpty()) {
+                return new RangeSpec(first, -1, false);
+            }
+            long last = parsePosition(to);
+            if (last < 0 || last < first) {
+                return null;
+            }
+            return new RangeSpec(first, last, false);
+        }
+
+        long start(int length) {
+            return suffix ? Math.max(0, length - last) : first;
+        }
+
+        long end(int length) {
+            if (suffix) {
+                return length - 1L;
+            }
+            return last < 0 ? length - 1L : Math.min(last, length - 1L);
+        }
+
+        boolean isSatisfiable(int length) {
+            return length > 0 && start(length) <= end(length);
+        }
+
+        Range resolve(int length) {
+            return new Range((int) start(length), (int) end(length));
         }
     }
 

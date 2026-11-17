@@ -381,6 +381,23 @@ handles, or redirection. Unsupported RPCs return gRPC `UNIMPLEMENTED`.
 - `CopyObject` (including `sourceGeneration` to copy or restore a noncurrent version)
 - `MoveObject`
 - `HeadObject`
+- Media reads (`alt=media` downloads, `/download/storage/v1/...`, and XML API GET and HEAD)
+  carry the object's system metadata: `ETag`, `Last-Modified` in IMF-fixdate form,
+  `x-goog-generation`, `x-goog-metageneration`, `x-goog-storage-class`, `x-goog-hash` and the
+  `x-goog-stored-content-*` pair, plus the custom metadata as `x-goog-meta-*`. A client that
+  reads an object's update time from the response header rather than the resource body relies
+  on `Last-Modified`. `x-goog-hash` is one field per algorithm on the XML API and a single
+  comma-separated field on the JSON API, which also omits it from a partial read
+- `Content-Length` on a media read is the length of the bytes that read returns: the stored
+  size, the range length on a `206`, or the decompressed size when the read is transcoded. HEAD
+  reports the same value the matching GET would
+- The XML API advertises `Accept-Ranges: bytes` on a media read. JSON API media responses do
+  not, as on GCS. A `Range` the emulator cannot make sense of is ignored and the whole object is
+  served with a `200`: an unknown unit, an empty or unparseable set, a range whose last byte
+  precedes its first, a position beyond the signed 64-bit integer range, and a set of ranges
+  that does not walk forward, wherever the unreadable element sits in the set. A set whose every
+  range begins after the previous one ends returns `400` `InvalidArgument`. A first byte at or
+  past the end, or a suffix length of zero, returns `416` `InvalidRange`
 - `PatchObject` (update metadata: `contentType`, `contentDisposition`, `contentEncoding`, `contentLanguage`, `cacheControl`, `customTime`, custom metadata)
 - System metadata at upload time (`contentEncoding`, `contentDisposition`, `contentLanguage`,
   `cacheControl`, `customTime`, `storageClass`) in the JSON metadata part of a

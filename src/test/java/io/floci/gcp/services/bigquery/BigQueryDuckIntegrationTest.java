@@ -2431,6 +2431,19 @@ class BigQueryDuckIntegrationTest {
                         + " SELECT 1 AS one LIMIT 5 OFFSET skip", "useLegacySql", false))
                 .then().statusCode(400)
                 .body("error.message", containsString("OFFSET expects an integer literal or parameter"));
+        // The OFFSET of UNNEST ... WITH OFFSET stays the clause: live BigQuery answers 1, 2 and 2, 3.
+        query(Map.of("query", "DECLARE offset INT64 DEFAULT 1;"
+                        + " SELECT n FROM UNNEST([1, 2]) AS n WITH OFFSET ORDER BY n", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(2))
+                .body("rows[0].f[0].v", equalTo("1"))
+                .body("rows[1].f[0].v", equalTo("2"));
+        query(Map.of("query", "DECLARE offset INT64 DEFAULT 1; SELECT n FROM UNNEST([1, 2, 3]) AS n"
+                        + " WITH OFFSET AS o WHERE o >= offset ORDER BY n", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(2))
+                .body("rows[0].f[0].v", equalTo("2"))
+                .body("rows[1].f[0].v", equalTo("3"));
         // A query parameter is allowed there, as BigQuery allows it.
         query(Map.of("query", "SELECT 1 AS one LIMIT @lim", "useLegacySql", false,
                 "queryParameters", List.of(Map.of("name", "lim", "parameterType", Map.of("type", "INT64"),

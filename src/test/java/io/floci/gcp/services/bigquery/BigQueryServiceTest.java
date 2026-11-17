@@ -2436,6 +2436,27 @@ class BigQueryServiceTest {
     }
 
     @Test
+    void aVariableNamedOffsetLeavesTheWithOffsetClauseOfUnnest() {
+        // OFFSET is not reserved, so it names a variable; live BigQuery still reads WITH OFFSET as the clause.
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        when(engine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("n", "INTEGER", null))), List.of(Map.of("n", 1L)), "SELECT", 0));
+        BigQueryService offsetService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), engine);
+
+        offsetService.query(PROJECT, "US", null,
+                "DECLARE offset INT64 DEFAULT 1; SELECT n FROM UNNEST([1, 2]) AS n WITH OFFSET ORDER BY n;", null);
+        offsetService.query(PROJECT, "US", null, "DECLARE offset INT64 DEFAULT 1;"
+                + " SELECT n FROM UNNEST([1, 2, 3]) AS n WITH OFFSET AS o WHERE o >= offset ORDER BY n;", null);
+
+        ArgumentCaptor<BigQuerySqlEngine.Request> request = ArgumentCaptor.forClass(BigQuerySqlEngine.Request.class);
+        verify(engine, times(2)).execute(request.capture(), any());
+        assertFalse(request.getAllValues().get(0).sql().contains("WITH 1"), request.getAllValues().get(0).sql());
+        assertFalse(request.getAllValues().get(1).sql().contains("WITH 1"), request.getAllValues().get(1).sql());
+        assertTrue(request.getAllValues().get(1).sql().contains(">= 1"), request.getAllValues().get(1).sql());
+    }
+
+    @Test
     void aScriptVariableIsRefusedInLimitAndOffset() {
         // Live BigQuery: "LIMIT expects an integer literal or parameter". A query parameter is allowed there.
         GcpException limit = assertThrows(GcpException.class, () -> service.query(PROJECT, "US", null,

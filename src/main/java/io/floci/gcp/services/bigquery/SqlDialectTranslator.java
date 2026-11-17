@@ -2837,7 +2837,7 @@ final class SqlDialectTranslator {
                 List<Token> field = significant(start, index);
                 if (field.size() != 1 || field.getFirst().kind != Kind.IDENT
                         && field.getFirst().kind != Kind.QIDENT) {
-                    throw invalidQuery("CLUSTER BY requires column names.");
+                    throw invalidQuery("Entries in the CLUSTER BY clause must be column names");
                 }
                 fields.add(field.getFirst().identifierText());
                 start = index + 1;
@@ -2847,8 +2847,11 @@ final class SqlDialectTranslator {
                 depth--;
             }
         }
-        if (fields.isEmpty() || fields.size() > 4) {
-            throw invalidQuery("CLUSTER BY requires between one and four column names.");
+        if (fields.isEmpty()) {
+            throw invalidQuery("Syntax error: Expected a column name in CLUSTER BY");
+        }
+        if (fields.size() > 4) {
+            throw invalidQuery(fields.size() + " clustering fields specified, exceeding the limit of 4.");
         }
         return List.copyOf(fields);
     }

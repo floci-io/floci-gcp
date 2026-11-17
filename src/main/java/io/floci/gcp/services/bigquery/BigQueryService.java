@@ -77,8 +77,9 @@ import java.util.stream.Collectors;
 public class BigQueryService {
 
     private static final Logger LOG = Logger.getLogger(BigQueryService.class);
-    private static final Set<String> CLUSTERABLE_FIELD_TYPES = Set.of("BIGNUMERIC", "BOOL", "BOOLEAN", "DATE",
-            "DATETIME", "GEOGRAPHY", "INT64", "INTEGER", "NUMERIC", "RANGE", "STRING", "TIMESTAMP");
+    /** The column types BigQuery accepts for a clustering column, in their GoogleSQL names. */
+    private static final Set<String> CLUSTERABLE_FIELD_TYPES = Set.of("BIGNUMERIC", "BOOL", "DATE", "DATETIME",
+            "GEOGRAPHY", "INT64", "NUMERIC", "RANGE", "STRING", "TIMESTAMP");
 
     private final StorageBackend<String, Dataset> datasetStore;
     private final StorageBackend<String, Table> tableStore;
@@ -5514,10 +5515,24 @@ public class BigQueryService {
                     .filter(candidate -> candidate.getName() != null
                             && candidate.getName().equalsIgnoreCase(clusteringField))
                     .findFirst().orElse(null);
-            if (field == null || "REPEATED".equals(field.getMode())
-                    || field.getType() == null || !CLUSTERABLE_FIELD_TYPES.contains(field.getType().toUpperCase(Locale.ROOT))) {
-                throw QueryEngine.invalidQuery("CLUSTER BY field " + clusteringField
-                        + " must be a top-level, non-repeated column with a clusterable type.");
+            if (field == null) {
+                throw QueryEngine.invalidQuery("Unrecognized name: " + clusteringField);
+            }
+            String type = InformationSchema.dataType(field);
+            if ("REPEATED".equals(field.getMode()) || "RECORD".equals(field.getType())
+                    || "STRUCT".equals(field.getType())) {
+                throw QueryEngine.invalidQuery("CLUSTER BY columns may only have simple types, but column "
+                        + field.getName() + " has type " + type);
+            }
+            if ("FLOAT64".equals(type)) {
+                throw QueryEngine.invalidQuery("CLUSTER BY expression may not be a floating point type");
+            }
+            if ("JSON".equals(type)) {
+                throw QueryEngine.invalidQuery("CLUSTER BY expression must be groupable, but type is JSON");
+            }
+            if (!CLUSTERABLE_FIELD_TYPES.contains(type.toUpperCase(Locale.ROOT))) {
+                throw QueryEngine.invalidQuery("Field " + field.getName() + " has type " + type
+                        + ", which is not supported for clustering.");
             }
         }
     }

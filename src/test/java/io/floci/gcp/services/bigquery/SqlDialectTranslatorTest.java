@@ -4509,6 +4509,15 @@ class SqlDialectTranslatorTest {
                 ((SqlDialectTranslator.OptionExpression) clusteredCtas.options().get("expiration_timestamp")).sql());
         assertEquals("(SELECT entity_id FROM ds.src)", clusteredCtas.querySql().trim());
 
+        GcpException tooManyClusteringFields = assertThrows(GcpException.class, () -> statement(
+                "CREATE TABLE ds.wide (a INT64, b INT64, c INT64, d INT64, e INT64) CLUSTER BY a, b, c, d, e"));
+        assertEquals("5 clustering fields specified, exceeding the limit of 4.",
+                tooManyClusteringFields.getMessage());
+        GcpException clusteringExpression = assertThrows(GcpException.class, () ->
+                statement("CREATE TABLE ds.lowered (id STRING) CLUSTER BY LOWER(id)"));
+        assertEquals("Entries in the CLUSTER BY clause must be column names",
+                clusteringExpression.getMessage());
+
         GcpException ingestionCtas = assertThrows(GcpException.class, () -> statement(
                 "CREATE TABLE ds.daily PARTITION BY DATE(_PARTITIONTIME) AS SELECT event_time FROM ds.src"));
         assertEquals("invalidQuery", ingestionCtas.getReason());

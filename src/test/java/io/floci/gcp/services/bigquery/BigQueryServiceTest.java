@@ -917,6 +917,36 @@ class BigQueryServiceTest {
     }
 
     @Test
+    void clusteringTypeErrorsQuoteWhatBigQueryReports() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+        String[][] rejected = {
+                {"CREATE TABLE ds1.nested (s STRUCT<x INT64>) CLUSTER BY s",
+                        "CLUSTER BY columns may only have simple types, but column s has type STRUCT<x INT64>"},
+                {"CREATE TABLE ds1.repeated (arr ARRAY<INT64>) CLUSTER BY arr",
+                        "CLUSTER BY columns may only have simple types, but column arr has type ARRAY<INT64>"},
+                {"CREATE TABLE ds1.floating (f FLOAT64) CLUSTER BY f",
+                        "CLUSTER BY expression may not be a floating point type"},
+                {"CREATE TABLE ds1.json (j JSON) CLUSTER BY j",
+                        "CLUSTER BY expression must be groupable, but type is JSON"},
+                {"CREATE TABLE ds1.bytes (b BYTES) CLUSTER BY b",
+                        "Field b has type BYTES, which is not supported for clustering."},
+                {"CREATE TABLE ds1.unresolved (id STRING) CLUSTER BY missing_id",
+                        "Unrecognized name: missing_id"}
+        };
+        for (String[] c : rejected) {
+            GcpException error = assertThrows(GcpException.class, () ->
+                    service.query(PROJECT, "US", null, c[0], null), c[0]);
+            assertEquals("invalidQuery", error.getReason(), c[0]);
+            assertEquals(c[1], error.getMessage(), c[0]);
+        }
+
+        service.query(PROJECT, "US", null, "CREATE TABLE ds1.geography (g GEOGRAPHY) CLUSTER BY g", null);
+
+        assertEquals(Map.of("fields", List.of("g")),
+                service.getTable(PROJECT, DATASET, "geography").getExtra().get("clustering"));
+    }
+
+    @Test
     void createTableAsSelectBindsItsQueryToTheParametersAfterTheOptionExpressions() {
         String sql = "CREATE TABLE ds1.cached OPTIONS(description=?) AS SELECT ? AS value";
         List<Map<String, Object>> parameters = List.of(positionalParameter("cache"), positionalParameter("wanted"));

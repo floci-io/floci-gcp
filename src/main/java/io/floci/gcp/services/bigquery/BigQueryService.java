@@ -1054,7 +1054,7 @@ public class BigQueryService {
                     }
                 } else if (statement.querySql() != null) {
                     described = engine.execute(request(projectId, jobProjectId, statement.querySql(),
-                            options, true),
+                            queryParameters(statement, options), true),
                             tables(projectId, jobLocation));
                     rejectDuplicateQueryColumns(statement, described);
                     totalBytesProcessed = described.totalBytesProcessed();
@@ -5096,11 +5096,28 @@ public class BigQueryService {
         }
         int from = Math.min(expression.firstParameter(), parameters.size());
         int to = Math.min(expression.firstParameter() + expression.parameterCount(), parameters.size());
-        return new QueryOptions(options.sql(), options.defaultDatasetId(), parameters.subList(from, to),
-                options.parameterMode(), options.dryRun(), options.useLegacySql(), options.destinationTable(),
-                options.writeDisposition(), options.createDisposition(), options.schemaUpdateOptions(),
-                options.timePartitioning(), options.rangePartitioning(), options.defaultProjectId(),
-                options.scriptIncompatibleOptions());
+        return withQueryParameters(options, parameters.subList(from, to));
+    }
+
+    /**
+     * The parameters the query of a statement binds. A {@code ?} in the clause in front of {@code AS}
+     * takes the ones before it, so the query must not be handed those again.
+     */
+    private static QueryOptions queryParameters(SqlDialectTranslator.Statement statement, QueryOptions options) {
+        List<Map<String, Object>> parameters = options.queryParameters();
+        if (statement.queryFirstParameter() <= 0 || parameters == null || parameters.isEmpty()
+                || !options.positionalParameters()) {
+            return options;
+        }
+        return withQueryParameters(options, parameters.subList(
+                Math.min(statement.queryFirstParameter(), parameters.size()), parameters.size()));
+    }
+
+    private static QueryOptions withQueryParameters(QueryOptions options, List<Map<String, Object>> parameters) {
+        return new QueryOptions(options.sql(), options.defaultDatasetId(), parameters, options.parameterMode(),
+                options.dryRun(), options.useLegacySql(), options.destinationTable(), options.writeDisposition(),
+                options.createDisposition(), options.schemaUpdateOptions(), options.timePartitioning(),
+                options.rangePartitioning(), options.defaultProjectId(), options.scriptIncompatibleOptions());
     }
 
     private static void applyTableOptions(Table table, Map<String, Object> options) {
@@ -5273,7 +5290,8 @@ public class BigQueryService {
                                      JobLocation jobLocation, Map<String, Optional<Table>> pinned) {
         if (pinned == null && statement.copySource() == null && statement.querySql() != null
                 && !Thread.holdsLock(writeLock)) {
-            SourceCheck sources = queryReadsTarget(projectId, statement.querySql(), options, statement.target());
+            SourceCheck sources = queryReadsTarget(projectId, statement.querySql(),
+                    queryParameters(statement, options), statement.target());
             if (sources.readsTarget()) {
                 synchronized (writeLock) {
                     createFromStatement(projectId, jobProjectId, statement, options, job, jobLocation);
@@ -5305,7 +5323,7 @@ public class BigQueryService {
         StoredTableData copiedData = null;
         if (statement.kind() == SqlDialectTranslator.StatementKind.CREATE_VIEW) {
             BigQuerySqlEngine.Result described = engine.execute(request(projectId, jobProjectId, statement.querySql(),
-                    options, true), tables(projectId, jobLocation, pinned));
+                    queryParameters(statement, options), true), tables(projectId, jobLocation, pinned));
             rejectDuplicateQueryColumns(statement, described);
             Map<String, Object> definition = new LinkedHashMap<>();
             definition.put("query", statement.querySql());
@@ -5336,7 +5354,7 @@ public class BigQueryService {
         } else if (statement.querySql() != null) {
             // Query evaluation is read-only until the destination is published below.
             BigQuerySqlEngine.Result result = engine.execute(request(projectId, jobProjectId, statement.querySql(),
-                    options, false), tables(projectId, jobLocation, pinned));
+                    queryParameters(statement, options), false), tables(projectId, jobLocation, pinned));
             rejectDuplicateQueryColumns(statement, result);
             table.setSchema(result.schema());
             rows = result.rows();

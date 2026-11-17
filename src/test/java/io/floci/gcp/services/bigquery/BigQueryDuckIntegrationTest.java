@@ -2655,6 +2655,29 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(2)
+    void createTableAsSelectReadsTheParametersAfterItsOptionExpressions() {
+        query(Map.of("query", "CREATE SCHEMA parameterized_cache", "useLegacySql", false)).then().statusCode(200);
+
+        query(Map.of("query",
+                "CREATE TABLE parameterized_cache.copied OPTIONS(description=?) AS SELECT ? AS value",
+                "useLegacySql", false, "parameterMode", "POSITIONAL",
+                "queryParameters", List.of(
+                        Map.of("parameterType", Map.of("type", "STRING"),
+                                "parameterValue", Map.of("value", "cache")),
+                        Map.of("parameterType", Map.of("type", "STRING"),
+                                "parameterValue", Map.of("value", "wanted")))))
+                .then().statusCode(200);
+
+        given().when().get(BASE + "/datasets/parameterized_cache/tables/copied")
+                .then().statusCode(200)
+                .body("description", equalTo("cache"));
+        query(Map.of("query", "SELECT value FROM parameterized_cache.copied", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("wanted"));
+    }
+
+    @Test
+    @Order(2)
     void joinGroupByOrderBy() {
         query("""
                 {"query": "SELECT u.name, SUM(o.total) AS spent, COUNT(*) FROM `bq-duck-it.shop.users` u JOIN shop.orders o ON u.id = o.user_id GROUP BY u.name ORDER BY spent DESC", "useLegacySql": false}

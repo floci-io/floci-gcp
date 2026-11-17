@@ -40,6 +40,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -913,6 +914,48 @@ class BigQueryServiceTest {
         assertEquals(Map.of("fields", List.of("entity_id")), created.getExtra().get("clustering"));
         assertEquals(String.valueOf(Instant.parse("2099-01-01T00:00:00.123456Z").toEpochMilli()),
                 created.getExtra().get("expirationTime"));
+    }
+
+    @Test
+    void createTableAsSelectBindsItsQueryToTheParametersAfterTheOptionExpressions() {
+        String sql = "CREATE TABLE ds1.cached OPTIONS(description=?) AS SELECT ? AS value";
+        List<Map<String, Object>> parameters = List.of(positionalParameter("cache"), positionalParameter("wanted"));
+
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        when(engine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("value", "STRING", null))),
+                List.of(Map.of("value", "wanted")), "SELECT", 0));
+        BigQueryService parameterizedService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), engine);
+        parameterizedService.createDataset(PROJECT, newDataset(DATASET));
+
+        parameterizedService.query(PROJECT, "US", null,
+                new BigQueryService.QueryOptions(sql, null, parameters, "POSITIONAL", false, false));
+
+        List<BigQuerySqlEngine.Request> executed = queryRequests(engine, "AS value");
+        assertEquals(1, executed.size());
+        assertEquals(List.of(parameters.get(1)), executed.getFirst().queryParameters());
+
+        BigQuerySqlEngine dryRunEngine = mock(BigQuerySqlEngine.class);
+        when(dryRunEngine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("value", "STRING", null))), List.of(), "SELECT", 0));
+        BigQueryService dryRunService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), dryRunEngine);
+        dryRunService.createDataset(PROJECT, newDataset(DATASET));
+
+        dryRunService.query(PROJECT, "US", null,
+                new BigQueryService.QueryOptions(sql, null, parameters, "POSITIONAL", true, false));
+
+        List<BigQuerySqlEngine.Request> described = queryRequests(dryRunEngine, "AS value");
+        assertEquals(1, described.size());
+        assertTrue(described.getFirst().dryRun());
+        assertEquals(List.of(parameters.get(1)), described.getFirst().queryParameters());
+    }
+
+    private static List<BigQuerySqlEngine.Request> queryRequests(BigQuerySqlEngine engine, String sqlFragment) {
+        ArgumentCaptor<BigQuerySqlEngine.Request> requests = ArgumentCaptor.forClass(BigQuerySqlEngine.Request.class);
+        verify(engine, atLeastOnce()).execute(requests.capture(), any());
+        return requests.getAllValues().stream().filter(request -> request.sql().contains(sqlFragment)).toList();
     }
 
     @Test
@@ -3254,6 +3297,10 @@ class BigQueryServiceTest {
         Dataset d = new Dataset();
         d.setDatasetReference(new DatasetReference(null, datasetId));
         return d;
+    }
+
+    private static Map<String, Object> positionalParameter(String value) {
+        return Map.of("parameterType", Map.of("type", "STRING"), "parameterValue", Map.of("value", value));
     }
 
     private Table newTable(String datasetId, String tableId) {

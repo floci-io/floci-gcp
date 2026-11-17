@@ -1788,19 +1788,22 @@ final class SqlDialectTranslator {
      * of a plain {@code CREATE TABLE}, already in BigQuery schema form. {@code options} are the
      * {@code SET OPTIONS} of an {@code ALTER TABLE}/{@code ALTER VIEW} or the overrides of
      * {@code CREATE TABLE COPY}, by option name; a null value clears the option.
+     * {@code queryFirstParameter} is the number of positional parameters the clause in front of
+     * {@code AS} already takes, so the query's own {@code ?} start after them.
      */
     record Statement(StatementKind kind, String statementType, TableRef target, String datasetTarget,
                      boolean orReplace, boolean ifNotExists, boolean ifExists, boolean cascade,
                      boolean materialized, String querySql, List<TableFieldSchema> columns,
                      Map<String, Object> options, TableRef copySource,
                      Map<String, Object> timePartitioning, Map<String, Object> rangePartitioning,
-                     PartitionExpression partitionExpression, List<String> clusteringFields) {
+                     PartitionExpression partitionExpression, List<String> clusteringFields,
+                     int queryFirstParameter) {
 
         Statement(StatementKind kind, String statementType, TableRef target, String datasetTarget,
                   boolean orReplace, boolean ifNotExists, boolean ifExists, boolean cascade,
                   boolean materialized, String querySql, List<TableFieldSchema> columns) {
             this(kind, statementType, target, datasetTarget, orReplace, ifNotExists, ifExists, cascade,
-                    materialized, querySql, columns, null, null, null, null, null, null);
+                    materialized, querySql, columns, null, null, null, null, null, null, 0);
         }
 
         Statement(StatementKind kind, String statementType, TableRef target, String datasetTarget,
@@ -1808,7 +1811,7 @@ final class SqlDialectTranslator {
                   boolean materialized, String querySql, List<TableFieldSchema> columns,
                   Map<String, Object> options) {
             this(kind, statementType, target, datasetTarget, orReplace, ifNotExists, ifExists, cascade,
-                    materialized, querySql, columns, options, null, null, null, null, null);
+                    materialized, querySql, columns, options, null, null, null, null, null, 0);
         }
 
         Statement(StatementKind kind, String statementType, TableRef target, String datasetTarget,
@@ -1818,7 +1821,7 @@ final class SqlDialectTranslator {
                   PartitionExpression partitionExpression) {
             this(kind, statementType, target, datasetTarget, orReplace, ifNotExists, ifExists, cascade,
                     materialized, querySql, columns, null, null, timePartitioning, rangePartitioning,
-                    partitionExpression, null);
+                    partitionExpression, null, 0);
         }
 
         Statement(StatementKind kind, String statementType, TableRef target, String datasetTarget,
@@ -1829,7 +1832,7 @@ final class SqlDialectTranslator {
                   PartitionExpression partitionExpression) {
             this(kind, statementType, target, datasetTarget, orReplace, ifNotExists, ifExists, cascade,
                     materialized, querySql, columns, null, copySource, timePartitioning, rangePartitioning,
-                    partitionExpression, null);
+                    partitionExpression, null, 0);
         }
 
         boolean isDml() {
@@ -1840,7 +1843,7 @@ final class SqlDialectTranslator {
         Statement withQuerySql(String sql) {
             return new Statement(kind, statementType, target, datasetTarget, orReplace, ifNotExists, ifExists,
                     cascade, materialized, sql, columns, options, copySource, timePartitioning, rangePartitioning,
-                    partitionExpression, clusteringFields);
+                    partitionExpression, clusteringFields, queryFirstParameter);
         }
 
     }
@@ -2370,7 +2373,7 @@ final class SqlDialectTranslator {
                     }
                     return new Statement(StatementKind.CREATE_TABLE, "CREATE_TABLE_COPY", target, null,
                             orReplace, ifNotExists, false, false, false, null, null, options,
-                            resolveTable(source.segments()), null, null, null, null);
+                            resolveTable(source.segments()), null, null, null, null, 0);
                 }
                 int asIndex = topLevelAsSelect(path.end());
                 if (asIndex >= 0) {
@@ -2386,7 +2389,8 @@ final class SqlDialectTranslator {
                             orReplace, ifNotExists, false, false, false, text(asIndex + 1, tokens.size()), null,
                             tableOptions, null, partitioning != null ? partitioning.timeMetadata() : null,
                             partitioning != null ? partitioning.rangeMetadata() : null,
-                            partitioning != null ? partitioning.expression() : null, clusteringFields);
+                            partitioning != null ? partitioning.expression() : null, clusteringFields,
+                            positionalParametersBefore(asIndex));
                 }
                 int open = nextSignificant(path.end(), tokens.size());
                 if (open < 0 || !tokens.get(open).isPunct("(")) {
@@ -2403,7 +2407,7 @@ final class SqlDialectTranslator {
                         ifNotExists, false, false, false, null, columns, tableOptions, null,
                         partitioning != null ? partitioning.timeMetadata() : null,
                         partitioning != null ? partitioning.rangeMetadata() : null,
-                        partitioning != null ? partitioning.expression() : null, clusteringFields);
+                        partitioning != null ? partitioning.expression() : null, clusteringFields, 0);
             }
             case "VIEW" -> {
                 TableRef target = resolveTable(path.segments());
@@ -2847,6 +2851,21 @@ final class SqlDialectTranslator {
             throw invalidQuery("CLUSTER BY requires between one and four column names.");
         }
         return List.copyOf(fields);
+    }
+
+    /**
+     * How many positional parameters the text before {@code end} already binds. The {@code ?} of an
+     * {@code OPTIONS} list come before the query of a {@code CREATE TABLE ... AS}, so they take the
+     * parameters the query would otherwise read.
+     */
+    private int positionalParametersBefore(int end) {
+        int count = 0;
+        for (int index = 0; index < end; index++) {
+            if (tokens.get(index).kind == Kind.POSITIONAL_PARAM) {
+                count++;
+            }
+        }
+        return count;
     }
 
     private static String unquoteIdentifier(String identifier) {

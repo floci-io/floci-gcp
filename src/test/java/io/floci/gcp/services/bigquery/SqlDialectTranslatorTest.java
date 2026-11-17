@@ -896,6 +896,17 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void aBracedConstructorIsRejectedLikeBigQuery() {
+        for (String sql : List.of("SELECT {'a': 1} AS s", "SELECT STRUCT({'a': 1} AS x) AS s",
+                "SELECT [{'a': 1}] AS a")) {
+            GcpException e = assertThrows(GcpException.class, () -> sql(sql));
+            assertEquals("Braced constructors are not supported", e.getMessage(), sql);
+        }
+        assertTrue(sql("SELECT '{\"a\": 1}' AS j").contains("'{\"a\": 1}'"));
+        assertTrue(sql("SELECT (SELECT AS STRUCT 1 AS x) AS s").contains("{'x': 1}"));
+    }
+
+    @Test
     void selectDistinctAsStructKeepsItsRowModifier() {
         assertTrue(sql("SELECT ARRAY(SELECT DISTINCT AS STRUCT x FROM UNNEST([1, 1]) x) AS a")
                 .contains("SELECT DISTINCT {'x': x} FROM UNNEST([1, 1])"));
@@ -3842,7 +3853,7 @@ class SqlDialectTranslatorTest {
                 SELECT * FROM "selected\"""",
                 sql("""
                         WITH selected AS (
-                          SELECT {'group_id': group_id, 'latest_at': MAX(event_time)} AS latest_per_group
+                          SELECT STRUCT(group_id, MAX(event_time) AS latest_at) AS latest_per_group
                           FROM ds.t GROUP BY group_id HAVING latest_per_group.latest_at <= '2021-01-30'
                         )
                         SELECT * FROM selected"""));
@@ -3862,7 +3873,7 @@ class SqlDialectTranslatorTest {
     void havingStructAliasWorksWithAnInlineSourceQuery() {
         String translated = sql("""
                 WITH grouped AS (
-                  SELECT {'group_id': group_id, 'latest_at': MAX(event_time)} AS latest_per_group
+                  SELECT STRUCT(group_id, MAX(event_time) AS latest_at) AS latest_per_group
                   FROM (
                     SELECT 'first' AS group_id, TIMESTAMP '2021-01-29 00:00:00+00' AS event_time
                     UNION ALL SELECT 'first', TIMESTAMP '2021-01-30 00:00:00+00'

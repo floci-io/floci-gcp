@@ -2896,6 +2896,17 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(5)
+    void aBracedConstructorIsRejectedLikeBigQuery() {
+        query(Map.of("query", "SELECT {'a': 1} AS s", "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", equalTo("Braced constructors are not supported"));
+        query(Map.of("query", "SELECT JSON_VALUE('{\"a\": 1}', '$.a') AS v", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("1"));
+    }
+
+    @Test
+    @Order(5)
     void nullsSortFirstAscendingAndLastDescendingLikeBigQuery() {
         String[][] cases = {
                 {"SELECT n FROM UNNEST([1, 3, NULL]) n ORDER BY n", "rows.collect { it.f[0].v }", "NULL,1,3"},

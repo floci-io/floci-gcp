@@ -131,6 +131,35 @@ class GcsRangeRequestRestIntegrationTest {
     }
 
     @Test
+    void aRangeCoveringTheWholeObjectIsStillPartial() {
+        ensureObject();
+
+        // GCS answers 206 with the whole object rather than ignoring the range: probed on
+        // 2026-11-17 on the public object cloud-samples-data/bigquery/us-states/
+        // us-states-by-date-no-header.csv (1222 bytes), where `bytes=0-1221`, `bytes=-1222`,
+        // `bytes=0-2000` and `bytes=0-2147483648` all answer
+        // `206 Content-Range: bytes 0-1221/1222`, on the XML API, the JSON media path and
+        // /download alike. The 2019 XML recording behind google-cloud-go's storage.replay shows 200
+        // without Content-Range for `bytes=0-15` on a 16-byte object, so the live API decides.
+        for (String range : new String[] {"bytes=0-11", "bytes=-12"}) {
+            given().header("Range", range)
+                    .when().get("/" + BUCKET + "/" + OBJECT)
+                    .then().statusCode(206)
+                    .header("Accept-Ranges", equalTo("bytes"))
+                    .header("Content-Range", equalTo("bytes 0-11/" + BODY.length()))
+                    .header("Content-Length", equalTo(String.valueOf(BODY.length())))
+                    .body(equalTo(BODY));
+        }
+
+        given().header("Range", "bytes=0-" + (BODY.length() - 1))
+                .when().get("/download/storage/v1/b/" + BUCKET + "/o/" + OBJECT + "?alt=media")
+                .then().statusCode(206)
+                .header("Accept-Ranges", nullValue())
+                .header("Content-Range", equalTo("bytes 0-11/" + BODY.length()))
+                .body(equalTo(BODY));
+    }
+
+    @Test
     void disjointRangeSetsAndUnsatisfiableRangesAreRejected() {
         ensureObject();
 

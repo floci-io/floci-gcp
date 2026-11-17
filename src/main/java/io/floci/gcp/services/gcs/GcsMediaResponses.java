@@ -45,7 +45,8 @@ final class GcsMediaResponses {
      * <p>An object stored with {@code contentEncoding: gzip} is served decompressed to a client
      * that did not ask for gzip, and as stored to one that did. GCS also ignores {@code Range} on a
      * transcoded read: the stored byte offsets do not correspond to the bytes the caller receives
-     * and answers with the whole object, which is what we do here.
+     * and answers with the whole object, which is what we do here, without advertising ranges on
+     * that response.
      */
     static Response mediaResponse(byte[] data, GcsObjectMeta meta, String rangeHeader,
             String acceptEncoding) {
@@ -63,7 +64,7 @@ final class GcsMediaResponses {
             byte[] decompressed = gunzip(data);
             if (decompressed != null) {
                 return withMetadataHeaders(Response.ok(decompressed).type(meta.getContentType()), meta, etag,
-                        xmlApi, false)
+                        xmlApi, false, true)
                         .header(HttpHeaders.CONTENT_LENGTH, decompressed.length)
                         .build();
             }
@@ -91,7 +92,7 @@ final class GcsMediaResponses {
         // Set rather than left to the HTTP layer: for an implicit HEAD it strips the body and with
         // it the Content-Length it would have generated, and a HEAD is how a client reads an
         // object's size without transferring it.
-        return withMetadataHeaders(builder.type(meta.getContentType()), meta, etag, xmlApi, range != null)
+        return withMetadataHeaders(builder.type(meta.getContentType()), meta, etag, xmlApi, range != null, false)
                 .header(HttpHeaders.CONTENT_LENGTH, contentLength)
                 .build();
     }
@@ -239,11 +240,13 @@ final class GcsMediaResponses {
     }
 
     private static Response.ResponseBuilder withMetadataHeaders(Response.ResponseBuilder builder,
-            GcsObjectMeta meta, String etag, boolean xmlApi, boolean partial) {
+            GcsObjectMeta meta, String etag, boolean xmlApi, boolean partial, boolean transcoded) {
         addHeaderIfPresent(builder, "ETag", etag);
         addHeaderIfPresent(builder, HttpHeaders.LAST_MODIFIED, lastModified(meta));
-        // The XML API advertises byte ranges and the JSON API does not, which is what GCS does.
-        if (xmlApi) {
+        // The XML API advertises byte ranges and the JSON API does not, which is what GCS does. A
+        // transcoded read ignores Range, because the stored offsets do not map to the bytes it
+        // returns, and GCS sends no Accept-Ranges on that response.
+        if (xmlApi && !transcoded) {
             builder.header("Accept-Ranges", "bytes");
         }
         addHeaderIfPresent(builder, "x-goog-generation", meta.getGeneration());

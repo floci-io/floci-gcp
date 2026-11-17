@@ -391,8 +391,9 @@ handles, or redirection. Unsupported RPCs return gRPC `UNIMPLEMENTED`.
 - `Content-Length` on a media read is the length of the bytes that read returns: the stored
   size, the range length on a `206`, or the decompressed size when the read is transcoded. HEAD
   reports the same value the matching GET would
-- The XML API advertises `Accept-Ranges: bytes` on a media read. JSON API media responses do
-  not, as on GCS. A `Range` the emulator cannot make sense of is ignored and the whole object is
+- The XML API advertises `Accept-Ranges: bytes` on a media read, except on a transcoded one,
+  which GCS does not advertise ranges on. JSON API media responses do not advertise ranges at
+  all, as on GCS. A `Range` the emulator cannot make sense of is ignored and the whole object is
   served with a `200`: an unknown unit, an empty or unparseable set, a range whose last byte
   precedes its first, a position beyond the signed 64-bit integer range, and a set of ranges
   that does not walk forward, wherever the unreadable element sits in the set. A set whose every

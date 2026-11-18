@@ -83,7 +83,7 @@ public class NotificationChannelsHttpController {
     @Path("/{channel}:getVerificationCode")
     public Response getNotificationChannelVerificationCode(@PathParam("project") String project,
             @PathParam("channel") String channel, String body) {
-        var request = ProtoJson.merge(body == null || body.isBlank() ? "{}" : body,
+        GetNotificationChannelVerificationCodeRequest request = ProtoJson.merge(body == null || body.isBlank() ? "{}" : body,
                 GetNotificationChannelVerificationCodeRequest.newBuilder()).build();
         return json(ProtoJson.print(channels.getVerificationCode(channelName(project, channel),
                 request.hasExpireTime() ? request.getExpireTime() : null)));
@@ -93,7 +93,7 @@ public class NotificationChannelsHttpController {
     @Path("/{channel}:verify")
     public Response verifyNotificationChannel(@PathParam("project") String project,
             @PathParam("channel") String channel, String body) {
-        var request = ProtoJson.merge(body == null || body.isBlank() ? "{}" : body,
+        VerifyNotificationChannelRequest request = ProtoJson.merge(body == null || body.isBlank() ? "{}" : body,
                 VerifyNotificationChannelRequest.newBuilder()).build();
         return json(ProtoJson.print(channels.verify(channelName(project, channel), request.getCode())));
     }

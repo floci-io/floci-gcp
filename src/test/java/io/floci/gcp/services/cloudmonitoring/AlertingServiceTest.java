@@ -134,6 +134,41 @@ class AlertingServiceTest {
         assertEquals(NotificationChannel.VerificationStatus.VERIFIED, channels.verify(twin.getName(), copy).getVerificationStatus());
     }
 
+    @Test
+    void aMaskedUpdateCanClearTheDisplayNameAndDescription() {
+        NotificationChannel created = channels.create(PARENT, email("ops@example.com").toBuilder()
+                .setDisplayName("Ops").setDescription("On-call").build());
+
+        NotificationChannel cleared = channels.update(NotificationChannel.newBuilder().setName(created.getName()).build(),
+                FieldMask.newBuilder().addPaths("display_name").addPaths("description").build());
+
+        assertEquals("", cleared.getDisplayName());
+        assertEquals("", cleared.getDescription());
+        assertEquals("ops@example.com", cleared.getLabelsOrThrow("email_address"));
+    }
+
+    @Test
+    void changingTheDestinationLabelsResetsVerificationAndDropsTheSentCode() {
+        FieldMask labels = FieldMask.newBuilder().addPaths("labels").build();
+        NotificationChannel sms = channels.create(PARENT, sms("+15550000001"));
+        channels.sendVerificationCode(sms.getName());
+        channels.verify(sms.getName(), channels.sentCode(sms.getName()));
+        NotificationChannel renamed = channels.update(channels.get(sms.getName()).toBuilder().setDisplayName("Phone").build(),
+                FieldMask.newBuilder().addPaths("display_name").build());
+        assertEquals(NotificationChannel.VerificationStatus.VERIFIED, renamed.getVerificationStatus());
+
+        NotificationChannel moved = channels.update(sms("+15550000002").toBuilder().setName(sms.getName()).build(), labels);
+        assertEquals(NotificationChannel.VerificationStatus.UNVERIFIED, moved.getVerificationStatus());
+        assertEquals(Status.Code.FAILED_PRECONDITION, code(() -> channels.getVerificationCode(sms.getName(), null)));
+
+        NotificationChannel pending = channels.create(PARENT, sms("+15550000003"));
+        channels.sendVerificationCode(pending.getName());
+        String sent = channels.sentCode(pending.getName());
+        channels.update(sms("+15550000004").toBuilder().setName(pending.getName()).build(), labels);
+        assertNull(channels.sentCode(pending.getName()));
+        assertEquals(Status.Code.INVALID_ARGUMENT, code(() -> channels.verify(pending.getName(), sent)));
+    }
+
     // ── Alert policies ───────────────────────────────────────────────────
 
     @Test
@@ -222,6 +257,10 @@ class AlertingServiceTest {
         channels.delete(channel.getName(), true);
         assertEquals(Status.Code.NOT_FOUND, code(() -> channels.get(channel.getName())));
         assertEquals(0, policies.get(policy.getName()).getNotificationChannelsCount());
+    }
+
+    private static NotificationChannel sms(String number) {
+        return NotificationChannel.newBuilder().setType("sms").putLabels("number", number).build();
     }
 
     private static NotificationChannel email(String address) {

@@ -155,10 +155,18 @@ class GcsCopyRestIntegrationTest {
                 .extract().path("rewriteToken");
 
         // Overwrite the live object while the chunked rewrite of firstGen is in flight.
-        upload(srcBucket, "blob.bin", "newer-live-version");
+        String liveGeneration = upload(srcBucket, "blob.bin", "newer-live-version");
 
         given()
                 .queryParam("rewriteToken", token)
+                .queryParam("sourceGeneration", liveGeneration)
+                .queryParam("maxBytesRewrittenPerCall", oneMiB)
+                .when().post("/storage/v1/b/{src}/o/blob.bin/rewriteTo/b/{dst}/o/out.bin", srcBucket, dstBucket)
+                .then().statusCode(400);
+
+        given()
+                .queryParam("rewriteToken", token)
+                .queryParam("sourceGeneration", firstGen)
                 .queryParam("maxBytesRewrittenPerCall", oneMiB)
                 .when().post("/storage/v1/b/{src}/o/blob.bin/rewriteTo/b/{dst}/o/out.bin", srcBucket, dstBucket)
                 .then().statusCode(200)

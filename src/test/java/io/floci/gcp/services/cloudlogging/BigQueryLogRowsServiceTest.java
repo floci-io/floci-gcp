@@ -3,13 +3,15 @@ package io.floci.gcp.services.cloudlogging;
 import io.floci.gcp.services.cloudlogging.model.StoredLogEntry;
 import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-class BigQueryLogRowsTest {
+class BigQueryLogRowsServiceTest {
 
     @Test
     void tableNamesFollowTheExportDocumentationExamples() {
@@ -49,7 +51,7 @@ class BigQueryLogRowsTest {
     void schemaInferenceAndAdditiveMergeReportTypeChanges() {
         StoredLogEntry first = entry("app", "2026-11-17T10:00:00Z");
         first.setJsonPayload(Map.of("count", 3, "tags", List.of("a", "b")));
-        List<Map<String, Object>> schema = BigQueryLogRows.schema(BigQueryLogRows.row(first));
+        List<Map<String, Object>> schema = schema(first).orElseThrow();
         assertTrue(schema.contains(Map.of("name", "timestamp", "type", "TIMESTAMP", "mode", "NULLABLE")));
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> payload = (List<Map<String, Object>>) schema.stream()
@@ -59,17 +61,84 @@ class BigQueryLogRowsTest {
 
         StoredLogEntry added = entry("app", "2026-11-17T10:00:00Z");
         added.setJsonPayload(Map.of("count", 4.5, "user", "u"));
-        Optional<List<Map<String, Object>>> merged = BigQueryLogRows.merge(schema,
-                BigQueryLogRows.schema(BigQueryLogRows.row(added)), new StringBuilder(), "");
+        Optional<List<Map<String, Object>>> merged = BigQueryLogRows.merge(schema, schema(added).orElseThrow(),
+                new StringBuilder(), "");
         assertTrue(merged.isPresent());
         assertTrue(merged.get().toString().contains("name=user"));
 
         StoredLogEntry changed = entry("app", "2026-11-17T10:00:00Z");
         changed.setJsonPayload(Map.of("count", "three"));
         StringBuilder conflict = new StringBuilder();
-        assertTrue(BigQueryLogRows.merge(schema, BigQueryLogRows.schema(BigQueryLogRows.row(changed)), conflict, "")
-                .isEmpty());
+        assertTrue(BigQueryLogRows.merge(schema, schema(changed).orElseThrow(), conflict, "").isEmpty());
         assertTrue(conflict.toString().contains("jsonPayload.count"), conflict.toString());
+    }
+
+    @Test
+    void arrayColumnsCoverTheKeysOfEveryItem() {
+        StoredLogEntry entry = entry("app", "2026-11-17T10:00:00Z");
+        entry.setJsonPayload(Map.of("items", List.of(Map.of("a", 1), Map.of("b", "two"))));
+
+        Map<String, Object> items = field(jsonPayloadFields(schema(entry).orElseThrow()), "items");
+
+        assertEquals("RECORD", items.get("type"));
+        assertEquals("REPEATED", items.get("mode"));
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> children = (List<Map<String, Object>>) items.get("fields");
+        assertEquals(List.of(Map.of("name", "a", "type", "FLOAT", "mode", "NULLABLE"),
+                Map.of("name", "b", "type", "STRING", "mode", "NULLABLE")), children);
+    }
+
+    @Test
+    void arraysMixingItemTypesOrHoldingArraysHaveNoSchema() {
+        StoredLogEntry mixed = entry("app", "2026-11-17T10:00:00Z");
+        mixed.setJsonPayload(Map.of("items", List.of(Map.of("a", 1), Map.of("a", "one"))));
+        StringBuilder conflict = new StringBuilder();
+        assertTrue(BigQueryLogRows.schema(BigQueryLogRows.row(mixed), conflict).isEmpty());
+        assertTrue(conflict.toString().contains("jsonPayload.items.a"), conflict.toString());
+
+        StoredLogEntry nested = entry("app", "2026-11-17T10:00:00Z");
+        nested.setJsonPayload(Map.of("matrix", List.of(List.of(1, 2))));
+        conflict = new StringBuilder();
+        assertTrue(BigQueryLogRows.schema(BigQueryLogRows.row(nested), conflict).isEmpty());
+        assertTrue(conflict.toString().contains("jsonPayload.matrix"), conflict.toString());
+    }
+
+    @Test
+    void nullsAndEmptyValuesAreLeftOutOfTheRowSoEveryRowKeyHasAColumn() {
+        StoredLogEntry entry = entry("app", "2026-11-17T10:00:00Z");
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("message", "ok");
+        payload.put("optional", null);
+        payload.put("empty", Map.of());
+        payload.put("none", List.of());
+        payload.put("sparse", Arrays.asList(null, "x"));
+        entry.setJsonPayload(payload);
+
+        Map<String, Object> row = BigQueryLogRows.row(entry);
+
+        assertEquals(Map.of("message", "ok", "sparse", List.of("x")), row.get("jsonPayload"));
+        assertEquals(List.of("message", "sparse"),
+                jsonPayloadFields(schema(entry).orElseThrow()).stream().map(field -> (String) field.get("name"))
+                        .sorted().toList());
+
+        StoredLogEntry onlyNulls = entry("app", "2026-11-17T10:00:00Z");
+        Map<String, Object> nulls = new HashMap<>();
+        nulls.put("optional", null);
+        onlyNulls.setJsonPayload(nulls);
+        assertFalse(BigQueryLogRows.row(onlyNulls).containsKey("jsonPayload"));
+    }
+
+    private static Optional<List<Map<String, Object>>> schema(StoredLogEntry entry) {
+        return BigQueryLogRows.schema(BigQueryLogRows.row(entry), new StringBuilder());
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> jsonPayloadFields(List<Map<String, Object>> schema) {
+        return (List<Map<String, Object>>) field(schema, "jsonPayload").get("fields");
+    }
+
+    private static Map<String, Object> field(List<Map<String, Object>> fields, String name) {
+        return fields.stream().filter(field -> field.get("name").equals(name)).findFirst().orElseThrow();
     }
 
     private static StoredLogEntry entry(String logId, String timestamp) {

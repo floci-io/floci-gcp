@@ -89,19 +89,17 @@ public class CloudLoggingBigQueryExporter {
         List<Map<String, Object>> grown = schema;
         for (StoredLogEntry entry : entries) {
             Map<String, Object> row = BigQueryLogRows.row(entry);
-            List<Map<String, Object>> implied = BigQueryLogRows.schema(row);
-            if (grown == null) {
-                grown = implied;
-            } else {
-                StringBuilder conflict = new StringBuilder();
-                Optional<List<Map<String, Object>>> merged = BigQueryLogRows.merge(grown, implied, conflict, "");
-                if (merged.isEmpty()) {
-                    failed.add(entry);
-                    failures.add(errorRow(sink, entry, conflict.toString()));
-                    continue;
-                }
-                grown = merged.get();
+            StringBuilder conflict = new StringBuilder();
+            Optional<List<Map<String, Object>>> merged = BigQueryLogRows.schema(row, conflict);
+            if (merged.isPresent() && grown != null) {
+                merged = BigQueryLogRows.merge(grown, merged.get(), conflict, "");
             }
+            if (merged.isEmpty()) {
+                failed.add(entry);
+                failures.add(errorRow(sink, entry, conflict.toString()));
+                continue;
+            }
+            grown = merged.get();
             rows.add(new BigQueryService.InsertRow(rows.size(), row));
         }
         if (rows.isEmpty()) {

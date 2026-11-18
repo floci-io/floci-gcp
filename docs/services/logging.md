@@ -378,10 +378,12 @@ when the sink lives in another project.
   `timestamp` and `receiveTimestamp` are `TIMESTAMP`. The keys of `labels`, `resource.labels` and
   `jsonPayload` are lowercased, unsupported characters become `_`, leading underscores are removed
   and names are capped at 128 characters. JSON objects become `RECORD` columns, arrays `REPEATED`
-  columns, numbers `FLOAT`, booleans `BOOLEAN` and strings `STRING`.
+  columns, numbers `FLOAT`, booleans `BOOLEAN` and strings `STRING`. An array's columns cover the
+  keys of all its items. Null values, empty objects and empty arrays add no column and are left out
+  of the row.
 - Schema: the first entries of a table determine its schema, and later entries may add columns.
-  An entry whose field changes type is written instead to `export_errors_YYYYMMDD` (or
-  `export_errors` for partitioned sinks) with `logEntry` (the entry as JSON), `schemaErrorDetail`,
+  An entry whose field changes type, or whose array mixes item types or holds arrays, is written
+  instead to `export_errors_YYYYMMDD` (or `export_errors` for partitioned sinks) with `logEntry` (the entry as JSON), `schemaErrorDetail`,
   `sink`, `logName`, `timestamp`, `receiveTimestamp`, `severity`, `insertId`, `trace` and
   `resourceType`.
 

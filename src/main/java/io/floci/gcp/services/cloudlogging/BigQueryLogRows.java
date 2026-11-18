@@ -44,9 +44,7 @@ final class BigQueryLogRows {
         row.put("logName", entry.getLogName());
         Map<String, Object> resource = new LinkedHashMap<>();
         resource.put("type", entry.getResourceType() == null ? "global" : entry.getResourceType());
-        if (entry.getResourceLabels() != null && !entry.getResourceLabels().isEmpty()) {
-            resource.put("labels", normalizeKeys(entry.getResourceLabels()));
-        }
+        putIfPresent(resource, "labels", entry.getResourceLabels());
         row.put("resource", resource);
         putIfPresent(row, "timestamp", entry.getTimestamp());
         putIfPresent(row, "receiveTimestamp", entry.getReceiveTimestamp());
@@ -54,21 +52,21 @@ final class BigQueryLogRows {
         putIfPresent(row, "insertId", entry.getInsertId());
         putIfPresent(row, "trace", entry.getTrace());
         putIfPresent(row, "spanId", entry.getSpanId());
-        if (entry.getLabels() != null && !entry.getLabels().isEmpty()) {
-            row.put("labels", normalizeKeys(entry.getLabels()));
-        }
+        putIfPresent(row, "labels", entry.getLabels());
         putIfPresent(row, "textPayload", entry.getTextPayload());
-        if (entry.getJsonPayload() instanceof Map<?, ?> json && !json.isEmpty()) {
-            row.put("jsonPayload", normalizeKeys(json));
+        if (entry.getJsonPayload() instanceof Map<?, ?> json) {
+            putIfPresent(row, "jsonPayload", json);
         }
         return row;
     }
 
-    /** The schema a row implies. Numbers are FLOAT, so integral and fractional values share a column. */
-    static List<Map<String, Object>> schema(Map<String, Object> row) {
-        List<Map<String, Object>> fields = new ArrayList<>();
-        row.forEach((name, value) -> field(name, value, true).ifPresent(fields::add));
-        return fields;
+    /**
+     * The schema a row implies. Numbers are FLOAT, so integral and fractional values share a column,
+     * and an array's element type merges the fields of all its items. Returns empty when the row
+     * cannot be described by one schema (array items of different types, or an array of arrays).
+     */
+    static Optional<List<Map<String, Object>>> schema(Map<String, Object> row, StringBuilder conflict) {
+        return fields(row, true, "", conflict);
     }
 
     /**
@@ -128,57 +126,97 @@ final class BigQueryLogRows {
         return normalized.length() > MAX_NAME ? normalized.substring(0, MAX_NAME) : normalized;
     }
 
+    /** Nulls, empty objects and empty arrays cannot define a column, so the row leaves them out. */
     private static Map<String, Object> normalizeKeys(Map<?, ?> value) {
         Map<String, Object> normalized = new LinkedHashMap<>();
         value.forEach((key, child) -> {
             String name = normalizeName(String.valueOf(key));
-            if (!name.isEmpty()) {
-                normalized.put(name, child instanceof Map<?, ?> map ? normalizeKeys(map) : normalizeList(child));
+            Object kept = normalizeValue(child);
+            if (!name.isEmpty() && kept != null) {
+                normalized.put(name, kept);
             }
         });
         return normalized;
     }
 
-    private static Object normalizeList(Object value) {
+    private static Object normalizeValue(Object value) {
+        if (value instanceof Map<?, ?> map) {
+            Map<String, Object> normalized = normalizeKeys(map);
+            return normalized.isEmpty() ? null : normalized;
+        }
         if (value instanceof List<?> list) {
             List<Object> normalized = new ArrayList<>();
             for (Object item : list) {
-                normalized.add(item instanceof Map<?, ?> map ? normalizeKeys(map) : item);
+                Object kept = normalizeValue(item);
+                if (kept != null) {
+                    normalized.add(kept);
+                }
             }
-            return normalized;
+            return normalized.isEmpty() ? null : normalized;
         }
         return value;
     }
 
-    private static Optional<Map<String, Object>> field(String name, Object value, boolean topLevel) {
-        if (value == null) {
-            return Optional.empty();
+    private static Optional<List<Map<String, Object>>> fields(Map<?, ?> values, boolean topLevel, String path,
+            StringBuilder conflict) {
+        List<Map<String, Object>> fields = new ArrayList<>();
+        for (Map.Entry<?, ?> value : values.entrySet()) {
+            Optional<Map<String, Object>> field = field(String.valueOf(value.getKey()), value.getValue(), topLevel,
+                    path, conflict);
+            if (field.isEmpty()) {
+                return Optional.empty();
+            }
+            fields.add(field.get());
         }
+        return Optional.of(fields);
+    }
+
+    private static Optional<Map<String, Object>> field(String name, Object value, boolean topLevel, String path,
+            StringBuilder conflict) {
         if (topLevel && (name.equals("timestamp") || name.equals("receiveTimestamp"))) {
             return Optional.of(leaf(name, "TIMESTAMP", "NULLABLE"));
         }
         if (value instanceof Map<?, ?> map) {
-            List<Map<String, Object>> children = new ArrayList<>();
-            map.forEach((key, child) -> field(String.valueOf(key), child, false).ifPresent(children::add));
-            if (children.isEmpty()) {
-                return Optional.empty();
-            }
-            Map<String, Object> record = leaf(name, "RECORD", "NULLABLE");
-            record.put("fields", children);
-            return Optional.of(record);
+            return fields(map, false, path + name + ".", conflict).map(children -> {
+                Map<String, Object> record = leaf(name, "RECORD", "NULLABLE");
+                record.put("fields", children);
+                return record;
+            });
         }
         if (value instanceof List<?> list) {
-            Optional<Object> first = list.stream().filter(item -> item != null && !(item instanceof List<?>)).findFirst()
-                    .map(item -> (Object) item);
-            if (first.isEmpty()) {
-                return Optional.empty();
-            }
-            return field(name, first.get(), false).map(element -> {
+            return element(name, list, path, conflict).map(element -> {
                 element.put("mode", "REPEATED");
                 return element;
             });
         }
         return Optional.of(leaf(name, scalarType(value), "NULLABLE"));
+    }
+
+    /** One element field covering every item, so a later item's extra keys get their own columns. */
+    private static Optional<Map<String, Object>> element(String name, List<?> items, String path,
+            StringBuilder conflict) {
+        Map<String, Object> element = null;
+        for (Object item : items) {
+            if (item instanceof List<?>) {
+                conflict.append("Field ").append(path).append(name).append(" is an array of arrays");
+                return Optional.empty();
+            }
+            Optional<Map<String, Object>> itemField = field(name, item, false, path, conflict);
+            if (itemField.isEmpty()) {
+                return Optional.empty();
+            }
+            if (element == null) {
+                element = itemField.get();
+                continue;
+            }
+            Optional<List<Map<String, Object>>> merged = merge(List.of(element), List.of(itemField.get()), conflict,
+                    path);
+            if (merged.isEmpty()) {
+                return Optional.empty();
+            }
+            element = merged.get().getFirst();
+        }
+        return Optional.of(element);
     }
 
     private static String scalarType(Object value) {
@@ -213,6 +251,15 @@ final class BigQueryLogRows {
     private static void putIfPresent(Map<String, Object> row, String name, String value) {
         if (value != null && !value.isEmpty()) {
             row.put(name, value);
+        }
+    }
+
+    private static void putIfPresent(Map<String, Object> row, String name, Map<?, ?> value) {
+        if (value != null) {
+            Map<String, Object> normalized = normalizeKeys(value);
+            if (!normalized.isEmpty()) {
+                row.put(name, normalized);
+            }
         }
     }
 }

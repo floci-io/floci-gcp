@@ -115,6 +115,39 @@ class CloudLoggingBigQueryExportIntegrationTest {
         }
     }
 
+    @Test
+    void nullsAndArrayItemsWithDifferentKeysStillLandAndMixedArraysGoToTheErrorTable() {
+        String id = id("arrays");
+        String dataset = dataset("test-project", id);
+        String log = PARENT + "/logs/" + id;
+        sink(id, "bigquery.googleapis.com/projects/test-project/datasets/" + dataset, log, false);
+        try {
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("message", "ok");
+            payload.put("optional", null);
+            payload.put("empty", Map.of());
+            payload.put("items", List.of(Map.of("a", 1), Map.of("b", "two")));
+            write(log, Map.of("timestamp", "2026-11-17T10:00:00Z", "jsonPayload", payload));
+            write(log, Map.of("timestamp", "2026-11-17T10:05:00Z",
+                    "jsonPayload", Map.of("message", "mixed", "tags", List.of(1, "one"))));
+            String table = tableUrl("test-project", dataset, id.replace("-", "_") + "_" + DAY);
+
+            given().get(table + "/data").then().statusCode(200).body("totalRows", equalTo("1"));
+            JsonPath schema = given().get(table).then().statusCode(200).extract().jsonPath();
+            assertEquals(List.of("items", "message"), schema.getList(
+                    "schema.fields.find { it.name == 'jsonPayload' }.fields.name", String.class).stream().sorted().toList());
+            assertEquals(List.of("a", "b"), schema.getList(
+                    "schema.fields.find { it.name == 'jsonPayload' }.fields.find { it.name == 'items' }.fields.name",
+                    String.class).stream().sorted().toList());
+            JsonPath errors = given().get(tableUrl("test-project", dataset, "export_errors_" + DAY) + "/data")
+                    .then().statusCode(200).body("totalRows", equalTo("1")).extract().jsonPath();
+            assertTrue(errors.getString("rows[0].f[0].v").contains("\"mixed\""));
+            assertTrue(errors.getString("rows[0].f[1].v").contains("jsonPayload.tags"));
+        } finally {
+            deleteSink(id);
+        }
+    }
+
     private static String id(String prefix) {
         return prefix + "-" + UUID.randomUUID().toString().substring(0, 8);
     }

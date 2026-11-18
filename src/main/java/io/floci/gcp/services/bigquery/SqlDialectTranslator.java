@@ -1903,12 +1903,26 @@ final class SqlDialectTranslator {
             throw invalidQuery("Syntax error: Unexpected end of script");
         }
         tokens = new Lexer(sql).tokenize();
+        rejectBracedConstructors();
         stripTrailingSemicolons();
         rejectScripts();
         validateStarReplacementWindows();
         quoteOffsetIdentifiers();
         quoteKeywordFieldNames();
         parenthesizeIntervalValues();
+    }
+
+    /**
+     * BigQuery rejects a braced constructor ({@code {'a': 1}}) with {@code Braced constructors are not supported},
+     * where DuckDB reads it as a struct literal. Only the user's SQL is checked: the translator writes its own struct
+     * literals with braces later, as text.
+     */
+    private void rejectBracedConstructors() {
+        for (Token token : tokens) {
+            if (token.isPunct("{")) {
+                throw invalidQuery("Braced constructors are not supported");
+            }
+        }
     }
 
     private void validateStarReplacementWindows() {

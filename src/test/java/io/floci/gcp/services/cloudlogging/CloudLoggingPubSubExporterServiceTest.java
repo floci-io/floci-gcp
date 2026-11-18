@@ -20,6 +20,8 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
@@ -33,11 +35,20 @@ class CloudLoggingPubSubExporterServiceTest {
     private IamAuthorizationService authorization;
     private EmulatorConfig config;
     private CloudLoggingPubSubExporter exporter;
+    private final AtomicBoolean policyLocksHeld = new AtomicBoolean();
 
     @BeforeEach
     void setUp() {
         pubsub = mock(PubSubService.class);
         authorization = mock(IamAuthorizationService.class);
+        when(authorization.withPolicyLocks(any(IamResource.class), any())).thenAnswer(invocation -> {
+            policyLocksHeld.set(true);
+            try {
+                return invocation.<Supplier<?>>getArgument(1).get();
+            } finally {
+                policyLocksHeld.set(false);
+            }
+        });
         PubSubIamAuthorizationAdapter adapter = mock(PubSubIamAuthorizationAdapter.class);
         when(adapter.requireResource(TOPIC)).thenReturn(IamResource.projectChild("pubsub.googleapis.com", "Topic", TOPIC, TOPIC));
         config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
@@ -72,6 +83,23 @@ class CloudLoggingPubSubExporterServiceTest {
         verify(authorization).authorizeServicePrincipal(eq(new IamPrincipal(WRITER)),
                 argThat((IamPermissionCheck check) -> check.permission().equals("pubsub.topics.publish")
                         && check.resource().name().equals(TOPIC)));
+    }
+
+    @Test
+    void theWriterCheckAndThePublicationRunUnderTheTopicPolicyLocks() {
+        doAnswer(invocation -> {
+            assertTrue(policyLocksHeld.get(), "writer checked outside the policy locks");
+            return null;
+        }).when(authorization).authorizeServicePrincipal(any(), any());
+        when(pubsub.publish(eq(TOPIC), anyList())).thenAnswer(invocation -> {
+            assertTrue(policyLocksHeld.get(), "published outside the policy locks");
+            return List.of("1");
+        });
+
+        exporter.export("projects/test-project", sink().build(), List.of(entry("kept", "ERROR", "2026-11-17T10:00:00Z")));
+
+        verify(authorization).withPolicyLocks(argThat((IamResource resource) -> resource.name().equals(TOPIC)), any());
+        verify(pubsub).publish(eq(TOPIC), anyList());
     }
 
     @Test

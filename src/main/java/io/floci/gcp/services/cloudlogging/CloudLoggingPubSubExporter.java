@@ -9,6 +9,7 @@ import io.floci.gcp.core.common.ProjectRegistry;
 import io.floci.gcp.core.common.ProtoJson;
 import io.floci.gcp.services.cloudlogging.model.StoredLogEntry;
 import io.floci.gcp.services.iam.IamPrincipal;
+import io.floci.gcp.services.iam.IamResource;
 import io.floci.gcp.services.iam.authorization.IamAuthorizationService;
 import io.floci.gcp.services.iam.authorization.IamPermissionCheck;
 import io.floci.gcp.services.pubsub.PubSubIamAuthorizationAdapter;
@@ -49,10 +50,14 @@ public class CloudLoggingPubSubExporter {
             throw GcpException.failedPrecondition("Pub/Sub is disabled");
         }
         String topic = sink.getDestination().substring(DESTINATION_PREFIX.length());
-        authorization.authorizeServicePrincipal(new IamPrincipal(sink.getWriterIdentity()),
-                new IamPermissionCheck("pubsub.topics.publish", adapter.requireResource(topic)));
+        IamPrincipal writer = new IamPrincipal(sink.getWriterIdentity());
+        IamResource resource = adapter.requireResource(topic);
         List<PubsubMessage> messages = routed.stream().map(CloudLoggingPubSubExporter::message).toList();
-        pubsub.publish(topic, messages);
+        // A revocation is ordered before or after the publication, never between the check and the publish.
+        authorization.withPolicyLocks(resource, () -> {
+            authorization.authorizeServicePrincipal(writer, new IamPermissionCheck("pubsub.topics.publish", resource));
+            return pubsub.publish(topic, messages);
+        });
     }
 
     private static PubsubMessage message(StoredLogEntry entry) {

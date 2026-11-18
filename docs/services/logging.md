@@ -354,8 +354,9 @@ retried. Real Cloud Logging also writes a `logging.googleapis.com/sink_error` en
 project owners for these errors; the emulator does neither.
 
 With `iam.authorization-mode=enforce`, grant the `writerIdentity` `roles/pubsub.publisher` on the
-topic or its project. Export checks `pubsub.topics.publish` against that principal. Publishing
-runs under the sink lock, like Cloud Storage delivery.
+topic or its project. Export checks `pubsub.topics.publish` against that principal. As with Cloud
+Storage delivery, the sink lock and then the topic and project policy locks are held through the
+check and the publication, so a revocation is ordered before or after it, never in between.
 
 Deviations: real Pub/Sub sinks deliver within about a minute and some sample messages carry
 additional `<service>/resource_type` and `<service>/resource_id` attributes; the emulator publishes

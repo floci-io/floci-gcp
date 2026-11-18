@@ -5,6 +5,8 @@ import com.google.api.LabelDescriptor;
 import com.google.api.MetricDescriptor;
 import com.google.logging.v2.LogMetric;
 import com.google.monitoring.v3.TimeSeries;
+import com.google.protobuf.Struct;
+import com.google.protobuf.Value;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.services.cloudlogging.model.StoredLogEntry;
@@ -15,6 +17,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
@@ -169,6 +172,43 @@ class CloudLoggingMetricServiceTest {
                 .getPoints(0).getValue().getInt64Value());
         assertEquals(1, series(written, Map.of("log", "other%2Flog", "method", "", "ok", "false", "code", "503"))
                 .getPoints(0).getValue().getInt64Value());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void wholeNumbersFromAGrpcJsonPayloadBecomeIntegerLabels() {
+        service.createLogMetric(PARENT, LogMetric.newBuilder().setName("statuses").setFilter("severity>=DEFAULT")
+                .setMetricDescriptor(MetricDescriptor.newBuilder()
+                        .addLabels(LabelDescriptor.newBuilder().setKey("code").setValueType(LabelDescriptor.ValueType.INT64))
+                        .addLabels(LabelDescriptor.newBuilder().setKey("text"))
+                        .addLabels(LabelDescriptor.newBuilder().setKey("ratio")))
+                .putLabelExtractors("code", "EXTRACT(jsonPayload.status)")
+                .putLabelExtractors("text", "EXTRACT(jsonPayload.status)")
+                .putLabelExtractors("ratio", "EXTRACT(jsonPayload.ratio)").build());
+        Map<String, Object> grpcPayload = (Map<String, Object>) Structs.toJava(Struct.newBuilder()
+                .putFields("status", Value.newBuilder().setNumberValue(503).build())
+                .putFields("ratio", Value.newBuilder().setNumberValue(0.5).build()).build());
+        assertEquals(503.0, grpcPayload.get("status"));
+
+        service.record(List.of(entry("app", "ERROR", grpcPayload, null)));
+
+        series(written(), Map.of("log", "app", "code", "503", "text", "503", "ratio", "0.5"));
+    }
+
+    @Test
+    void aBacktrackingRegexExtractsNothingInsteadOfStallingTheWrite() {
+        service.createLogMetric(PARENT, LogMetric.newBuilder().setName("words").setFilter("severity>=DEFAULT")
+                .setMetricDescriptor(MetricDescriptor.newBuilder()
+                        .addLabels(LabelDescriptor.newBuilder().setKey("word")))
+                .putLabelExtractors("word", "REGEXP_EXTRACT(textPayload, \"(a+){10}$\")").build());
+
+        assertTimeoutPreemptively(Duration.ofSeconds(10), () -> service.record(List.of(
+                entry("app", "INFO", null, "a".repeat(64) + "!"),
+                entry("app", "INFO", null, "a".repeat(12)))));
+
+        List<TimeSeries> written = written();
+        assertEquals(1, series(written, Map.of("log", "app", "word", "")).getPoints(0).getValue().getInt64Value());
+        assertEquals(1, series(written, Map.of("log", "app", "word", "a")).getPoints(0).getValue().getInt64Value());
     }
 
     @Test

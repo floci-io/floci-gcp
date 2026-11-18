@@ -447,7 +447,8 @@ Deviations from real Logging, which flushes in-memory counters once a minute:
   point ended (one minute before the end for its first point), so intervals never overlap and an
   aligned read (`ALIGN_DELTA` or `ALIGN_SUM` over 60s) gives the same totals. No zero points are
   written for idle minutes.
-- Regular expressions use `java.util.regex`, not RE2.
+- Regular expressions use `java.util.regex`, not RE2. Each match runs under a step budget, so a
+  pattern that backtracks heavily (such as `(a+){10}$`) extracts nothing rather than stalling writes.
 - Deleting a metric leaves its Cloud Monitoring descriptor and points in place. Real Logging also
   refuses to delete a metric an alerting policy uses; alerting policies are not emulated yet.
 - IAM: with enforcement on, `logging.logMetrics.{create,get,list,update,delete}` are checked on the

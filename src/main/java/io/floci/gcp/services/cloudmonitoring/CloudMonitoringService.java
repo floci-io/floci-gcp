@@ -122,7 +122,8 @@ public class CloudMonitoringService {
                 .resourceClasses(CloudMonitoringController.class, CloudMonitoringHttpController.class,
                         AlertPolicyController.class, NotificationChannelController.class, AlertPoliciesHttpController.class,
                         NotificationChannelsHttpController.class, NotificationChannelDescriptorsHttpController.class,
-                        AlertsHttpController.class)
+                        AlertsHttpController.class, UptimeCheckController.class, UptimeChecksHttpController.class,
+                        UptimeCheckIpsHttpController.class)
                 .api("monitoring.googleapis.com", "Cloud Monitoring API")
                 .build());
         grpcServerManager.bind(new CloudMonitoringController(this));

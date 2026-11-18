@@ -568,3 +568,19 @@ setup() {
         -input=false -no-color
     assert_success
 }
+
+@test "Terraform: Monitoring uptime check created with server defaults" {
+    run gcp_curl "${FLOCI_ENDPOINT}/v3/projects/${FLOCI_PROJECT}/uptimeCheckConfigs"
+    assert_success
+    assert_output --partial '"displayName":"floci-compat-health"'
+    assert_output --partial '"period":"300s"'
+    assert_output --partial '"requestMethod":"GET"'
+}
+
+@test "Terraform: Monitoring uptime check plans no changes after apply" {
+    run terraform plan -detailed-exitcode \
+        -target=google_monitoring_uptime_check_config.health \
+        -var="endpoint=${FLOCI_ENDPOINT}" -var="project=${FLOCI_PROJECT}" \
+        -input=false -no-color
+    assert_success
+}

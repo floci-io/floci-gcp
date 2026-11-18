@@ -1227,6 +1227,88 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(2)
+    void aDecimalLiteralIsFloat64UnlessItMeetsANumericLikeBigQuery() {
+        query(Map.of("query", "SELECT 0.5 AS l, x + 0.5 AS v, STRUCT(x + 0.5) AS s, 0.1 + 0.2 AS f, 2 * 0.5 AS i"
+                + " FROM UNNEST([2]) x", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of("FLOAT", "FLOAT", "RECORD", "FLOAT", "FLOAT")))
+                .body("schema.fields[2].fields[0].type", equalTo("FLOAT"))
+                .body("rows[0].f[3].v", equalTo("0.30000000000000004"));
+        query(Map.of("query", "SELECT CAST(1 AS NUMERIC) + 0.5 AS a, COALESCE(CAST(NULL AS NUMERIC), 0.25) AS b,"
+                + " IF(TRUE, 0.5, CAST(1 AS NUMERIC)) AS c, CASE WHEN TRUE THEN 0.5 ELSE CAST(1 AS NUMERIC) END AS d,"
+                + " NUMERIC '1' * 0.5 AS g, CAST(1 AS NUMERIC) + 0.5 * 2 AS h", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type",
+                        equalTo(List.of("NUMERIC", "NUMERIC", "NUMERIC", "NUMERIC", "NUMERIC", "FLOAT")))
+                .body("rows[0].f.v", equalTo(List.of("1.5", "0.25", "0.5", "0.5", "0.5", "2.0")));
+        query(Map.of("query", "SELECT NUMERIC '1' + (0.5) AS a, COALESCE(CAST(NULL AS NUMERIC), (0.25)) AS b,"
+                + " 0.1 + 0.2 + NUMERIC '1' AS c, 0.5 + NUMERIC '1' + 0.25 AS d, 0.1 * 0.2 + NUMERIC '1' AS e,"
+                + " NUMERIC '9007199254740993' IN (9007199254740992.0) AS f,"
+                + " NUMERIC '9007199254740993' BETWEEN 9007199254740992.5 AND 9007199254740992.9 AS g,"
+                + " 0.3 IN (NUMERIC '0.3') AS h", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of("NUMERIC", "NUMERIC", "FLOAT", "NUMERIC", "FLOAT",
+                        "BOOLEAN", "BOOLEAN", "BOOLEAN")))
+                .body("rows[0].f.v", equalTo(List.of("1.5", "0.25", "1.3", "1.75", "1.02", "false", "false", "true")));
+        query(Map.of("query", "SELECT ARRAY<NUMERIC>[9007199254740993.0] AS a,"
+                + " STRUCT<n NUMERIC>(9007199254740993.0) AS s, CAST(9007199254740993.0 AS NUMERIC) AS c,"
+                + " SAFE_CAST(9007199254740993.0 AS NUMERIC) AS d,"
+                + " ARRAY<FLOAT64>[0.1] AS f", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of("NUMERIC", "RECORD", "NUMERIC", "NUMERIC", "FLOAT")))
+                .body("rows[0].f[0].v[0].v", equalTo("9007199254740993"))
+                .body("rows[0].f[1].v.f[0].v", equalTo("9007199254740993"))
+                .body("rows[0].f[2].v", equalTo("9007199254740993"))
+                .body("rows[0].f[3].v", equalTo("9007199254740993"));
+        query(Map.of("query", "CREATE TEMP FUNCTION f(x NUMERIC) AS (x); CREATE TEMP FUNCTION g(x FLOAT64) AS (x);"
+                + " SELECT f(9007199254740993.0) AS a, g(0.1) AS b, f((9007199254740993.0)) AS c",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of("NUMERIC", "FLOAT", "NUMERIC")))
+                .body("rows[0].f.v", equalTo(List.of("9007199254740993", "0.1", "9007199254740993")));
+        query(Map.of("query", "CREATE TEMP FUNCTION f() AS (0.1 + 0.2); CREATE TEMP FUNCTION g(x NUMERIC) AS (x + 0.5);"
+                + " SELECT f() AS a, g(1) AS b", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of("FLOAT", "NUMERIC")))
+                .body("rows[0].f.v", equalTo(List.of("0.30000000000000004", "1.5")));
+        query(Map.of("query", "CREATE TABLE shop.decimal_literals AS SELECT CAST(1.5 AS NUMERIC) AS n",
+                "useLegacySql", false))
+                .then().statusCode(200);
+        query(Map.of("query", "INSERT INTO shop.decimal_literals (n) VALUES (0.123456789)", "useLegacySql", false))
+                .then().statusCode(200);
+        query(Map.of("query", "CREATE TEMP FUNCTION g(x NUMERIC) AS (x + 0.5 + (SELECT COUNT(*)"
+                + " FROM shop.decimal_literals WHERE FALSE)); CREATE TEMP FUNCTION h(x INT64) AS (x + 0.5"
+                + " + (SELECT COUNT(*) FROM shop.decimal_literals WHERE FALSE)); SELECT g(1) AS a, h(1) AS b",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of("NUMERIC", "FLOAT")))
+                .body("rows[0].f.v", equalTo(List.of("1.5", "1.5")));
+        query(Map.of("query", "SELECT n * 0.5 AS a, n + 0.5 * 2 AS b FROM shop.decimal_literals WHERE n > 1",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of("NUMERIC", "FLOAT")))
+                .body("rows[0].f.v", equalTo(List.of("0.75", "2.5")));
+        query(Map.of("query", "SELECT SUM(n) * 0.5 AS a, COUNTIF(n = 0.123456789) AS c FROM shop.decimal_literals",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].type", equalTo("NUMERIC"))
+                .body("rows[0].f[1].v", equalTo("1"));
+        query(Map.of("query", "INSERT INTO shop.decimal_literals (n) VALUES ((9007199254740993.0))",
+                "useLegacySql", false))
+                .then().statusCode(200);
+        query(Map.of("query", "SELECT n FROM shop.decimal_literals WHERE n > 9007199254740990", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("9007199254740993"));
+        query(Map.of("query", "UPDATE shop.decimal_literals SET n = (9007199254740995.0) WHERE n > 9007199254740990",
+                "useLegacySql", false))
+                .then().statusCode(200);
+        query(Map.of("query", "SELECT n FROM shop.decimal_literals WHERE n > 9007199254740990", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("9007199254740995"));
+    }
+
+    @Test
+    @Order(2)
     void proceduralVariablesAndLoopsExecuteOnDuck() {
         query("""
                 {"query": "DECLARE target_id INT64 DEFAULT 0; WHILE target_id < 2 DO SET target_id = target_id + 1; END WHILE; SELECT name FROM shop.users WHERE id = target_id", "useLegacySql": false}

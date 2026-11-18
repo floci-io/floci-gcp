@@ -734,7 +734,8 @@ class PubSubSubscriberControllerTest {
                         .setTable("p1.dataset.events")
                         .setUseTableSchema(true)
                         .setWriteMetadata(true)
-                        .setDropUnknownFields(true))
+                        .setDropUnknownFields(true)
+                        .setServiceAccountEmail("writer@p1.iam.gserviceaccount.com"))
                 .setExpirationPolicy(ExpirationPolicy.newBuilder()
                         .setTtl(com.google.protobuf.Duration.newBuilder().setSeconds(2678400)))
                 .build(), createObserver);
@@ -748,14 +749,40 @@ class PubSubSubscriberControllerTest {
         assertTrue(created.getBigqueryConfig().getUseTableSchema());
         assertTrue(created.getBigqueryConfig().getWriteMetadata());
         assertTrue(created.getBigqueryConfig().getDropUnknownFields());
+        assertEquals("writer@p1.iam.gserviceaccount.com",
+                created.getBigqueryConfig().getServiceAccountEmail());
         assertEquals(BigQueryConfig.State.ACTIVE, created.getBigqueryConfig().getState());
         assertEquals(2678400, created.getExpirationPolicy().getTtl().getSeconds());
+        assertEquals(Map.of(
+                "table", "p1.dataset.events",
+                "useTableSchema", true,
+                "writeMetadata", true,
+                "dropUnknownFields", true,
+                "serviceAccountEmail", "writer@p1.iam.gserviceaccount.com"),
+                service.getSubscription("projects/p1/subscriptions/s1").getBigQueryConfig());
 
         RecordingObserver<Subscription> getObserver = new RecordingObserver<>();
         controller.getSubscription(GetSubscriptionRequest.newBuilder()
                 .setSubscription("projects/p1/subscriptions/s1").build(), getObserver);
         assertNull(getObserver.error.get());
         assertEquals(created, getObserver.values.get(0));
+    }
+
+    @Test
+    void getSubscriptionOverGrpcReturnsAServiceAccountStoredOverRest() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10,
+                null, false, null, null, null,
+                Map.of("serviceAccountEmail", "writer@p1.iam.gserviceaccount.com"),
+                null, null, null, 0, false, false);
+
+        RecordingObserver<Subscription> responseObserver = new RecordingObserver<>();
+        controller.getSubscription(GetSubscriptionRequest.newBuilder()
+                .setSubscription("projects/p1/subscriptions/s1").build(), responseObserver);
+
+        assertNull(responseObserver.error.get());
+        assertEquals("writer@p1.iam.gserviceaccount.com",
+                responseObserver.values.get(0).getBigqueryConfig().getServiceAccountEmail());
     }
 
     @Test

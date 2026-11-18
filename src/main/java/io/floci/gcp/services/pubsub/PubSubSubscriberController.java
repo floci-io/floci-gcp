@@ -502,17 +502,32 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
         if (stored.getMessageRetentionDuration() != null) {
             try {
                 builder.setMessageRetentionDuration(Durations.parse(stored.getMessageRetentionDuration()));
-            } catch (ParseException ignored) {}
+            } catch (ParseException e) {
+                LOG.debugf(e, "Ignoring invalid message retention duration for subscription %s: %s",
+                        stored.getName(), stored.getMessageRetentionDuration());
+            }
         }
         if (stored.getBigQueryConfig() != null) {
             Map<String, Object> config = stored.getBigQueryConfig();
-            BigQueryConfig.Builder bigQuery = BigQueryConfig.newBuilder()
-                    .setTable(stringValue(config, "table"))
-                    .setUseTopicSchema(booleanValue(config, "useTopicSchema"))
-                    .setUseTableSchema(booleanValue(config, "useTableSchema"))
-                    .setWriteMetadata(booleanValue(config, "writeMetadata"))
-                    .setDropUnknownFields(booleanValue(config, "dropUnknownFields"))
-                    .setState(BigQueryConfig.State.ACTIVE);
+            BigQueryConfig.Builder bigQuery = BigQueryConfig.newBuilder().setState(BigQueryConfig.State.ACTIVE);
+            if (config.containsKey("table")) {
+                bigQuery.setTable(stringValue(config, "table"));
+            }
+            if (config.containsKey("useTopicSchema")) {
+                bigQuery.setUseTopicSchema(booleanValue(config, "useTopicSchema"));
+            }
+            if (config.containsKey("useTableSchema")) {
+                bigQuery.setUseTableSchema(booleanValue(config, "useTableSchema"));
+            }
+            if (config.containsKey("writeMetadata")) {
+                bigQuery.setWriteMetadata(booleanValue(config, "writeMetadata"));
+            }
+            if (config.containsKey("dropUnknownFields")) {
+                bigQuery.setDropUnknownFields(booleanValue(config, "dropUnknownFields"));
+            }
+            if (config.containsKey("serviceAccountEmail")) {
+                bigQuery.setServiceAccountEmail(stringValue(config, "serviceAccountEmail"));
+            }
             builder.setBigqueryConfig(bigQuery.build());
         }
         if (stored.getExpirationPolicy() != null) {
@@ -522,7 +537,10 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
                     builder.setExpirationPolicy(ExpirationPolicy.newBuilder()
                             .setTtl(Durations.parse(ttl.toString()))
                             .build());
-                } catch (ParseException ignored) {}
+                } catch (ParseException e) {
+                    LOG.debugf(e, "Ignoring invalid expiration TTL for subscription %s: %s",
+                            stored.getName(), ttl);
+                }
             }
         }
         if (stored.getDeadLetterTopic() != null) {
@@ -544,11 +562,24 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
         }
         BigQueryConfig config = request.getBigqueryConfig();
         Map<String, Object> stored = new LinkedHashMap<>();
-        stored.put("table", config.getTable());
-        stored.put("useTopicSchema", config.getUseTopicSchema());
-        stored.put("useTableSchema", config.getUseTableSchema());
-        stored.put("writeMetadata", config.getWriteMetadata());
-        stored.put("dropUnknownFields", config.getDropUnknownFields());
+        if (!config.getTable().isEmpty()) {
+            stored.put("table", config.getTable());
+        }
+        if (config.getUseTopicSchema()) {
+            stored.put("useTopicSchema", true);
+        }
+        if (config.getUseTableSchema()) {
+            stored.put("useTableSchema", true);
+        }
+        if (config.getWriteMetadata()) {
+            stored.put("writeMetadata", true);
+        }
+        if (config.getDropUnknownFields()) {
+            stored.put("dropUnknownFields", true);
+        }
+        if (!config.getServiceAccountEmail().isEmpty()) {
+            stored.put("serviceAccountEmail", config.getServiceAccountEmail());
+        }
         return stored;
     }
 

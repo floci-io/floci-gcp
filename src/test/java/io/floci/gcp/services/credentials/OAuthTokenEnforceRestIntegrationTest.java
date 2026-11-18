@@ -148,6 +148,33 @@ class OAuthTokenEnforceRestIntegrationTest {
     }
 
     @Test
+    void jwtExchangedWhileItsAccountIsReplacedGetsNoToken() throws Exception {
+        KeyFile key = createKey(email);
+        String assertion = assertion(key, claims(key.email(), AUDIENCE, 0, 3600), "RS256", key.keyId());
+        // The exchange is held after the deleted account's key has verified the assertion and before the
+        // issuance lock, while an account with the same email replaces it; the replacement is not the
+        // account that signed.
+        AtomicBoolean armed = new AtomicBoolean(true);
+        CountDownLatch paused = new CountDownLatch(1);
+        CountDownLatch released = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            if (armed.compareAndSet(true, false)) {
+                paused.countDown();
+                assertTrue(released.await(10, TimeUnit.SECONDS), "the exchange was never released");
+            }
+            return invocation.callRealMethod();
+        }).when(tokens).mintImpersonatedToken(eq(email), any(), any());
+
+        CompletableFuture<Response> exchanged = CompletableFuture.supplyAsync(() -> exchange("/token", assertion));
+        assertTrue(paused.await(10, TimeUnit.SECONDS), "the exchange never reached the token store");
+        iam.deleteServiceAccount(project, email);
+        iam.createServiceAccount(project, "app", null, null);
+        released.countDown();
+
+        invalidGrant(exchanged.get(10, TimeUnit.SECONDS), OAuthTokenService.ACCOUNT_NOT_FOUND);
+    }
+
+    @Test
     void aMissingOrUnknownIssuerIsAccountNotFound() throws Exception {
         KeyFile key = createKey(email);
         Map<String, Object> missing = claims(key.email(), AUDIENCE, 0, 3600);

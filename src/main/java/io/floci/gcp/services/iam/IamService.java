@@ -280,7 +280,10 @@ public class IamService {
         ServiceAccountRef ref = resolve(project, emailOrId);
         String key = saKey(ref.project(), ref.email());
         withPolicyLocks(accountPolicyResources(ref.project(), ref.email()), () -> {
+            // A unique ID resolved before the lock may name an account deleted since, whose email a
+            // replacement now holds; the request must not reach the replacement.
             StoredServiceAccount sa = saStore.get(key)
+                    .filter(found -> namesAccount(emailOrId, found))
                     .orElseThrow(() -> GcpException.notFound("Service account not found: " + ref.email()));
             if (sa.isDisabled() != disabled) {
                 sa.setDisabled(disabled);
@@ -691,25 +694,37 @@ public class IamService {
     /**
      * The public parts of the keys that sign for the account with this email at {@code now}, by key ID:
      * its valid user-managed keys and, once it has signed, its Google-managed key. Empty when no such
-     * account exists. A deleted key verifies nothing.
+     * account exists. A deleted key verifies nothing. The account and its keys are read under the lock
+     * that deleting and creating the account take, so the keys are those of the account whose unique ID
+     * is returned with them.
      */
-    public Optional<Map<String, PublicKey>> publicKeys(String email, Instant now) {
+    public Optional<AccountKeys> publicKeys(String email, Instant now) {
         String project = email == null ? null : projectFromEmail(email);
-        if (project == null || saStore.get(saKey(project, email)).isEmpty()) {
+        if (project == null) {
             return Optional.empty();
         }
-        Map<String, PublicKey> keys = new LinkedHashMap<>();
-        for (StoredServiceAccountKey key : keyStore.scan(k -> k.startsWith(keyStoragePrefix(project, email)))) {
-            boolean valid = (key.getValidAfterTime() == null || !now.isBefore(Instant.parse(key.getValidAfterTime())))
-                    && (key.getValidBeforeTime() == null || now.isBefore(Instant.parse(key.getValidBeforeTime())));
-            if (valid && key.getPublicKeyData() != null) {
-                keys.put(key.getKeyId(), publicKey(key.getPublicKeyData()));
+        return withPolicyLocks(accountPolicyResources(project, email), () -> {
+            Optional<StoredServiceAccount> account = saStore.get(saKey(project, email));
+            if (account.isEmpty()) {
+                return Optional.empty();
             }
-        }
-        signingKeyStore.get(signingKeyStorageKey(project, email))
-                .ifPresent(key -> keys.put(key.getKeyId(), signingPublicKey(key)));
-        return Optional.of(keys);
+            Map<String, PublicKey> keys = new LinkedHashMap<>();
+            for (StoredServiceAccountKey key : keyStore.scan(k -> k.startsWith(keyStoragePrefix(project, email)))) {
+                boolean valid = (key.getValidAfterTime() == null
+                        || !now.isBefore(Instant.parse(key.getValidAfterTime())))
+                        && (key.getValidBeforeTime() == null || now.isBefore(Instant.parse(key.getValidBeforeTime())));
+                if (valid && key.getPublicKeyData() != null) {
+                    keys.put(key.getKeyId(), publicKey(key.getPublicKeyData()));
+                }
+            }
+            signingKeyStore.get(signingKeyStorageKey(project, email))
+                    .ifPresent(key -> keys.put(key.getKeyId(), signingPublicKey(key)));
+            return Optional.of(new AccountKeys(account.get().getUniqueId(), keys));
+        });
     }
+
+    /** The keys that sign for an account, and the unique ID of the account they belong to. */
+    public record AccountKeys(String uniqueId, Map<String, PublicKey> keys) {}
 
     private static PublicKey signingPublicKey(StoredSigningKey key) {
         try {

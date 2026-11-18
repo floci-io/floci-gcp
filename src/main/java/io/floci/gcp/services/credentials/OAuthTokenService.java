@@ -124,7 +124,7 @@ public class OAuthTokenService {
             return oauthError("invalid_request", "Bad Request");
         }
         String email = claims.path("iss").isTextual() ? claims.get("iss").asText() : null;
-        Optional<Map<String, PublicKey>> keys = email == null ? Optional.empty()
+        Optional<IamService.AccountKeys> keys = email == null ? Optional.empty()
                 : accounts.get().publicKeys(email, clock.instant());
         if (keys.isEmpty()) {
             return oauthError("invalid_grant", ACCOUNT_NOT_FOUND);
@@ -162,16 +162,17 @@ public class OAuthTokenService {
         }
         byte[] signedInput = (parts[0] + "." + parts[1]).getBytes(StandardCharsets.US_ASCII);
         if (!"RS256".equals(header.path("alg").asText(null))
-                || !verifies(keys.get(), header.path("kid").asText(null), signedInput, signature)) {
+                || !verifies(keys.get().keys(), header.path("kid").asText(null), signedInput, signature)) {
             return oauthError("invalid_grant", INVALID_SIGNATURE);
         }
         if (!Arrays.stream(scope.asText().trim().split("\\s+")).allMatch(GOOGLE_SCOPES::contains)) {
             return oauthError("invalid_scope", INVALID_SCOPE);
         }
+        String uniqueId = keys.get().uniqueId();
         StoredCredentialToken token;
         try {
             token = tokens.mintImpersonatedToken(email, clock.instant().plusSeconds(TOKEN_LIFETIME_SECONDS),
-                    () -> requireEnabledAccount(email));
+                    () -> requireEnabledAccount(email, uniqueId));
         } catch (RefusedAssertion refused) {
             return refused.response;
         }
@@ -180,10 +181,12 @@ public class OAuthTokenService {
 
     /**
      * Run under the lock that revoking a deleted account's tokens takes, so an account deleted or disabled
-     * since its keys were read gets no token, and one deleted after this check has the token revoked.
+     * since its keys were read gets no token, and one deleted after this check has the token revoked. The
+     * account is the one whose key verified the assertion: a replacement with the same email is not it.
      */
-    private void requireEnabledAccount(String email) {
-        Optional<StoredServiceAccount> account = accounts.get().findServiceAccount(email);
+    private void requireEnabledAccount(String email, String uniqueId) {
+        Optional<StoredServiceAccount> account = accounts.get().findServiceAccount(email)
+                .filter(found -> uniqueId.equals(found.getUniqueId()));
         if (account.isEmpty()) {
             throw new RefusedAssertion(oauthError("invalid_grant", ACCOUNT_NOT_FOUND));
         }

@@ -449,8 +449,11 @@ measured against `https://oauth2.googleapis.com/token` in the review of
   service account. This answer comes from Google's documentation and was not
   measured: the table gives no HTTP status, so Floci answers `401`, as Google does
   for other client errors such as `invalid_client`, and checks it last. This check
-  and the one on `iss` run again under the lock that revocation takes, so an account
-  deleted or disabled while its assertion is checked gets no token.
+  and the one on `iss` run again under the lock that revocation takes, against the
+  account whose key verified the assertion, so an account deleted or disabled while
+  its assertion is checked gets no token. An account created with the same email in
+  the meantime is not that account: the assertion gets `invalid_grant` with
+  `Invalid grant: account not found`, as for a deleted account.
 - The access token is valid for 3600 seconds and acts as the service account on
   every enforcing surface, like a token from IAM Credentials `generateAccessToken`.
 
@@ -559,7 +562,10 @@ the real project. As on GCP, a missing account or key addressed through `-` retu
 `serviceAccounts.disable` and `serviceAccounts.enable` set the account's output-only
 `disabled` field, which responses include only while it is `true`, as proto3 JSON
 omits a `false` field. Both return an empty JSON object, and disabling a disabled
-account or enabling an enabled one has no effect. As the
+account or enabling an enabled one has no effect. Addressed by its unique ID, the
+request acts only on the account with that ID: if it is deleted while the request
+runs, the answer is `404 NOT_FOUND`, also when an account with the same email has
+been created in the meantime. As the
 [disable reference](https://docs.cloud.google.com/iam/docs/reference/rest/v1/projects.serviceAccounts/disable)
 documents, "Existing access tokens for the service account are rejected", and after
 the account is re-enabled "its existing access tokens will be accepted". In `enforce`

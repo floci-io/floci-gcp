@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.TreeMap;
+import java.util.function.Predicate;
 
 /**
  * Turns the entries one write delivers into one DELTA point per series. Real Logging flushes
@@ -47,7 +48,7 @@ final class LogMetricRecorder {
     }
 
     void record(String project, String metricName, LogMetric metric, List<StoredLogEntry> entries) {
-        var matches = SinkLogEntryFilter.parse(metric.getFilter());
+        Predicate<StoredLogEntry> matches = SinkLogEntryFilter.parse(metric.getFilter());
         MetricDescriptor descriptor = metric.getMetricDescriptor();
         boolean distribution = descriptor.getValueType() == MetricDescriptor.ValueType.DISTRIBUTION;
         Map<String, LogMetricExtractor> labelExtractors = new TreeMap<>();
@@ -139,7 +140,7 @@ final class LogMetricRecorder {
     private static double[] bounds(Distribution.BucketOptions options) {
         return switch (options.getOptionsCase()) {
             case LINEAR_BUCKETS -> {
-                var linear = options.getLinearBuckets();
+                Distribution.BucketOptions.Linear linear = options.getLinearBuckets();
                 double[] bounds = new double[linear.getNumFiniteBuckets() + 1];
                 for (int i = 0; i < bounds.length; i++) {
                     bounds[i] = linear.getOffset() + linear.getWidth() * i;
@@ -147,7 +148,7 @@ final class LogMetricRecorder {
                 yield bounds;
             }
             case EXPONENTIAL_BUCKETS -> {
-                var exponential = options.getExponentialBuckets();
+                Distribution.BucketOptions.Exponential exponential = options.getExponentialBuckets();
                 double[] bounds = new double[exponential.getNumFiniteBuckets() + 1];
                 for (int i = 0; i < bounds.length; i++) {
                     bounds[i] = exponential.getScale() * Math.pow(exponential.getGrowthFactor(), i);

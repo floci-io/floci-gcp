@@ -144,6 +144,8 @@ regex, and nested parentheses are not supported; unrecognized clauses are ignore
 - `ListLogs`
 - `DeleteLog`
 - `CreateSink`, `GetSink`, `ListSinks`, `UpdateSink`, `DeleteSink` over gRPC and REST JSON
+- `CreateLogMetric`, `GetLogMetric`, `ListLogMetrics`, `UpdateLogMetric`, `DeleteLogMetric` over gRPC and REST JSON
+  (see [Log-based metrics](#log-based-metrics))
 
 ## Sink configuration
 
@@ -400,9 +402,66 @@ represents `labels` and `resource.labels` as `RECORD` columns keyed by label nam
 documentation does not state their shape). Semantics follow
 [BigQuery routing](https://docs.cloud.google.com/logging/docs/export/bigquery).
 
+## Log-based metrics
+
+`MetricsServiceV2` is served on gRPC and on REST JSON at `/v2/projects/{project}/metrics`. A metric
+identifier may contain `/`; REST callers send it as `%2F` (`nginx%2Frequests`). `UpdateLogMetric`
+replaces the metric and creates it when it does not exist. Duplicate creates fail with
+`ALREADY_EXISTS`, missing metrics with `NOT_FOUND`.
+
+Validation follows the
+[LogMetric reference](https://cloud.google.com/logging/docs/reference/v2/rest/v2/projects.metrics):
+
+- `name` up to 100 characters from `A-Z a-z 0-9 _-.,+!*',()%/`, not starting with `/`; `filter`
+  required, up to 20,000 characters, in the same strict subset sinks use; `description` up to 8,000.
+- Without `metricDescriptor`, the metric is a counter: `DELTA`, `INT64`, no labels, unit `1`.
+  `metricDescriptor.name`, `type` and `description` are output only and are filled from the metric:
+  the type is `logging.googleapis.com/user/<name>`. Only `DELTA` with `INT64` or `DISTRIBUTION` is
+  accepted. Metric kind, value type and existing labels cannot change on update; new labels and
+  label descriptions can.
+- Up to 10 labels, keys `[a-zA-Z][a-zA-Z0-9_]*`, types `STRING`, `BOOL` or `INT64`. Every label needs
+  an entry in `labelExtractors`, and every extractor needs a label.
+- Extractors are `EXTRACT(field)` or `REGEXP_EXTRACT(field, "regex")` with exactly one capture
+  group, over the fields the routing filter supports. The field is converted to a string first. A
+  distribution needs `valueExtractor` and `bucketOptions` (linear, exponential or explicit).
+- `bucketName` is stored and must name a bucket in the metric's project; log buckets themselves
+  are not emulated, so it does not scope what the metric counts.
+
+### Points in Cloud Monitoring
+
+Each accepted, non-dry-run write is counted into every enabled metric of the entry's project, after
+sink export. Only entries received after the metric exists count; nothing is backfilled. Each
+series (metric labels plus the entry's monitored resource) gets one `DELTA` point per write: the
+number of matching entries for a counter, or a `Distribution` of the extracted values. Every series
+carries the default `log` label, the URL-encoded LOG_ID part of the entry's `logName`. A failed
+label extraction yields `""`, `0` or `false`; a value that fails extraction or conversion to a
+number is not recorded. Label values keep their first 1,024 characters.
+
+Creating or updating a metric upserts its descriptor in Cloud Monitoring (with the `log` label),
+so `ListTimeSeries` and `GetMetricDescriptor` for `logging.googleapis.com/user/<name>` work as for
+any metric. When Cloud Monitoring is disabled, metrics are still managed but record nothing.
+
+Deviations from real Logging, which flushes in-memory counters once a minute:
+
+- Points are written when entries arrive. A point's interval starts where the series' previous
+  point ended (one minute before the end for its first point), so intervals never overlap and an
+  aligned read (`ALIGN_DELTA` or `ALIGN_SUM` over 60s) gives the same totals. No zero points are
+  written for idle minutes.
+- Regular expressions use `java.util.regex`, not RE2.
+- Deleting a metric leaves its Cloud Monitoring descriptor and points in place. Real Logging also
+  refuses to delete a metric an alerting policy uses; alerting policies are not emulated yet.
+- IAM: with enforcement on, `logging.logMetrics.{create,get,list,update,delete}` are checked on the
+  metric (create) or project (list), with `roles/logging.admin` and `roles/logging.configWriter`
+  granting all five and `roles/logging.viewer` and `roles/logging.privateLogViewer` get and list,
+  as the [Logging roles reference](https://docs.cloud.google.com/iam/docs/roles-permissions/logging) lists.
+
+Semantics follow the [log-based metrics overview](https://docs.cloud.google.com/logging/docs/logs-based-metrics),
+[labels](https://docs.cloud.google.com/logging/docs/logs-based-metrics/labels) and
+[distribution metrics](https://docs.cloud.google.com/logging/docs/logs-based-metrics/distribution-metrics).
+
 ## Not Yet Supported
 
 `TailLogEntries` (streaming), `protoPayload`/`httpRequest`/`operation`/`sourceLocation`/`split`
-fields, monitored-resource-descriptor catalog, log-based metrics (`MetricsServiceV2`),
+fields, monitored-resource-descriptor catalog, log-based metric backfill,
 log buckets and other `ConfigServiceV2` methods, advanced filter operators, and retention/dedup
 semantics.

@@ -543,3 +543,26 @@ setup() {
         -input=false -no-color
     assert_success
 }
+
+@test "OpenTofu: log-based counter metric created with its default unit" {
+    run gcp_curl "${FLOCI_ENDPOINT}/v2/projects/${FLOCI_PROJECT}/metrics/floci_compat%2Ferrors_tofu"
+    assert_success
+    assert_output --partial '"name":"floci_compat/errors_tofu"'
+    assert_output --partial '"unit":"1"'
+    assert_output --partial '"type":"logging.googleapis.com/user/floci_compat/errors_tofu"'
+}
+
+@test "OpenTofu: log-based distribution metric keeps its bucket options" {
+    run gcp_curl "${FLOCI_ENDPOINT}/v2/projects/${FLOCI_PROJECT}/metrics/floci_compat_latency_tofu"
+    assert_success
+    assert_output --partial '"valueType":"DISTRIBUTION"'
+    assert_output --partial '"numFiniteBuckets":3'
+}
+
+@test "OpenTofu: log-based metrics plan no changes after apply" {
+    run tofu plan -detailed-exitcode \
+        -target=google_logging_metric.errors -target=google_logging_metric.latency \
+        -var="endpoint=${FLOCI_ENDPOINT}" -var="project=${FLOCI_PROJECT}" \
+        -input=false -no-color
+    assert_success
+}

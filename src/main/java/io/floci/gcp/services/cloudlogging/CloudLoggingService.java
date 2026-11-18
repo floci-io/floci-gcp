@@ -39,14 +39,17 @@ public class CloudLoggingService {
     private final EmulatorConfig config;
     private final GrpcServerManager grpcServerManager;
     private final CloudLoggingSinkService sinkService;
+    private final CloudLoggingMetricService metricService;
 
     @Inject
     public CloudLoggingService(ServiceRegistry serviceRegistry, EmulatorConfig config,
-            StorageFactory storageFactory, GrpcServerManager grpcServerManager, CloudLoggingSinkService sinkService) {
+            StorageFactory storageFactory, GrpcServerManager grpcServerManager, CloudLoggingSinkService sinkService,
+            CloudLoggingMetricService metricService) {
         this.serviceRegistry = serviceRegistry;
         this.config = config;
         this.grpcServerManager = grpcServerManager;
         this.sinkService = sinkService;
+        this.metricService = metricService;
         this.entryStore = storageFactory.createGlobal("cloudlogging-entries", "cloudlogging-entries.json",
                 new TypeReference<Map<String, StoredLogEntry>>() {});
     }
@@ -57,6 +60,7 @@ public class CloudLoggingService {
         this.config = null;
         this.grpcServerManager = null;
         this.sinkService = null;
+        this.metricService = null;
     }
 
     void onStart(@Observes StartupEvent ev) {
@@ -65,13 +69,15 @@ public class CloudLoggingService {
                 .storageKey("logging")
                 .protocol(ServiceProtocol.GRPC)
                 .resourceClasses(CloudLoggingController.class, CloudLoggingConfigController.class,
-                        CloudLoggingConfigHttpController.class)
+                        CloudLoggingConfigHttpController.class, CloudLoggingMetricsController.class,
+                        CloudLoggingMetricsHttpController.class)
                 .api("logging.googleapis.com", "Cloud Logging API", CloudLoggingHttpController.class)
                 .usageAdapter(new CloudLoggingServiceUsageAdapter())
                 .build());
         grpcServerManager.bind(new CloudLoggingController(this));
         if (config.services().logging().enabled()) {
             grpcServerManager.bind(new CloudLoggingConfigController(sinkService));
+            grpcServerManager.bind(new CloudLoggingMetricsController(metricService));
         }
     }
 
@@ -120,6 +126,9 @@ public class CloudLoggingService {
         }
         if (sinkService != null) {
             sinkService.exportEntries(entries);
+        }
+        if (metricService != null) {
+            metricService.record(entries);
         }
         LOG.debugf("writeLogEntries stored %d entries", entries.size());
     }

@@ -26,6 +26,8 @@ the API endpoint / transport channel and disabling credentials:
 - Monitored resource descriptors: `ListMonitoredResourceDescriptors`, `GetMonitoredResourceDescriptor`.
 - Time series: `CreateTimeSeries` (write points) and `ListTimeSeries` (read back over a time interval,
   raw or aggregated).
+- Log-based metrics: creating a Cloud Logging metric publishes its `logging.googleapis.com/user/<name>`
+  descriptor here, and matching log writes add `DELTA` points (see [Log-based metrics](logging.md#log-based-metrics)).
 - `TypedValue` point values (`bool`, `int64`, `double`, `string`, `distribution`) are preserved round-trip.
 - `CreateTimeSeries` writes the valid series of a request even when others fail. It then answers
   `INVALID_ARGUMENT` with a `CreateTimeSeriesSummary` in the error details, over gRPC and REST. A

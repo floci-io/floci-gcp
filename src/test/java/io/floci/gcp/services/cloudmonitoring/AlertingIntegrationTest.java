@@ -16,13 +16,18 @@ import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
+import io.quarkus.runtime.StartupEvent;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
+import jakarta.enterprise.inject.spi.BeanManager;
+import jakarta.enterprise.inject.spi.ObserverMethod;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
 import java.net.URI;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 import static io.restassured.RestAssured.given;
@@ -35,6 +40,18 @@ class AlertingIntegrationTest {
 
     @TestHTTPResource
     URI endpoint;
+
+    @Inject
+    BeanManager beanManager;
+
+    @Test
+    void alertingGrpcBindsAfterTheMonitoringDescriptorIsRegistered() {
+        Set<ObserverMethod<? super StartupEvent>> observers = beanManager.resolveObserverMethods(new StartupEvent());
+        int registers = startupPriority(observers, CloudMonitoringService.class);
+        int binds = startupPriority(observers, AlertPolicyService.class);
+        assertTrue(binds > registers, "AlertPolicyService binds at priority " + binds
+                + ", not after the monitoring registration at " + registers);
+    }
 
     @Test
     void restManagesChannelsAndPoliciesTheWayTerraformCallsThem() {
@@ -114,5 +131,10 @@ class AlertingIntegrationTest {
         } finally {
             grpc.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
         }
+    }
+
+    private static int startupPriority(Set<ObserverMethod<? super StartupEvent>> observers, Class<?> bean) {
+        return observers.stream().filter(observer -> observer.getBeanClass().equals(bean))
+                .mapToInt(ObserverMethod::getPriority).findFirst().orElseThrow();
     }
 }

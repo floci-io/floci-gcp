@@ -17,9 +17,11 @@ import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.core.storage.StorageFactory;
 import io.floci.gcp.lifecycle.GrpcServerManager;
 import io.quarkus.runtime.StartupEvent;
+import jakarta.annotation.Priority;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
+import jakarta.interceptor.Interceptor;
 
 import java.security.SecureRandom;
 import java.time.Clock;
@@ -74,7 +76,8 @@ public class AlertPolicyService {
         }
     }
 
-    void onStart(@Observes StartupEvent ev) {
+    /** After CloudMonitoringService registers the monitoring descriptor, which bind reads for the Service Usage gate. */
+    void onStart(@Observes @Priority(Interceptor.Priority.LIBRARY_AFTER + 100) StartupEvent ev) {
         grpcServerManager.bind(new AlertPolicyController(this));
         grpcServerManager.bind(new NotificationChannelController(channels));
     }

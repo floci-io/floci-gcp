@@ -1,7 +1,7 @@
 package io.floci.gcp.services.cloudlogging;
 
-import io.restassured.path.json.JsonPath;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.json.JsonPath;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;

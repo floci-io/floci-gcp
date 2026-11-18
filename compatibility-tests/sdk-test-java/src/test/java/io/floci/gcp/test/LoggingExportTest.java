@@ -5,17 +5,19 @@ import com.google.api.gax.core.NoCredentialsProvider;
 import com.google.api.gax.grpc.GrpcTransportChannel;
 import com.google.api.gax.rpc.FixedTransportChannelProvider;
 import com.google.api.gax.rpc.TransportChannelProvider;
+import com.google.cloud.bigquery.BigQuery;
+import com.google.cloud.bigquery.DatasetId;
+import com.google.cloud.bigquery.DatasetInfo;
+import com.google.cloud.bigquery.FieldValueList;
+import com.google.cloud.bigquery.TableId;
+import com.google.cloud.bigquery.TableResult;
 import com.google.cloud.logging.v2.ConfigClient;
+import com.google.cloud.logging.v2.ConfigSettings;
+import com.google.cloud.logging.v2.LoggingClient;
 import com.google.cloud.pubsub.v1.SubscriptionAdminClient;
 import com.google.cloud.pubsub.v1.SubscriptionAdminSettings;
 import com.google.cloud.pubsub.v1.TopicAdminClient;
 import com.google.cloud.pubsub.v1.TopicAdminSettings;
-import com.google.pubsub.v1.PushConfig;
-import com.google.pubsub.v1.ReceivedMessage;
-import io.grpc.ManagedChannel;
-import io.grpc.ManagedChannelBuilder;
-import com.google.cloud.logging.v2.ConfigSettings;
-import com.google.cloud.logging.v2.LoggingClient;
 import com.google.cloud.storage.Blob;
 import com.google.cloud.storage.BucketInfo;
 import com.google.cloud.storage.Storage;
@@ -31,6 +33,10 @@ import com.google.protobuf.Struct;
 import com.google.protobuf.Timestamp;
 import com.google.protobuf.Value;
 import com.google.protobuf.util.JsonFormat;
+import com.google.pubsub.v1.PushConfig;
+import com.google.pubsub.v1.ReceivedMessage;
+import io.grpc.ManagedChannel;
+import io.grpc.ManagedChannelBuilder;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
@@ -194,8 +200,8 @@ class LoggingExportTest {
         String parent = "projects/" + TestFixtures.projectId();
         String log = parent + "/logs/" + id;
         String dataset = id.replace("-", "_");
-        com.google.cloud.bigquery.BigQuery bigquery = TestFixtures.bigQueryClient();
-        bigquery.create(com.google.cloud.bigquery.DatasetInfo.of(dataset));
+        BigQuery bigquery = TestFixtures.bigQueryClient();
+        bigquery.create(DatasetInfo.of(dataset));
         ConfigSettings settings = ConfigSettings.newBuilder()
                 .setTransportChannelProvider(ConfigSettings.defaultGrpcTransportProviderBuilder()
                         .setEndpoint(TestFixtures.grpcTarget())
@@ -214,11 +220,11 @@ class LoggingExportTest {
                         .addEntries(entry().setSeverity(LogSeverity.INFO).setTextPayload("filtered"))
                         .build());
                 String table = id.replace("-", "_") + "_20261020";
-                com.google.cloud.bigquery.TableId tableId = com.google.cloud.bigquery.TableId.of(dataset, table);
-                com.google.cloud.bigquery.TableResult rows = bigquery.listTableData(tableId,
+                TableId tableId = TableId.of(dataset, table);
+                TableResult rows = bigquery.listTableData(tableId,
                         bigquery.getTable(tableId).getDefinition().getSchema());
                 assertThat(rows.getTotalRows()).isEqualTo(1);
-                com.google.cloud.bigquery.FieldValueList row = rows.iterateAll().iterator().next();
+                FieldValueList row = rows.iterateAll().iterator().next();
                 assertThat(row.get("logName").getStringValue()).isEqualTo(log);
                 assertThat(row.get("severity").getStringValue()).isEqualTo("ERROR");
                 assertThat(row.get("jsonPayload").getRecordValue().get("message").getStringValue())
@@ -228,8 +234,7 @@ class LoggingExportTest {
                 logging.deleteLog(log);
             }
         } finally {
-            bigquery.delete(com.google.cloud.bigquery.DatasetId.of(dataset),
-                    com.google.cloud.bigquery.BigQuery.DatasetDeleteOption.deleteContents());
+            bigquery.delete(DatasetId.of(dataset), BigQuery.DatasetDeleteOption.deleteContents());
         }
     }
 

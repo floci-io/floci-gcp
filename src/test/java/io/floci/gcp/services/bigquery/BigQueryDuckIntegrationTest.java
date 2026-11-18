@@ -2678,6 +2678,27 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(2)
+    void duplicateClusteringFieldAndDuplicateOptionQuoteWhatBigQueryReports() {
+        query(Map.of("query", "CREATE SCHEMA duplicates", "useLegacySql", false)).then().statusCode(200);
+        query(Map.of("query", "CREATE TABLE duplicates.duplicate_clustering (id INT64) CLUSTER BY id, ID",
+                        "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message",
+                        equalTo("Field can only appear once in clustering fields. Invalid field: id."));
+        query(Map.of("query", "CREATE TABLE duplicates.ctas_duplicate CLUSTER BY id, ID AS SELECT 1 AS id",
+                        "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message",
+                        equalTo("Same column cannot be used multiple times as clustering column: 'id'"));
+        query(Map.of("query",
+                        "CREATE TABLE duplicates.duplicate_options (id INT64) OPTIONS(description='a', DESCRIPTION='b')",
+                        "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", equalTo("'description' is specified more than once in table OPTIONS"));
+    }
+
+    @Test
+    @Order(2)
     void joinGroupByOrderBy() {
         query("""
                 {"query": "SELECT u.name, SUM(o.total) AS spent, COUNT(*) FROM `bq-duck-it.shop.users` u JOIN shop.orders o ON u.id = o.user_id GROUP BY u.name ORDER BY spent DESC", "useLegacySql": false}

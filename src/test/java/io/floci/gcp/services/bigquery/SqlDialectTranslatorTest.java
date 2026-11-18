@@ -4514,9 +4514,15 @@ class SqlDialectTranslatorTest {
         assertEquals("5 clustering fields specified, exceeding the limit of 4.",
                 tooManyClusteringFields.getMessage());
         GcpException clusteringExpression = assertThrows(GcpException.class, () ->
-                statement("CREATE TABLE ds.lowered (id STRING) CLUSTER BY LOWER(id)"));
+                statement("CREATE TABLE ds.lowered (name STRING) CLUSTER BY LOWER(name)"));
         assertEquals("Entries in the CLUSTER BY clause must be column names",
                 clusteringExpression.getMessage());
+        GcpException emptyClustering = assertThrows(GcpException.class, () ->
+                statement("CREATE TABLE ds.empty (id STRING) CLUSTER BY"));
+        assertEquals("Syntax error: Expected a column name in CLUSTER BY", emptyClustering.getMessage());
+        GcpException trailingClustering = assertThrows(GcpException.class, () ->
+                statement("CREATE TABLE ds.trailing (id STRING) CLUSTER BY id,"));
+        assertEquals("Syntax error: Expected a column name in CLUSTER BY", trailingClustering.getMessage());
 
         GcpException ingestionCtas = assertThrows(GcpException.class, () -> statement(
                 "CREATE TABLE ds.daily PARTITION BY DATE(_PARTITIONTIME) AS SELECT event_time FROM ds.src"));
@@ -4570,6 +4576,9 @@ class SqlDialectTranslatorTest {
     void alterRejectsWhatBigQueryRejectsAndWhatFlociDoesNotSupport() {
         assertEquals("Unknown option: foo", assertThrows(GcpException.class,
                 () -> statement("ALTER TABLE ds.t SET OPTIONS(foo='bar')")).getMessage());
+        assertEquals("'description' is specified more than once in table OPTIONS",
+                assertThrows(GcpException.class, () -> statement(
+                        "ALTER TABLE ds.t SET OPTIONS(description='a', DESCRIPTION='b')")).getMessage());
         assertEquals("Option description value has type INT64 which cannot be coerced to expected type STRING",
                 assertThrows(GcpException.class,
                         () -> statement("ALTER TABLE ds.t SET OPTIONS(description=5)")).getMessage());

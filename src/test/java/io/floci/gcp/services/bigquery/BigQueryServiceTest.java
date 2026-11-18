@@ -931,7 +931,9 @@ class BigQueryServiceTest {
                 {"CREATE TABLE ds1.bytes (b BYTES) CLUSTER BY b",
                         "Field b has type BYTES, which is not supported for clustering."},
                 {"CREATE TABLE ds1.unresolved (id STRING) CLUSTER BY missing_id",
-                        "Unrecognized name: missing_id"}
+                        "Unrecognized name: missing_id"},
+                {"CREATE TABLE ds1.duplicate (a INT64) CLUSTER BY a, A",
+                        "Field can only appear once in clustering fields. Invalid field: a."}
         };
         for (String[] c : rejected) {
             GcpException error = assertThrows(GcpException.class, () ->
@@ -944,6 +946,24 @@ class BigQueryServiceTest {
 
         assertEquals(Map.of("fields", List.of("g")),
                 service.getTable(PROJECT, DATASET, "geography").getExtra().get("clustering"));
+    }
+
+    @Test
+    void createTableAsSelectRejectsADuplicateClusteringColumn() {
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        when(engine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("id", "INTEGER", null))),
+                List.of(Map.of("id", 1L)), "SELECT", 0));
+        BigQueryService duplicateService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), engine);
+        duplicateService.createDataset(PROJECT, newDataset(DATASET));
+
+        GcpException duplicate = assertThrows(GcpException.class, () -> duplicateService.query(PROJECT, "US", null,
+                "CREATE TABLE ds1.ctas_duplicate CLUSTER BY id, ID AS SELECT 1 AS id", null));
+
+        assertEquals("invalidQuery", duplicate.getReason());
+        assertEquals("Same column cannot be used multiple times as clustering column: 'id'",
+                duplicate.getMessage());
     }
 
     @Test

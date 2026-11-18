@@ -5510,6 +5510,7 @@ public class BigQueryService {
             return;
         }
         List<TableFieldSchema> fields = schemaFields(table);
+        Set<String> seen = new HashSet<>();
         for (String clusteringField : statement.clusteringFields()) {
             TableFieldSchema field = fields.stream()
                     .filter(candidate -> candidate.getName() != null
@@ -5533,6 +5534,12 @@ public class BigQueryService {
             if (!CLUSTERABLE_FIELD_TYPES.contains(type.toUpperCase(Locale.ROOT))) {
                 throw QueryEngine.invalidQuery("Field " + field.getName() + " has type " + type
                         + ", which is not supported for clustering.");
+            }
+            if (!seen.add(field.getName().toLowerCase(Locale.ROOT))) {
+                String name = field.getName();
+                throw QueryEngine.invalidQuery(statement.querySql() != null
+                        ? "Same column cannot be used multiple times as clustering column: '" + name + "'"
+                        : "Field can only appear once in clustering fields. Invalid field: " + name + ".");
             }
         }
     }

@@ -2522,6 +2522,7 @@ final class SqlDialectTranslator {
             throw invalidQuery("Syntax error: Unexpected \"" + tokens.get(trailing).text + "\"");
         }
         Map<String, Object> values = new LinkedHashMap<>();
+        List<String> optionNames = new ArrayList<>();
         int depth = 0;
         int start = open + 1;
         int positionalBefore = 0;
@@ -2531,6 +2532,7 @@ final class SqlDialectTranslator {
                 List<Token> item = significant(start, k);
                 if (!item.isEmpty()) {
                     readOption(item, values, positionalBefore, allowExpirationExpression);
+                    optionNames.add(item.getFirst().text.toLowerCase(Locale.ROOT));
                     positionalBefore += (int) item.stream()
                             .filter(token -> token.kind == Kind.POSITIONAL_PARAM).count();
                 }
@@ -2539,6 +2541,12 @@ final class SqlDialectTranslator {
                 depth++;
             } else if (t.isPunct(")") || t.isPunct("]")) {
                 depth--;
+            }
+        }
+        Set<String> seen = new HashSet<>();
+        for (String name : optionNames) {
+            if (!seen.add(name)) {
+                throw invalidQuery("'" + name + "' is specified more than once in table OPTIONS");
             }
         }
         return values;
@@ -2835,6 +2843,9 @@ final class SqlDialectTranslator {
             Token token = index < end ? tokens.get(index) : null;
             if (index == end || depth == 0 && token.isPunct(",")) {
                 List<Token> field = significant(start, index);
+                if (field.isEmpty()) {
+                    throw invalidQuery("Syntax error: Expected a column name in CLUSTER BY");
+                }
                 if (field.size() != 1 || field.getFirst().kind != Kind.IDENT
                         && field.getFirst().kind != Kind.QIDENT) {
                     throw invalidQuery("Entries in the CLUSTER BY clause must be column names");
@@ -2846,9 +2857,6 @@ final class SqlDialectTranslator {
             } else if (token.isPunct(")") || token.isPunct("]")) {
                 depth--;
             }
-        }
-        if (fields.isEmpty()) {
-            throw invalidQuery("Syntax error: Expected a column name in CLUSTER BY");
         }
         if (fields.size() > 4) {
             throw invalidQuery(fields.size() + " clustering fields specified, exceeding the limit of 4.");

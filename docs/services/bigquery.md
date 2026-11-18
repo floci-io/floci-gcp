@@ -765,12 +765,16 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
   time zone name (`America/Los_Angeles`, `EST5EDT`), as in BigQuery. A lowercase `t` or `z`
   (`2014-09-27t12:30:00.45`, `2014-09-27 12:30:00.45z`) is coerced when the other side of the comparison
   or `BETWEEN` is temporal as written: a typed literal, a temporal function or `CAST`, or a table column
-  of that type. Three forms differ: compared with anything else (an `UNNEST` element, a subquery column)
-  such a value fails with `Cannot compare values of type TIMESTAMP WITH TIME ZONE and type VARCHAR`, where
-  BigQuery accepts it; a lowercase zone name (`america/los_angeles`) is accepted, where BigQuery fails with `Invalid time
-  zone`; and a value with a zone name compared with a `DATE` succeeds, where BigQuery fails with `Invalid
-  date`. An unknown zone name fails with DuckDB's `Unknown TimeZone` rather than BigQuery's `Invalid time
-  zone`.
+  of that type. There the value is also checked as BigQuery checks it, with BigQuery's message: a `DATE`
+  takes a date alone (`Invalid date: '2014-09-27 12:30:00'`), a `DATETIME` no zone (`Invalid datetime
+  string "2014-09-27T12:30:00Z"`), and a `TIMESTAMP` needs the seconds of any time and a zone name it
+  knows, written in its own case (`Invalid timestamp: '2014-09-27T12:30'`, `Invalid time zone: utc`).
+  `DATE_TRUNC`, whose type follows its argument, an operand in `+` or `-` arithmetic (`DATE '2014-09-27' +
+  INTERVAL 1 DAY` is a `DATETIME`), and a parameter tested itself (`@a BETWEEN x AND y`) are not checked.
+  Compared with anything else (an `UNNEST` element, a subquery column) a lowercase `t` or `z` value fails
+  with `Cannot compare values of type TIMESTAMP WITH TIME ZONE and type VARCHAR`, where BigQuery accepts
+  it, and any other value is cast as DuckDB casts it: a time part or zone is dropped for a `DATE` or
+  `DATETIME`, and an unknown zone name fails with DuckDB's `Unknown TimeZone`.
 - `ORDER BY` sorts a `FLOAT64` `NaN` just after `NULL` (ascending) as BigQuery does, through an extra sort key
   that is added only when the query visibly can hold a `NaN` (a `'NaN'` string, `IEEE_DIVIDE`, a `FLOAT64`
   parameter, or a table with a `FLOAT64` column read right after `FROM` or `JOIN`). `NaN` still sorts last,

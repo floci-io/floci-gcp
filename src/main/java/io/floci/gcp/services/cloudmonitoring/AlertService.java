@@ -32,6 +32,11 @@ public class AlertService {
     private static final Pattern NAME = Pattern.compile("projects/[^/\\s]+/alerts/[^/\\s]+");
     private static final TypeReference<Map<String, Object>> MAP = new TypeReference<>() {};
     static final String KEY = "_key";
+    /** End time of the newest point seen for the alert's series; auto-close counts from it. */
+    static final String LAST_DATA = "_lastData";
+    /** The policy's auto-close duration in seconds, kept so alerts of a deleted policy can still close. */
+    static final String AUTO_CLOSE = "_autoCloseSeconds";
+    private static final String INTERNAL = "_";
     private static final int DEFAULT_PAGE = 50;
     private static final int MAX_PAGE = 1000;
 
@@ -114,6 +119,30 @@ public class AlertService {
         }
     }
 
+    /** Every open alert of every project, for closing the alerts of policies that are no longer evaluated. */
+    List<Map<String, Object>> allOpenAlerts() {
+        synchronized (lock) {
+            List<Map<String, Object>> open = new ArrayList<>();
+            for (String name : alerts.keys()) {
+                Map<String, Object> alert = read(name);
+                if ("OPEN".equals(alert.get("state"))) {
+                    open.add(alert);
+                }
+            }
+            return open;
+        }
+    }
+
+    /** Records internal bookkeeping fields on a stored alert; the returned copy is the stored one. */
+    Map<String, Object> update(Map<String, Object> alert, Map<String, Object> fields) {
+        synchronized (lock) {
+            Map<String, Object> updated = new LinkedHashMap<>(alert);
+            updated.putAll(fields);
+            write(updated);
+            return updated;
+        }
+    }
+
     Map<String, Object> open(String project, String key, Map<String, Object> fields) {
         synchronized (lock) {
             String name;
@@ -149,7 +178,7 @@ public class AlertService {
 
     static Map<String, Object> visible(Map<String, Object> alert) {
         Map<String, Object> copy = new LinkedHashMap<>(alert);
-        copy.remove(KEY);
+        copy.keySet().removeIf(field -> field.startsWith(INTERNAL));
         return copy;
     }
 

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.api.Metric;
 import com.google.api.MonitoredResource;
+import com.google.monitoring.v3.Aggregation;
 import com.google.monitoring.v3.AlertPolicy;
 import com.google.monitoring.v3.ComparisonType;
 import com.google.monitoring.v3.NotificationChannel;
@@ -13,8 +14,10 @@ import com.google.monitoring.v3.TimeSeries;
 import com.google.monitoring.v3.TypedValue;
 import com.google.protobuf.BoolValue;
 import com.google.protobuf.Duration;
+import com.google.protobuf.FieldMask;
 import com.google.protobuf.Timestamp;
 import com.google.pubsub.v1.PubsubMessage;
+import io.floci.gcp.core.common.PageToken;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.services.pubsub.PubSubService;
 import org.junit.jupiter.api.BeforeEach;
@@ -226,6 +229,94 @@ class AlertPolicyEvaluatorTest {
         assertEquals(listed.getFirst(), alerts.getAlert(name));
         assertFalse(alerts.getAlert(name).containsKey(AlertService.KEY));
         assertEquals(2, alerts.listAlerts(PROJECT, null, "open_time", 0, null).get("totalSize"));
+    }
+
+    @Test
+    void missingDataActiveOpensAnAlertForASeriesThatStoppedReporting() {
+        AlertPolicy.Condition active = threshold(0.9, 120).toBuilder().setConditionThreshold(threshold(0.9, 120)
+                .getConditionThreshold().toBuilder()
+                .setEvaluationMissingData(AlertPolicy.Condition.EvaluationMissingData.EVALUATION_MISSING_DATA_ACTIVE)).build();
+        policies.create(PROJECT, policy("active", active));
+        policies.create(PROJECT, policy("default", threshold(0.9, 120)));
+        write("vm-1", 0.5, NOW.minusSeconds(600));
+        write("vm-2", 0.5, NOW.minusSeconds(30));
+
+        evaluator.tick(NOW);
+
+        List<Map<String, Object>> open = alertsList("state=\"OPEN\"");
+        assertEquals(1, open.size());
+        assertEquals("active", ((Map<?, ?>) open.getFirst().get("policy")).get("displayName"));
+        assertEquals(Map.of("type", "gce_instance", "labels", Map.of("instance_id", "vm-1")), open.getFirst().get("resource"));
+    }
+
+    @Test
+    void aSeriesSplitAcrossPagesIsEvaluatedWhole() {
+        CloudMonitoringService onePointPages = new CloudMonitoringService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                Clock.fixed(NOW.plusSeconds(3600), ZoneOffset.UTC)) {
+            @Override
+            public PageToken.Page<TimeSeries> listTimeSeries(String parentProject, String filter, TimeInterval interval,
+                    Aggregation aggregation, String view, int pageSize, String pageToken) {
+                return super.listTimeSeries(parentProject, filter, interval, aggregation, view, 1, pageToken);
+            }
+        };
+        monitoring = onePointPages;
+        evaluator = new AlertPolicyEvaluator(policies, channels, onePointPages, alerts,
+                new AlertNotifier(pubsub, (url, authorization, body) -> posts.add(body)), true, 30);
+        policies.create(PROJECT, policy("recovered", threshold(0.9, 0)));
+        policies.create(PROJECT, policy("sustained", threshold(0.9, 60)));
+        write("vm-1", 0.95, NOW.minusSeconds(60));
+        write("vm-1", 0.5, NOW.minusSeconds(10));
+        write("vm-2", 0.95, NOW.minusSeconds(70));
+        write("vm-2", 0.96, NOW.minusSeconds(5));
+
+        evaluator.tick(NOW);
+
+        List<Map<String, Object>> open = alertsList(null);
+        assertEquals(List.of("recovered|vm-2", "sustained|vm-2"), open.stream()
+                .map(alert -> ((Map<?, ?>) alert.get("policy")).get("displayName") + "|"
+                        + ((Map<?, ?>) ((Map<?, ?>) alert.get("resource")).get("labels")).get("instance_id"))
+                .sorted().toList());
+    }
+
+    @Test
+    void anOngoingBreachStaysOpenPastTheAutoCloseDuration() {
+        policies.create(PROJECT, policy("CPU", threshold(0.9, 0)).toBuilder().addNotificationChannels(hook)
+                .setAlertStrategy(AlertPolicy.AlertStrategy.newBuilder().setAutoClose(Duration.newBuilder().setSeconds(1800)))
+                .build());
+        write("vm-1", 0.95, NOW.minusSeconds(30));
+        evaluator.tick(NOW);
+        write("vm-1", 0.96, NOW.plusSeconds(1790));
+
+        evaluator.tick(NOW.plusSeconds(1801));
+
+        List<Map<String, Object>> listed = alertsList(null);
+        assertEquals(1, listed.size());
+        assertEquals("OPEN", listed.getFirst().get("state"));
+        assertEquals(1, posts.size());
+    }
+
+    @Test
+    void alertsOfDeletedOrDisabledPoliciesCloseSilentlyWhenAutoCloseExpires() {
+        AlertPolicy.AlertStrategy halfHour = AlertPolicy.AlertStrategy.newBuilder()
+                .setAutoClose(Duration.newBuilder().setSeconds(1800)).build();
+        AlertPolicy deleted = policies.create(PROJECT, policy("deleted", threshold(0.9, 0)).toBuilder()
+                .addNotificationChannels(hook).setAlertStrategy(halfHour).build());
+        AlertPolicy disabled = policies.create(PROJECT, policy("disabled", threshold(0.9, 0)).toBuilder()
+                .addNotificationChannels(hook).setAlertStrategy(halfHour).build());
+        write("vm-1", 0.95, NOW.minusSeconds(30));
+        evaluator.tick(NOW);
+        assertEquals(2, alertsList("state=\"OPEN\"").size());
+        policies.delete(deleted.getName());
+        policies.update(disabled.toBuilder().setEnabled(BoolValue.of(false)).build(),
+                FieldMask.newBuilder().addPaths("enabled").build());
+
+        evaluator.tick(NOW.plusSeconds(60));
+        assertEquals(2, alertsList("state=\"OPEN\"").size());
+
+        evaluator.tick(NOW.plusSeconds(1801));
+        assertTrue(alertsList("state=\"OPEN\"").isEmpty());
+        assertEquals(2, alertsList("state=\"CLOSED\"").size());
+        assertEquals(2, posts.size());
     }
 
     @SuppressWarnings("unchecked")

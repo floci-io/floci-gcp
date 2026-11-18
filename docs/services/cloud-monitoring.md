@@ -101,8 +101,12 @@ policy that has one is skipped.
   condition is met; `AND_WITH_MATCHING_RESOURCE` only for resources that violate every condition.
 - Alerts: "only one open alert for each time series in an alerting policy". An alert closes when its
   series no longer violates; when a series has no data, `EVALUATION_MISSING_DATA_INACTIVE` closes
-  it and the other settings keep it open. `alertStrategy.autoClose` (default seven days) closes
-  alerts that stay open longer.
+  it and the other settings keep it open. With a nonzero `duration`,
+  `EVALUATION_MISSING_DATA_ACTIVE` also opens an alert for a series that reported in the last 25
+  hours but has no point within `duration`. `alertStrategy.autoClose` (default seven days) closes an
+  alert once its series has had no data for that long (plus 24 hours under
+  `EVALUATION_MISSING_DATA_ACTIVE`); fresh data keeps an ongoing breach open. Alerts of a deleted or
+  disabled policy close without a notification when that duration expires.
 - Notifications go out when an alert opens and when it closes, as the version 1.2 JSON packet
   (`incident.state` `open`/`closed`, `started_at`/`ended_at` in epoch seconds, `observed_value`,
   `threshold_value`, `condition`, `documentation`, `policy_name` and so on). `webhook_tokenauth`

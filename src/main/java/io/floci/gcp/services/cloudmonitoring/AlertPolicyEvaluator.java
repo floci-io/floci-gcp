@@ -21,6 +21,7 @@ import org.jboss.logging.Logger;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -37,7 +38,8 @@ import java.util.concurrent.TimeUnit;
  * through {@link CloudMonitoringService#listTimeSeries} under the policy's project. One alert is
  * kept open per condition and time series; notifications go out when an alert opens and when it
  * closes. Log match, MQL, PromQL and SQL conditions are not evaluated, and a policy that has one is
- * skipped.
+ * skipped. Auto-close counts from the newest point of an alert's series, and the alerts of a deleted,
+ * disabled or skipped policy close silently once it expires.
  */
 @ApplicationScoped
 public class AlertPolicyEvaluator {
@@ -45,6 +47,7 @@ public class AlertPolicyEvaluator {
     private static final Duration DEFAULT_AUTO_CLOSE = Duration.ofDays(7);
     private static final Duration DEFAULT_ALIGNMENT = Duration.ofMinutes(1);
     private static final Duration MAX_LOOKBACK = Duration.ofHours(25);
+    private static final Duration MISSING_DATA_ACTIVE_GRACE = Duration.ofHours(24);
 
     private final AlertPolicyService policies;
     private final NotificationChannelService channels;
@@ -102,24 +105,52 @@ public class AlertPolicyEvaluator {
     }
 
     synchronized void tick(Instant now) {
+        Set<String> evaluated = new HashSet<>();
         for (AlertPolicy policy : policies.listAll()) {
             try {
-                evaluate(policy, now);
+                if (evaluate(policy, now)) {
+                    evaluated.add(policy.getName());
+                }
             } catch (RuntimeException e) {
                 LOG.warnf(e, "Alert policy %s could not be evaluated", policy.getName());
+            }
+        }
+        closeUnevaluated(evaluated, now);
+    }
+
+    /**
+     * A deleted or disabled policy is not evaluated, so its open alerts would never close. They close
+     * when the auto-close duration the policy last had expires, without a notification: a deleted
+     * policy has no channels left and a disabled one sends none.
+     */
+    private void closeUnevaluated(Set<String> evaluated, Instant now) {
+        for (Map<String, Object> alert : alerts.allOpenAlerts()) {
+            String policy = AlertService.policyName(alert);
+            if (policy != null && evaluated.contains(policy)) {
+                continue;
+            }
+            Duration autoClose = alert.get(AlertService.AUTO_CLOSE) instanceof Number seconds
+                    ? Duration.ofSeconds(seconds.longValue()) : DEFAULT_AUTO_CLOSE;
+            if (expired(lastData(alert), autoClose, now)) {
+                alerts.close(alert, now.toString());
+                LOG.debugf("Closed alert %s of policy %s, which is no longer evaluated", alert.get("name"), policy);
             }
         }
     }
 
     // ── Policy ───────────────────────────────────────────────────────────
 
-    private record Violation(Map<String, Object> resource, Map<String, Object> metric, String observed) {}
+    /** {@code lastData} is the end of the series' newest point, or null when no series has data. */
+    private record Violation(Map<String, Object> resource, Map<String, Object> metric, String observed,
+            Instant lastData) {}
 
-    private record Result(boolean met, Map<String, Violation> violations, Set<String> present) {}
+    private record Result(boolean met, Map<String, Violation> violations, Set<String> present,
+            Map<String, Instant> lastData) {}
 
-    private void evaluate(AlertPolicy policy, Instant now) {
+    /** Returns false when the policy was not evaluated: it is disabled or has an unsupported condition. */
+    private boolean evaluate(AlertPolicy policy, Instant now) {
         if (policy.hasEnabled() && !policy.getEnabled().getValue()) {
-            return;
+            return false;
         }
         String project = policy.getName().substring(0, policy.getName().indexOf("/alertPolicies/"));
         Map<String, Result> results = new LinkedHashMap<>();
@@ -130,7 +161,7 @@ public class AlertPolicyEvaluator {
                 default -> Optional.empty();
             };
             if (result.isEmpty()) {
-                return;
+                return false;
             }
             results.put(condition.getName(), result.get());
         }
@@ -139,9 +170,16 @@ public class AlertPolicyEvaluator {
         Map<String, AlertPolicy.Condition> conditions = new LinkedHashMap<>();
         policy.getConditionsList().forEach(condition -> conditions.put(condition.getName(), condition));
         String openTime = now.toString();
+        Duration autoClose = policy.getAlertStrategy().hasAutoClose()
+                ? Duration.ofSeconds(policy.getAlertStrategy().getAutoClose().getSeconds()) : DEFAULT_AUTO_CLOSE;
 
         for (Map.Entry<String, Violation> one : firing.entrySet()) {
             if (alerts.openAlert(project, one.getKey()).isPresent()) {
+                continue;
+            }
+            Instant lastData = one.getValue().lastData() == null ? now : one.getValue().lastData();
+            AlertPolicy.Condition condition = conditions.get(conditionOf(one.getKey()));
+            if (expired(lastData, closeAfter(condition, autoClose), now)) {
                 continue;
             }
             Map<String, Object> fields = new LinkedHashMap<>();
@@ -149,18 +187,18 @@ public class AlertPolicyEvaluator {
             fields.put("policy", snapshot(policy));
             fields.put("resource", one.getValue().resource());
             fields.put("metric", one.getValue().metric());
+            fields.put(AlertService.LAST_DATA, lastData.toString());
+            fields.put(AlertService.AUTO_CLOSE, autoClose.getSeconds());
             Map<String, Object> alert = alerts.open(project, one.getKey(), fields);
-            notifier.notify(policy, conditions.get(conditionOf(one.getKey())), AlertService.visible(alert),
-                    one.getValue().observed(), channels(policy));
+            notifier.notify(policy, condition, AlertService.visible(alert), one.getValue().observed(), channels(policy));
         }
 
-        Duration autoClose = policy.getAlertStrategy().hasAutoClose()
-                ? Duration.ofSeconds(policy.getAlertStrategy().getAutoClose().getSeconds()) : DEFAULT_AUTO_CLOSE;
-        for (Map<String, Object> alert : alerts.openAlerts(policy.getName())) {
-            String key = (String) alert.get(AlertService.KEY);
+        for (Map<String, Object> stored : alerts.openAlerts(policy.getName())) {
+            String key = (String) stored.get(AlertService.KEY);
             String conditionName = conditionOf(key);
             AlertPolicy.Condition condition = conditions.get(conditionName);
-            boolean expired = Instant.parse((String) alert.get("openTime")).plus(autoClose).isBefore(now);
+            Map<String, Object> alert = recordData(stored, results.get(conditionName), key, autoClose);
+            boolean expired = expired(lastData(alert), closeAfter(condition, autoClose), now);
             if (firing.containsKey(key) && !expired) {
                 continue;
             }
@@ -172,6 +210,49 @@ public class AlertPolicyEvaluator {
                 notifier.notify(policy, condition, AlertService.visible(closed), null, channels(policy));
             }
         }
+        return true;
+    }
+
+    /** Moves the alert's last data time to its series' newest point, and keeps the policy's auto-close. */
+    private Map<String, Object> recordData(Map<String, Object> alert, Result result, String key, Duration autoClose) {
+        Instant seen = result == null ? null : result.lastData().get(seriesOf(key));
+        Instant last = lastData(alert);
+        boolean newer = seen != null && seen.isAfter(last);
+        boolean autoCloseChanged = !(alert.get(AlertService.AUTO_CLOSE) instanceof Number seconds)
+                || seconds.longValue() != autoClose.getSeconds();
+        if (!newer && !autoCloseChanged) {
+            return alert;
+        }
+        Map<String, Object> fields = new LinkedHashMap<>();
+        fields.put(AlertService.LAST_DATA, (newer ? seen : last).toString());
+        fields.put(AlertService.AUTO_CLOSE, autoClose.getSeconds());
+        return alerts.update(alert, fields);
+    }
+
+    /**
+     * Auto-close counts from the last data. With missing data evaluated as active, the docs give the
+     * auto-close duration plus 24 hours.
+     */
+    private static Duration closeAfter(AlertPolicy.Condition condition, Duration autoClose) {
+        return condition != null && missingDataActive(condition) ? autoClose.plus(MISSING_DATA_ACTIVE_GRACE) : autoClose;
+    }
+
+    private static boolean missingDataActive(AlertPolicy.Condition condition) {
+        if (!condition.hasConditionThreshold()) {
+            return false;
+        }
+        AlertPolicy.Condition.MetricThreshold threshold = condition.getConditionThreshold();
+        return threshold.getEvaluationMissingData() == AlertPolicy.Condition.EvaluationMissingData.EVALUATION_MISSING_DATA_ACTIVE
+                && (threshold.getDuration().getSeconds() > 0 || threshold.getDuration().getNanos() > 0);
+    }
+
+    private static boolean expired(Instant lastData, Duration closeAfter, Instant now) {
+        return lastData.plus(closeAfter).isBefore(now);
+    }
+
+    private static Instant lastData(Map<String, Object> alert) {
+        Object last = alert.get(AlertService.LAST_DATA);
+        return Instant.parse((String) (last instanceof String ? last : alert.get("openTime")));
     }
 
     private static Map<String, Violation> combine(AlertPolicy policy, Map<String, Result> results) {
@@ -226,8 +307,7 @@ public class AlertPolicyEvaluator {
         if (result == null || !condition.hasConditionThreshold()) {
             return false;
         }
-        String series = key.substring(key.indexOf('|') + 1);
-        if (result.present().contains(series)) {
+        if (result.present().contains(seriesOf(key))) {
             return false;
         }
         AlertPolicy.Condition.EvaluationMissingData missing = condition.getConditionThreshold().getEvaluationMissingData();
@@ -246,17 +326,19 @@ public class AlertPolicyEvaluator {
 
         Map<String, Violation> violations = new LinkedHashMap<>();
         Set<String> present = new HashSet<>();
+        Map<String, Instant> lastData = new HashMap<>();
         for (TimeSeries one : series) {
             if (one.getPointsCount() == 0) {
                 continue;
             }
             String identity = identity(one);
             present.add(identity);
+            Instant newestEnd = instant(one.getPoints(0).getInterval().getEndTime());
+            lastData.put(identity, newestEnd);
             Optional<Double> newest = value(one.getPoints(0).getValue());
             if (newest.isEmpty()) {
                 continue;
             }
-            Instant newestEnd = instant(one.getPoints(0).getInterval().getEndTime());
             Instant runStart = null;
             for (Point point : one.getPointsList()) {
                 Optional<Double> value = value(point.getValue());
@@ -266,11 +348,38 @@ public class AlertPolicyEvaluator {
                 runStart = instant(point.getInterval().getEndTime());
             }
             if (runStart != null && !Duration.between(runStart, newestEnd).minus(duration).isNegative()) {
-                violations.put(identity, new Violation(resource(one), metric(one), format(newest.get())));
+                violations.put(identity, new Violation(resource(one), metric(one), format(newest.get()), newestEnd));
             }
         }
-        boolean met = triggered(threshold.hasTrigger() ? threshold.getTrigger() : null, violations.size(), present.size());
-        return new Result(met, violations, present);
+        if (threshold.getEvaluationMissingData() == AlertPolicy.Condition.EvaluationMissingData.EVALUATION_MISSING_DATA_ACTIVE
+                && !duration.isZero()) {
+            addMissing(project, threshold, aggregation, duration, now, violations, lastData);
+        }
+        Set<String> evaluated = new HashSet<>(present);
+        evaluated.addAll(violations.keySet());
+        boolean met = triggered(threshold.hasTrigger() ? threshold.getTrigger() : null, violations.size(), evaluated.size());
+        return new Result(met, violations, present, lastData);
+    }
+
+    /**
+     * EVALUATION_MISSING_DATA_ACTIVE: "If there is no data to evaluate the condition, then evaluate
+     * the condition as true." A series that reported in the last day but has no point inside the
+     * retest window violates the condition like an absence would.
+     */
+    private void addMissing(String project, AlertPolicy.Condition.MetricThreshold threshold, Aggregation aggregation,
+            Duration duration, Instant now, Map<String, Violation> violations, Map<String, Instant> lastData) {
+        Instant silentSince = now.minus(duration);
+        for (TimeSeries one : read(project, threshold.getFilter(), aggregation, now.minus(MAX_LOOKBACK), now)) {
+            if (one.getPointsCount() == 0) {
+                continue;
+            }
+            Instant newestEnd = instant(one.getPoints(0).getInterval().getEndTime());
+            if (newestEnd.isBefore(silentSince)) {
+                String identity = identity(one);
+                violations.putIfAbsent(identity, new Violation(resource(one), metric(one), null, newestEnd));
+                lastData.putIfAbsent(identity, newestEnd);
+            }
+        }
     }
 
     private Result absence(String project, AlertPolicy policy, AlertPolicy.Condition.MetricAbsence absence, Instant now) {
@@ -278,7 +387,7 @@ public class AlertPolicyEvaluator {
         Aggregation aggregation = absence.getAggregationsCount() > 0 ? absence.getAggregations(0) : null;
         Instant created = policy.hasCreationRecord() ? instant(policy.getCreationRecord().getMutateTime()) : now;
         if (created.plus(duration).isAfter(now)) {
-            return new Result(false, Map.of(), Set.of());
+            return new Result(false, Map.of(), Set.of(), Map.of());
         }
         List<TimeSeries> recent = read(project, absence.getFilter(), aggregation, now.minus(duration), now);
         Set<String> present = new HashSet<>();
@@ -287,31 +396,39 @@ public class AlertPolicyEvaluator {
         for (TimeSeries one : read(project, absence.getFilter(), aggregation, now.minus(MAX_LOOKBACK), now)) {
             String identity = identity(one);
             if (one.getPointsCount() > 0 && !present.contains(identity)) {
-                violations.put(identity, new Violation(resource(one), metric(one), null));
+                violations.put(identity, new Violation(resource(one), metric(one), null, null));
             }
         }
         if (violations.isEmpty() && present.isEmpty()) {
             String type = MonitoringFilterParser.parse(absence.getFilter(), MonitoringFilterParser.Scope.TIME_SERIES)
                     .requiredMetricType().orElse("");
             violations.put("absent", new Violation(Map.of("type", "global"),
-                    type.isEmpty() ? Map.of() : Map.of("type", type), null));
+                    type.isEmpty() ? Map.of() : Map.of("type", type), null, null));
         }
         boolean met = triggered(absence.hasTrigger() ? absence.getTrigger() : null, violations.size(),
                 Math.max(1, violations.size() + present.size()));
-        return new Result(met, violations, present);
+        return new Result(met, violations, present, Map.of());
     }
 
+    /** ListTimeSeries pages by point count and can split a series across pages, so pieces are joined. */
     private List<TimeSeries> read(String project, String filter, Aggregation aggregation, Instant start, Instant end) {
         TimeInterval interval = TimeInterval.newBuilder().setStartTime(timestamp(start)).setEndTime(timestamp(end)).build();
-        List<TimeSeries> all = new ArrayList<>();
+        Map<String, TimeSeries.Builder> joined = new LinkedHashMap<>();
         String token = null;
         do {
             PageToken.Page<TimeSeries> page = monitoring.listTimeSeries(project, filter, interval,
                     aggregation == null ? Aggregation.getDefaultInstance() : aggregation, "FULL", 0, token);
-            all.addAll(page.items());
+            for (TimeSeries piece : page.items()) {
+                TimeSeries.Builder series = joined.get(identity(piece));
+                if (series == null) {
+                    joined.put(identity(piece), piece.toBuilder());
+                } else {
+                    series.addAllPoints(piece.getPointsList());
+                }
+            }
             token = page.nextPageToken();
         } while (token != null && !token.isEmpty());
-        return all;
+        return joined.values().stream().map(TimeSeries.Builder::build).toList();
     }
 
     private static boolean triggered(AlertPolicy.Condition.Trigger trigger, int violating, int total) {
@@ -375,6 +492,10 @@ public class AlertPolicyEvaluator {
 
     private static String conditionOf(String key) {
         return key.substring(0, key.indexOf('|'));
+    }
+
+    private static String seriesOf(String key) {
+        return key.substring(key.indexOf('|') + 1);
     }
 
     private static String identity(TimeSeries series) {

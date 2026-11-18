@@ -110,6 +110,8 @@ floci-gcp:
       enabled: true
     monitoring:
       enabled: true
+      alerting-enabled: true          # evaluate alert policies and send notifications
+      evaluation-interval-seconds: 30
     scheduler:
       enabled: true
       invocation-enabled: true        # background dispatcher fires due jobs

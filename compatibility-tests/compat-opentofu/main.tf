@@ -410,3 +410,42 @@ resource "google_cloud_run_v2_worker_pool" "compat" {
 output "cloud_run_worker_pool_name" {
   value = google_cloud_run_v2_worker_pool.compat.name
 }
+
+resource "google_monitoring_notification_channel" "email" {
+  display_name = "floci-compat-email-tofu"
+  type         = "email"
+  labels = {
+    email_address = "ops@example.com"
+  }
+  user_labels = {
+    team = "compat"
+  }
+}
+
+resource "google_monitoring_alert_policy" "cpu" {
+  display_name          = "floci-compat-cpu-tofu"
+  combiner              = "OR"
+  notification_channels = [google_monitoring_notification_channel.email.name]
+
+  conditions {
+    display_name = "cpu above 90%"
+    condition_threshold {
+      filter          = "metric.type=\"custom.googleapis.com/floci_compat_cpu\" AND resource.type=\"global\""
+      comparison      = "COMPARISON_GT"
+      threshold_value = 0.9
+      duration        = "60s"
+      aggregations {
+        alignment_period   = "60s"
+        per_series_aligner = "ALIGN_MEAN"
+      }
+    }
+  }
+
+  documentation {
+    content = "The compat CPU is high."
+  }
+
+  user_labels = {
+    team = "compat"
+  }
+}

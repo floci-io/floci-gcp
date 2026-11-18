@@ -40,6 +40,93 @@ the API endpoint / transport channel and disabling credentials:
   page size limits the total number of points (a series may span pages) and under `HEADERS` it limits
   the number of series.
 
+## Alerting configuration
+
+`AlertPolicyService` and `NotificationChannelService` are served on gRPC and REST JSON
+(`/v3/projects/{project}/alertPolicies`, `/notificationChannels`, `/notificationChannelDescriptors`).
+Enabled policies are evaluated in the background; see [Alert evaluation](#alert-evaluation).
+
+Notification channels:
+
+- The server assigns `name` (`projects/{project}/notificationChannels/{id}`) and `creationRecord`,
+  appends a `mutationRecords` entry on every update, and sets `enabled` to true when it is unset.
+- Descriptors cover the types `channel-descriptors list` returns: `email`, `pubsub`, `slack`,
+  `webhook_basicauth`, `webhook_tokenauth`, `pagerduty`, `sms`, `google_chat`, and the deprecated
+  `campfire` and `hipchat`. Labels are checked against the documented keys (`email_address`;
+  `topic`; `auth_token`, `channel_name`; `url`, `username`, `password`; `url`; `service_key`).
+  `sms` and `google_chat` publish no label schema here and accept any labels.
+- `verificationStatus` cannot be set on create or update. `sms` channels start `UNVERIFIED`; other
+  types leave it unset. `:sendVerificationCode` writes a `G-NNNNNN` code to the **emulator log**
+  (real Monitoring delivers it to the channel); `:verify` accepts it, and `:getVerificationCode`
+  works only on a verified channel, returning a code that verifies an equivalent channel elsewhere.
+- Deleting a channel an alert policy references fails with `FAILED_PRECONDITION` unless `force=true`,
+  which also removes it from those policies.
+
+Alert policies:
+
+- The server assigns `name`, a `conditions[].name` for every condition without one, and
+  `creationRecord`/`mutationRecord`. `enabled` defaults to true and `documentation.mimeType` to
+  `text/markdown`, the only accepted value.
+- From one to six conditions, each with exactly one condition type; a combiner is required with more
+  than one. A log match, MQL, PromQL or SQL condition must be the only condition, and a log match
+  policy must use `OR`. Absence conditions need a `duration` of at least 120s; `autoClose` at least
+  30 minutes. Condition filters are stored as written and only checked for presence.
+- Without `updateMask` the policy is replaced: conditions that keep their name keep it, unnamed ones
+  are added, missing ones are removed. With a mask, each listed field is replaced (REST takes the
+  camelCase mask Terraform sends).
+- Notification channel references are checked for shape only, not existence.
+- `ListAlertPolicies` and `ListNotificationChannels` take filters over `display_name`, `type`,
+  `labels.*`, `user_labels.*` and similar fields, and report `totalSize`.
+
+Semantics follow [alerting policies in JSON](https://docs.cloud.google.com/monitoring/alerts/policies-in-json),
+[the channels API](https://docs.cloud.google.com/monitoring/alerts/using-channels-api) and
+[alerting concepts](https://docs.cloud.google.com/monitoring/alerts/concepts-indepth).
+
+## Alert evaluation
+
+With `floci-gcp.services.monitoring.alerting-enabled` (default `true`), enabled policies are
+evaluated every `evaluation-interval-seconds` (default 30; 1 in the test profile). Threshold and
+absence conditions are read through `ListTimeSeries` in the policy's project, with the condition's
+first aggregation. Log match, MQL, PromQL and SQL conditions are stored but not evaluated, and a
+policy that has one is skipped.
+
+- Threshold: a series violates when its newest point compares true and the run of violating points
+  ending there spans at least `duration` ("A condition resets its retest window each time a
+  measurement ... doesn't satisfy the condition"). `trigger.count` (default 1) or `trigger.percent`
+  of the series must violate.
+- Absence: a series that reported in the last 25 hours but not within `duration` is absent; when no
+  series ever reported, one absence alert opens for the policy. A policy younger than `duration`
+  never reports absence.
+- Combiner: `OR` (and a single condition) opens alerts for each met condition; `AND` only when every
+  condition is met; `AND_WITH_MATCHING_RESOURCE` only for resources that violate every condition.
+- Alerts: "only one open alert for each time series in an alerting policy". An alert closes when its
+  series no longer violates; when a series has no data, `EVALUATION_MISSING_DATA_INACTIVE` closes
+  it and the other settings keep it open. `alertStrategy.autoClose` (default seven days) closes
+  alerts that stay open longer.
+- Notifications go out when an alert opens and when it closes, as the version 1.2 JSON packet
+  (`incident.state` `open`/`closed`, `started_at`/`ended_at` in epoch seconds, `observed_value`,
+  `threshold_value`, `condition`, `documentation`, `policy_name` and so on). `webhook_tokenauth`
+  POSTs to its `url` (which carries `auth_token`), `webhook_basicauth` adds an `Authorization: Basic`
+  header, and `pubsub` publishes the packet to its `topic`. Email, SMS, Slack, PagerDuty and the
+  other types are written to the emulator log. Disabled and `UNVERIFIED` channels are skipped. A
+  failed delivery is logged and not retried.
+
+Alerts are served by the REST-only Alerts API (`projects.alerts` in the
+[Monitoring v3 discovery document](https://monitoring.googleapis.com/$discovery/rest?version=v3);
+there is no gRPC counterpart): `GET /v3/projects/{project}/alerts` (newest `openTime` first, 50 per
+page by default and 1000 at most, `orderBy` on `open_time`/`close_time`, filters on `state`,
+`open_time`, `close_time`, `policy.name`, `policy.display_name`, `resource.type` and `metric.type`,
+for example `state="OPEN"`) and `GET /v3/projects/{project}/alerts/{alert}`. An alert has `name`,
+`state` (`OPEN` or `CLOSED`), `openTime`, `closeTime`, `policy` (a snapshot of its name, display
+name, severity and user labels), `resource` and `metric`.
+
+Deviations: renotification (`notificationChannelStrategy.renotifyInterval`), notification rate
+limits, snoozes, incident acknowledgement, the `url` console link and `metadata` labels are not
+emulated; alerts open and close at evaluation ticks, not continuously. Semantics follow
+[alerting concepts](https://docs.cloud.google.com/monitoring/alerts/concepts-indepth),
+[incidents](https://docs.cloud.google.com/monitoring/alerts/incidents-events) and
+[notification options](https://docs.cloud.google.com/monitoring/support/notification-options).
+
 ## Aggregation
 
 `ListTimeSeries` supports a subset of the real API's alignment/reduction:

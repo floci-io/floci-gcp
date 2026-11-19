@@ -1071,6 +1071,7 @@ public class BigQueryService {
                             described != null ? described.schema() : null);
                     if (evaluatedOptions != null) {
                         applyTableOptions(candidate, evaluatedOptions);
+                        BigQueryMetadata.validateTable(candidate.getExtra(), schemaFields(candidate));
                     }
                     if (existing.isPresent() && statement.orReplace()
                             && !samePartitioning(existing.get(), candidate)) {
@@ -5174,9 +5175,14 @@ public class BigQueryService {
                         : "partition_expiration_days value in table OPTIONS is only supported for a CREATE TABLE"
                                 + " statement with a PARTITION BY clause");
             }
+            BigDecimal days = (BigDecimal) options.get("partition_expiration_days");
+            if (days.signum() <= 0) {
+                throw QueryEngine.invalidQuery(
+                        "partition_expiration_days value in table OPTIONS must be positive");
+            }
             Map<String, Object> updated = new LinkedHashMap<>((Map<String, Object>) partitioning);
-            updated.put("expirationMs",
-                    String.valueOf(((Number) options.get("partition_expiration_days")).longValue()));
+            updated.put("expirationMs", String.valueOf(Math.max(1L,
+                    days.multiply(BigDecimal.valueOf(86_400_000L)).longValue())));
             table.getExtra().put("timePartitioning", updated);
         }
         if (options.containsKey("kms_key_name")) {

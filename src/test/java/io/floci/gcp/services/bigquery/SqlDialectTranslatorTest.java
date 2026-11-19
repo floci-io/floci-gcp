@@ -4,6 +4,7 @@ import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.services.bigquery.model.TableFieldSchema;
 import org.junit.jupiter.api.Test;
 
+import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -4545,7 +4546,7 @@ class SqlDialectTranslatorTest {
                         enable_change_history=true, tags=[('123/env', 'prod')])
                 """);
         assertEquals(Boolean.TRUE, options.options().get("require_partition_filter"));
-        assertEquals(604800000L, options.options().get("partition_expiration_days"));
+        assertEquals(new BigDecimal("7"), options.options().get("partition_expiration_days"));
         assertEquals("projects/p/locations/us/keyRings/r/cryptoKeys/k",
                 options.options().get("kms_key_name"));
         assertFalse(options.options().containsKey("enable_change_history"));
@@ -4554,7 +4555,11 @@ class SqlDialectTranslatorTest {
         SqlDialectTranslator.Statement ctas = statement("CREATE TABLE ds.model2"
                 + " OPTIONS(require_partition_filter=false, partition_expiration_days=1.5) AS SELECT 1 AS id");
         assertEquals(Boolean.FALSE, ctas.options().get("require_partition_filter"));
-        assertEquals(129600000L, ctas.options().get("partition_expiration_days"));
+        assertEquals(new BigDecimal("1.5"), ctas.options().get("partition_expiration_days"));
+        assertEquals(new BigDecimal("0"), statement("CREATE TABLE ds.z (d DATE) PARTITION BY d"
+                + " OPTIONS(partition_expiration_days=0)").options().get("partition_expiration_days"));
+        assertEquals(new BigDecimal("-1"), statement("CREATE TABLE ds.z (d DATE) PARTITION BY d"
+                + " OPTIONS(partition_expiration_days=-1)").options().get("partition_expiration_days"));
 
         assertEquals("Option require_partition_filter is not supported by the floci BigQuery emulator yet.",
                 assertThrows(GcpException.class, () -> statement(

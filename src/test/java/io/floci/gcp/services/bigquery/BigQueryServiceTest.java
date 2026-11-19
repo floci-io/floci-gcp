@@ -1013,6 +1013,20 @@ class BigQueryServiceTest {
             assertEquals(c[1], error.getMessage(), c[0]);
         }
 
+        for (String days : List.of("0", "-1")) {
+            GcpException notPositive = assertThrows(GcpException.class, () -> service.query(PROJECT, "US", null,
+                    "CREATE TABLE ds1.not_positive (id INT64, d DATE) PARTITION BY d"
+                            + " OPTIONS(partition_expiration_days=" + days + ")", null));
+            assertEquals("invalidQuery", notPositive.getReason());
+            assertEquals("partition_expiration_days value in table OPTIONS must be positive",
+                    notPositive.getMessage());
+        }
+
+        service.query(PROJECT, "US", null, "CREATE TABLE ds1.tiny_expiration (id INT64, d DATE) PARTITION BY d"
+                + " OPTIONS(partition_expiration_days=0.00000001)", null);
+        assertEquals(Map.of("type", "DAY", "field", "d", "expirationMs", "1"),
+                service.getTable(PROJECT, DATASET, "tiny_expiration").getExtra().get("timePartitioning"));
+
         service.query(PROJECT, "US", null, "CREATE TABLE ds1.range_req (id INT64)"
                 + " PARTITION BY RANGE_BUCKET(id, GENERATE_ARRAY(0, 10)) OPTIONS(require_partition_filter=true)",
                 null);
@@ -2801,6 +2815,13 @@ class BigQueryServiceTest {
                         "CREATE OR REPLACE TABLE ds1.partitioned (ts TIMESTAMP) "
                                 + "PARTITION BY TIMESTAMP_TRUNC(ts, HOUR)", null, List.of(),
                         null, true, false))).getReason());
+
+        assertEquals("partition_expiration_days value in table OPTIONS must be positive",
+                assertThrows(GcpException.class, () -> service.query(PROJECT, "US", null,
+                        new BigQueryService.QueryOptions(
+                                "CREATE TABLE ds1.zero_expiration (id INT64, d DATE) PARTITION BY d"
+                                        + " OPTIONS(partition_expiration_days=0)", null, List.of(),
+                                null, true, false))).getMessage());
 
         // A dry run that is valid still reports success and writes nothing.
         StoredJob ok = service.query(PROJECT, "US", null, new BigQueryService.QueryOptions(

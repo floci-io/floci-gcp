@@ -2617,13 +2617,14 @@ final class SqlDialectTranslator {
                 }
             }
             case "partition_expiration_days" -> {
-                if (value.size() == 1 && value.getFirst().kind == Kind.NUMBER) {
-                    try {
-                        values.put(name, new BigDecimal(value.getFirst().text)
-                                .multiply(BigDecimal.valueOf(86_400_000L)).longValue());
-                    } catch (NumberFormatException expected) {
-                        // A numeric literal BigDecimal cannot read stays unset, like any other expression value.
-                    }
+                BigDecimal days = null;
+                try {
+                    days = numericOption(value);
+                } catch (NumberFormatException expected) {
+                    // A numeric literal BigDecimal cannot read stays unset, like any other expression value.
+                }
+                if (days != null) {
+                    values.put(name, days);
                 }
             }
             case "kms_key_name" -> {
@@ -2633,6 +2634,18 @@ final class SqlDialectTranslator {
             }
             default -> { }
         }
+    }
+
+    /** A numeric literal, optionally signed; null for anything else. */
+    private static BigDecimal numericOption(List<Token> value) {
+        if (value.size() == 1 && value.getFirst().kind == Kind.NUMBER) {
+            return new BigDecimal(value.getFirst().text);
+        }
+        if (value.size() == 2 && (value.getFirst().isPunct("-") || value.getFirst().isPunct("+"))
+                && value.get(1).kind == Kind.NUMBER) {
+            return new BigDecimal(value.getFirst().text + value.get(1).text);
+        }
+        return null;
     }
 
     private static boolean isLiteral(List<Token> value) {

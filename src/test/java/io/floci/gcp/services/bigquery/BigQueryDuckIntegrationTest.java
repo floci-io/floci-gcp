@@ -2732,6 +2732,11 @@ class BigQueryDuckIntegrationTest {
                 .then().statusCode(400)
                 .body("error.message", equalTo("require_partition_filter value in table OPTIONS is only supported"
                         + " for a CREATE TABLE statement with a PARTITION BY clause"));
+        query(Map.of("query", "CREATE TABLE dbt_options.zero_expiration (id INT64, d DATE) PARTITION BY d"
+                        + " OPTIONS(partition_expiration_days=0)", "useLegacySql", false, "dryRun", true))
+                .then().statusCode(400)
+                .body("error.message",
+                        equalTo("partition_expiration_days value in table OPTIONS must be positive"));
     }
 
     @Test

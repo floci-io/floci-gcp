@@ -40,6 +40,7 @@ import io.floci.gcp.core.common.PageToken;
 import io.floci.gcp.services.iam.authorization.IamGrpcDeliveryAuthorization;
 import io.floci.gcp.services.pubsub.model.StoredSnapshot;
 import io.floci.gcp.services.pubsub.model.StoredSubscription;
+import io.grpc.Context;
 import io.grpc.stub.StreamObserver;
 import org.jboss.logging.Logger;
 
@@ -217,29 +218,39 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
                 new AtomicReference<>();
         AtomicBoolean closed = new AtomicBoolean(false);
         Object deliveryLock = new Object();
+        Context.current().addListener(context -> {
+            synchronized (deliveryLock) {
+                closeStreamingPull(unregisterRef, closed);
+            }
+        }, Runnable::run);
 
         return new StreamObserver<>() {
             @Override
             public void onNext(StreamingPullRequest request) {
                 try {
-                    if (request.getStreamAckDeadlineSeconds() > 0) {
-                        streamAckDeadlineSeconds.set(request.getStreamAckDeadlineSeconds());
-                    }
-                    if (!request.getSubscription().isEmpty()) {
-                        String sub = request.getSubscription();
-                        subscriptionRef.set(sub);
-                        deliveryAuthorizationRef.set(IamGrpcDeliveryAuthorization.current());
-                        Runnable previous = unregisterRef.getAndSet(
-                                service.registerMessageListener(
-                                        sub,
-                                        () -> deliverStreamingMessages(
-                                                sub, responseObserver, unregisterRef, closed, deliveryLock,
-                                                deliveryAuthorizationRef.get(), StreamingPullRequest.getDefaultInstance(),
-                                                streamAckDeadlineSeconds.get())));
-                        if (previous != null) {
-                            previous.run();
+                    synchronized (deliveryLock) {
+                        if (closed.get()) {
+                            return;
                         }
-                        LOG.infof("streamingPull opened subscription=%s", sub);
+                        if (request.getStreamAckDeadlineSeconds() > 0) {
+                            streamAckDeadlineSeconds.set(request.getStreamAckDeadlineSeconds());
+                        }
+                        if (!request.getSubscription().isEmpty()) {
+                            String sub = request.getSubscription();
+                            subscriptionRef.set(sub);
+                            deliveryAuthorizationRef.set(IamGrpcDeliveryAuthorization.current());
+                            Runnable previous = unregisterRef.getAndSet(
+                                    service.registerMessageListener(
+                                            sub,
+                                            () -> deliverStreamingMessages(
+                                                    sub, responseObserver, unregisterRef, closed, deliveryLock,
+                                                    deliveryAuthorizationRef.get(), StreamingPullRequest.getDefaultInstance(),
+                                                    streamAckDeadlineSeconds.get())));
+                            if (previous != null) {
+                                previous.run();
+                            }
+                            LOG.infof("streamingPull opened subscription=%s", sub);
+                        }
                     }
                     String sub = subscriptionRef.get();
                     if (sub == null) {

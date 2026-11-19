@@ -50,9 +50,11 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
@@ -73,6 +75,116 @@ class PubSubSubscriberControllerTest {
                 IamServices.inMemory(),
                 clock);
         controller = new PubSubSubscriberController(service);
+    }
+
+    @Test
+    void cancelledContextPreventsLateRequestsFromRegisteringAListener() throws Exception {
+        PubSubService observed = spy(service);
+        Context.CancellableContext context = Context.current().withCancellation();
+        RecordingObserver<StreamingPullResponse> responses = new RecordingObserver<>();
+        StreamObserver<StreamingPullRequest> requests = context.call(
+                () -> new PubSubSubscriberController(observed).streamingPull(responses));
+        context.cancel(null);
+
+        requests.onNext(StreamingPullRequest.newBuilder()
+                .setSubscription("projects/p1/subscriptions/s1").build());
+
+        verify(observed, never()).registerMessageListener(any(), any());
+        assertTrue(responses.values.isEmpty());
+        assertNull(responses.error.get());
+    }
+
+    @Test
+    void contextCancellationUnregistersListenerAndPreservesOutstandingLease() throws Exception {
+        String topic = "projects/p1/topics/t1";
+        String subscription = "projects/p1/subscriptions/s1";
+        service.createTopic(topic);
+        service.createSubscription(subscription, topic, 10);
+        PubSubService observed = spy(service);
+        AtomicInteger unregisters = new AtomicInteger();
+        doAnswer(invocation -> {
+            Runnable unregister = (Runnable) invocation.callRealMethod();
+            return (Runnable) () -> {
+                unregister.run();
+                unregisters.incrementAndGet();
+            };
+        }).when(observed).registerMessageListener(eq(subscription), any());
+        Context.CancellableContext context = Context.current().withCancellation();
+        RecordingObserver<StreamingPullResponse> responses = new RecordingObserver<>();
+        StreamObserver<StreamingPullRequest> requests = context.call(
+                () -> new PubSubSubscriberController(observed).streamingPull(responses));
+        requests.onNext(StreamingPullRequest.newBuilder().setSubscription(subscription)
+                .setStreamAckDeadlineSeconds(10).build());
+        observed.publish(topic, List.of(PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("unacked")).build()));
+        ReceivedMessage first = responses.values.getFirst().getReceivedMessages(0);
+
+        context.cancel(null);
+        requests.onNext(StreamingPullRequest.newBuilder().setSubscription(subscription).build());
+        requests.onError(Status.CANCELLED.asException());
+        requests.onCompleted();
+        assertEquals(1, unregisters.get(), "cleanup should run exactly once");
+
+        observed.publish(topic, List.of(PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("recovery")).build()));
+        assertEquals(1, responses.values.size(), "the cancelled stream must not consume newly published messages");
+        List<ReceivedMessage> recovery = observed.pull(subscription, 10);
+        assertEquals(1, recovery.size());
+        assertEquals("recovery", recovery.getFirst().getMessage().getData().toStringUtf8());
+        observed.acknowledge(subscription, List.of(recovery.getFirst().getAckId()));
+        assertTrue(observed.pull(subscription, 10).isEmpty());
+
+        clock.advance(Duration.ofSeconds(10));
+        observed.expireLeases();
+        List<ReceivedMessage> redelivery = observed.pull(subscription, 10);
+        assertEquals(1, redelivery.size());
+        assertEquals(first.getMessage().getMessageId(), redelivery.getFirst().getMessage().getMessageId());
+        assertNotEquals(first.getAckId(), redelivery.getFirst().getAckId());
+    }
+
+    @Test
+    void cancellationDuringListenerRegistrationStillUnregistersTheListener() throws Exception {
+        String topic = "projects/p1/topics/t1";
+        String subscription = "projects/p1/subscriptions/s1";
+        service.createTopic(topic);
+        service.createSubscription(subscription, topic, 10);
+        PubSubService observed = spy(service);
+        CountDownLatch registered = new CountDownLatch(1);
+        CountDownLatch finishRegistration = new CountDownLatch(1);
+        CountDownLatch cancellationStarted = new CountDownLatch(1);
+        AtomicInteger unregisters = new AtomicInteger();
+        doAnswer(invocation -> {
+            Runnable unregister = (Runnable) invocation.callRealMethod();
+            registered.countDown();
+            assertTrue(finishRegistration.await(5, TimeUnit.SECONDS));
+            return (Runnable) () -> {
+                unregister.run();
+                unregisters.incrementAndGet();
+            };
+        }).when(observed).registerMessageListener(eq(subscription), any());
+        Context.CancellableContext context = Context.current().withCancellation();
+        context.addListener(ignored -> cancellationStarted.countDown(), Runnable::run);
+        RecordingObserver<StreamingPullResponse> responses = new RecordingObserver<>();
+        StreamObserver<StreamingPullRequest> requests = context.call(
+                () -> new PubSubSubscriberController(observed).streamingPull(responses));
+        try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            Future<?> registration = executor.submit(() -> requests.onNext(
+                    StreamingPullRequest.newBuilder().setSubscription(subscription).build()));
+            try {
+                assertTrue(registered.await(5, TimeUnit.SECONDS));
+                Future<?> cancellation = executor.submit(() -> context.cancel(null));
+                assertTrue(cancellationStarted.await(5, TimeUnit.SECONDS));
+                finishRegistration.countDown();
+                registration.get(5, TimeUnit.SECONDS);
+                cancellation.get(5, TimeUnit.SECONDS);
+                assertEquals(1, unregisters.get());
+                observed.publish(topic, List.of(PubsubMessage.newBuilder()
+                        .setData(ByteString.copyFromUtf8("recovery")).build()));
+                assertTrue(responses.values.isEmpty());
+                assertEquals(1, observed.pull(subscription, 10).size());
+            } finally {
+                finishRegistration.countDown();
+                context.cancel(null);
+            }
+        }
     }
 
     @Test

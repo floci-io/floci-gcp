@@ -522,3 +522,26 @@ setup() {
     count=$(terraform state list 2>/dev/null | wc -l | tr -d ' ')
     [ "$count" -ge 20 ]
 }
+
+@test "Terraform: Monitoring notification channel created and enabled" {
+    run gcp_curl "${FLOCI_ENDPOINT}/v3/projects/${FLOCI_PROJECT}/notificationChannels"
+    assert_success
+    assert_output --partial '"displayName":"floci-compat-email"'
+    assert_output --partial '"enabled":true'
+}
+
+@test "Terraform: Monitoring alert policy created with its channel and condition name" {
+    run gcp_curl "${FLOCI_ENDPOINT}/v3/projects/${FLOCI_PROJECT}/alertPolicies"
+    assert_success
+    assert_output --partial '"displayName":"floci-compat-cpu"'
+    assert_output --partial '/conditions/'
+    assert_output --partial '"mimeType":"text/markdown"'
+}
+
+@test "Terraform: Monitoring alerting resources plan no changes after apply" {
+    run terraform plan -detailed-exitcode \
+        -target=google_monitoring_notification_channel.email -target=google_monitoring_alert_policy.cpu \
+        -var="endpoint=${FLOCI_ENDPOINT}" -var="project=${FLOCI_PROJECT}" \
+        -input=false -no-color
+    assert_success
+}

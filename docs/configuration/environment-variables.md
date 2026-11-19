@@ -102,6 +102,8 @@ Each service can be toggled independently. All are enabled by default.
 | `FLOCI_GCP_SERVICES_MONITORING_ENABLED` | `true` | Cloud Monitoring |
 | `FLOCI_GCP_SERVICES_CLOUDTASKS_ENABLED` | `true` | Cloud Tasks |
 | `FLOCI_GCP_SERVICES_SCHEDULER_ENABLED` | `true` | Cloud Scheduler |
+| `FLOCI_GCP_SERVICES_MONITORING_ALERTING_ENABLED` | `true` | Evaluate Cloud Monitoring alert policies in the background and send notifications |
+| `FLOCI_GCP_SERVICES_MONITORING_EVALUATION_INTERVAL_SECONDS` | `30` | How often alert policies are evaluated |
 | `FLOCI_GCP_SERVICES_SCHEDULER_INVOCATION_ENABLED` | `true` | Fire due Scheduler jobs in the background (disable for control plane only) |
 | `FLOCI_GCP_SERVICES_SCHEDULER_TICK_INTERVAL_SECONDS` | `10` | How often the Scheduler background dispatcher checks for due jobs |
 | `FLOCI_GCP_SERVICES_KAFKA_ENABLED` | `true` | Managed Service for Apache Kafka |

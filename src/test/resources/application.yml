@@ -55,6 +55,8 @@ floci-gcp:
       enabled: true
     monitoring:
       enabled: true
+      alerting-enabled: true
+      evaluation-interval-seconds: 1
     scheduler:
       enabled: true
       invocation-enabled: true

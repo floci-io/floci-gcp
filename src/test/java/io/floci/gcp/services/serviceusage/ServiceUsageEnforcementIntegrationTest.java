@@ -25,6 +25,10 @@ import com.google.logging.v2.LogEntry;
 import com.google.logging.v2.LogSink;
 import com.google.logging.v2.LoggingServiceV2Grpc;
 import com.google.logging.v2.WriteLogEntriesRequest;
+import com.google.monitoring.v3.AlertPolicyServiceGrpc;
+import com.google.monitoring.v3.ListAlertPoliciesRequest;
+import com.google.monitoring.v3.ListNotificationChannelsRequest;
+import com.google.monitoring.v3.NotificationChannelServiceGrpc;
 import com.google.protobuf.Any;
 import com.google.pubsub.v1.GetTopicRequest;
 import com.google.pubsub.v1.PublisherGrpc;
@@ -247,6 +251,33 @@ class ServiceUsageEnforcementIntegrationTest {
 
         enable(project, "pubsub.googleapis.com");
         assertEquals(topic.getName(), publisher.createTopic(topic).getName());
+    }
+
+    @Test
+    void alertPolicyAndNotificationChannelGrpcCallsAreGatedOnMonitoring() {
+        String project = "su-enforce-alerting";
+        disable(project, "monitoring.googleapis.com");
+        AlertPolicyServiceGrpc.AlertPolicyServiceBlockingStub policies = AlertPolicyServiceGrpc.newBlockingStub(channel)
+                .withDeadlineAfter(10, TimeUnit.SECONDS);
+        NotificationChannelServiceGrpc.NotificationChannelServiceBlockingStub channels =
+                NotificationChannelServiceGrpc.newBlockingStub(channel).withDeadlineAfter(10, TimeUnit.SECONDS);
+        ListAlertPoliciesRequest listPolicies = ListAlertPoliciesRequest.newBuilder()
+                .setName("projects/" + project).build();
+        ListNotificationChannelsRequest listChannels = ListNotificationChannelsRequest.newBuilder()
+                .setName("projects/" + project).build();
+
+        StatusRuntimeException policyError = assertThrows(StatusRuntimeException.class,
+                () -> policies.listAlertPolicies(listPolicies));
+        assertEquals(Status.Code.PERMISSION_DENIED, policyError.getStatus().getCode());
+        assertEquals("monitoring.googleapis.com", errorInfo(policyError).getMetadataOrThrow("service"));
+        StatusRuntimeException channelError = assertThrows(StatusRuntimeException.class,
+                () -> channels.listNotificationChannels(listChannels));
+        assertEquals(Status.Code.PERMISSION_DENIED, channelError.getStatus().getCode());
+        assertEquals("monitoring.googleapis.com", errorInfo(channelError).getMetadataOrThrow("service"));
+
+        enable(project, "monitoring.googleapis.com");
+        assertEquals(0, policies.listAlertPolicies(listPolicies).getAlertPoliciesCount());
+        assertEquals(0, channels.listNotificationChannels(listChannels).getNotificationChannelsCount());
     }
 
     @Test

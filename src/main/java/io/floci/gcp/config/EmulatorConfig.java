@@ -556,6 +556,14 @@ public interface EmulatorConfig {
     interface MonitoringServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /** When false, alert policies are stored but never evaluated, so no alert or notification is produced. */
+        @WithDefault("true")
+        boolean alertingEnabled();
+
+        /** Interval between alert policy evaluations. */
+        @WithDefault("30")
+        long evaluationIntervalSeconds();
     }
 
     interface EventarcServiceConfig {

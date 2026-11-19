@@ -419,12 +419,13 @@ Validation follows the
   the type is `logging.googleapis.com/user/<name>`. Only `DELTA` with `INT64` or `DISTRIBUTION` is
   accepted. Metric kind, value type and existing labels cannot change on update; new labels and
   label descriptions can.
-- Up to 10 labels, keys `[a-zA-Z][a-zA-Z0-9_]*`, types `STRING`, `BOOL` or `INT64`. Every label needs
-  an entry in `labelExtractors`, and every extractor needs a label.
+- Up to 10 labels, keys `[a-zA-Z][a-zA-Z0-9_]*` other than `log` (the default label), types `STRING`,
+  `BOOL` or `INT64`. Every label needs an entry in `labelExtractors`, and every extractor needs a label.
 - Extractors are `EXTRACT(field)` or `REGEXP_EXTRACT(field, "regex")` with exactly one capture
   group, over the fields the routing filter supports. The field is converted to a string first,
   with whole numbers (also inside objects and lists) written as integers over both gRPC and REST. A
-  distribution needs `valueExtractor` and `bucketOptions` (linear, exponential or explicit).
+  distribution needs `valueExtractor` and `bucketOptions` (linear, exponential or explicit), with at
+  most 200 buckets counting the underflow and overflow buckets.
 - `bucketName` is stored and must name a bucket in the metric's project; log buckets themselves
   are not emulated, so it does not scope what the metric counts.
 

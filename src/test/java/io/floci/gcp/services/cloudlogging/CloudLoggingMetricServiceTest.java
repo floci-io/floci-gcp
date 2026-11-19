@@ -24,6 +24,7 @@ import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.DoubleStream;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
@@ -91,6 +92,45 @@ class CloudLoggingMetricServiceTest {
                 .setName("two-groups").setMetricDescriptor(MetricDescriptor.newBuilder()
                         .addLabels(LabelDescriptor.newBuilder().setKey("method")))
                 .putLabelExtractors("method", "REGEXP_EXTRACT(textPayload, \"(a)(b)\")").build())));
+    }
+
+    @Test
+    void createRejectsALabelThatWouldReplaceTheDefaultLogLabel() {
+        LogMetric metric = LogMetric.newBuilder().setName("shadow").setFilter("severity>=ERROR")
+                .setMetricDescriptor(MetricDescriptor.newBuilder()
+                        .addLabels(LabelDescriptor.newBuilder().setKey("log")))
+                .putLabelExtractors("log", "EXTRACT(jsonPayload.log)").build();
+
+        assertEquals(Status.Code.INVALID_ARGUMENT, code(() -> service.createLogMetric(PARENT, metric)));
+        assertEquals(Status.Code.INVALID_ARGUMENT, code(() -> service.createLogMetric(PARENT, metric.toBuilder()
+                .clearMetricDescriptor().build())));
+    }
+
+    @Test
+    void createCapsADistributionAtTwoHundredBucketsBeforeAnyEntryIsRecorded() {
+        LogMetric metric = LogMetric.newBuilder().setName("latency").setFilter("severity>=ERROR")
+                .setMetricDescriptor(MetricDescriptor.newBuilder().setValueType(MetricDescriptor.ValueType.DISTRIBUTION))
+                .setValueExtractor("EXTRACT(jsonPayload.latency)").build();
+
+        assertEquals(Status.Code.INVALID_ARGUMENT, code(() -> service.createLogMetric(PARENT, metric.toBuilder()
+                .setBucketOptions(Distribution.BucketOptions.newBuilder().setLinearBuckets(
+                        Distribution.BucketOptions.Linear.newBuilder().setNumFiniteBuckets(1_000_000_000).setWidth(1)))
+                .build())));
+        assertEquals(Status.Code.INVALID_ARGUMENT, code(() -> service.createLogMetric(PARENT, metric.toBuilder()
+                .setBucketOptions(Distribution.BucketOptions.newBuilder().setExponentialBuckets(
+                        Distribution.BucketOptions.Exponential.newBuilder().setNumFiniteBuckets(Integer.MAX_VALUE)
+                                .setGrowthFactor(2).setScale(1)))
+                .build())));
+        assertEquals(Status.Code.INVALID_ARGUMENT, code(() -> service.createLogMetric(PARENT, metric.toBuilder()
+                .setBucketOptions(Distribution.BucketOptions.newBuilder().setExplicitBuckets(
+                        Distribution.BucketOptions.Explicit.newBuilder().addAllBounds(
+                                DoubleStream.iterate(0, d -> d + 1).limit(200).boxed().toList())))
+                .build())));
+
+        service.createLogMetric(PARENT, metric.toBuilder()
+                .setBucketOptions(Distribution.BucketOptions.newBuilder().setLinearBuckets(
+                        Distribution.BucketOptions.Linear.newBuilder().setNumFiniteBuckets(198).setWidth(1)))
+                .build());
     }
 
     @Test

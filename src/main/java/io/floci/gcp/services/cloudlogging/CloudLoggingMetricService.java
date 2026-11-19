@@ -47,6 +47,7 @@ public class CloudLoggingMetricService {
     private static final Set<LabelDescriptor.ValueType> LABEL_TYPES = Set.of(LabelDescriptor.ValueType.STRING,
             LabelDescriptor.ValueType.BOOL, LabelDescriptor.ValueType.INT64);
     private static final int MAX_LABELS = 10;
+    private static final int MAX_BUCKETS = 200;
 
     private final StorageBackend<String, StoredLogMetric> metrics;
     private final CloudMonitoringService monitoring;
@@ -265,6 +266,9 @@ public class CloudLoggingMetricService {
             if (!LABEL_KEY.matcher(label.getKey()).matches() || !keys.add(label.getKey())) {
                 throw GcpException.invalidArgument("Invalid or duplicate label key: " + label.getKey());
             }
+            if (label.getKey().equals(LogMetricRecorder.LOG_LABEL)) {
+                throw GcpException.invalidArgument("Label key \"log\" is reserved for the default log label");
+            }
             if (label.getValueType() == LabelDescriptor.ValueType.UNRECOGNIZED) {
                 throw GcpException.invalidArgument("Invalid label value type for " + label.getKey());
             }
@@ -289,6 +293,16 @@ public class CloudLoggingMetricService {
         };
         if (!valid) {
             throw GcpException.invalidArgument("Invalid bucket options for a distribution log-based metric");
+        }
+        long buckets = switch (options.getOptionsCase()) {
+            case LINEAR_BUCKETS -> options.getLinearBuckets().getNumFiniteBuckets() + 2L;
+            case EXPONENTIAL_BUCKETS -> options.getExponentialBuckets().getNumFiniteBuckets() + 2L;
+            case EXPLICIT_BUCKETS -> options.getExplicitBuckets().getBoundsCount() + 1L;
+            case OPTIONS_NOT_SET -> 0L;
+        };
+        if (buckets > MAX_BUCKETS) {
+            throw GcpException.invalidArgument("A distribution log-based metric can have at most "
+                    + MAX_BUCKETS + " buckets, including the underflow and overflow buckets");
         }
     }
 

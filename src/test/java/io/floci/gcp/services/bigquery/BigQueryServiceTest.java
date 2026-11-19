@@ -967,6 +967,61 @@ class BigQueryServiceTest {
     }
 
     @Test
+    void createTableStoresTheBigQueryTableOptionsItModels() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+        service.query(PROJECT, "US", null, """
+                CREATE TABLE ds1.model (id INT64, d DATE) PARTITION BY d
+                OPTIONS(require_partition_filter=true, partition_expiration_days=7,
+                        kms_key_name='projects/p/locations/us/keyRings/r/cryptoKeys/k',
+                        enable_change_history=true, tags=[('123/env', 'prod')])
+                """, null);
+
+        Table created = service.getTable(PROJECT, DATASET, "model");
+        assertEquals(true, created.getExtra().get("requirePartitionFilter"));
+        assertEquals(Map.of("type", "DAY", "field", "d", "requirePartitionFilter", true,
+                        "expirationMs", "604800000"),
+                created.getExtra().get("timePartitioning"));
+        assertEquals(Map.of("kmsKeyName", "projects/p/locations/us/keyRings/r/cryptoKeys/k"),
+                created.getExtra().get("encryptionConfiguration"));
+        assertNull(created.getExtra().get("resourceTags"));
+
+        service.query(PROJECT, "US", null, "CREATE TABLE ds1.model_false (id INT64, d DATE) PARTITION BY d"
+                + " OPTIONS(require_partition_filter=false)", null);
+        Table notRequired = service.getTable(PROJECT, DATASET, "model_false");
+        assertEquals(false, notRequired.getExtra().get("requirePartitionFilter"));
+        assertEquals(Map.of("type", "DAY", "field", "d"), notRequired.getExtra().get("timePartitioning"));
+    }
+
+    @Test
+    void createTableValidatesThePartitionOnlyTableOptions() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+        String[][] rejected = {
+                {"CREATE TABLE ds1.unpartitioned_req (id INT64) OPTIONS(require_partition_filter=true)",
+                        "require_partition_filter value in table OPTIONS is only supported for a CREATE TABLE"
+                                + " statement with a PARTITION BY clause"},
+                {"CREATE TABLE ds1.unpartitioned_exp (id INT64) OPTIONS(partition_expiration_days=7)",
+                        "partition_expiration_days value in table OPTIONS is only supported for a CREATE TABLE"
+                                + " statement with a PARTITION BY clause"},
+                {"CREATE TABLE ds1.range_exp (id INT64) PARTITION BY RANGE_BUCKET(id, GENERATE_ARRAY(0, 10))"
+                        + " OPTIONS(partition_expiration_days=7)",
+                        "partition_expiration_days in table OPTIONS is only supported for time partitioned tables."}
+        };
+        for (String[] c : rejected) {
+            GcpException error = assertThrows(GcpException.class, () ->
+                    service.query(PROJECT, "US", null, c[0], null), c[0]);
+            assertEquals("invalidQuery", error.getReason(), c[0]);
+            assertEquals(c[1], error.getMessage(), c[0]);
+        }
+
+        service.query(PROJECT, "US", null, "CREATE TABLE ds1.range_req (id INT64)"
+                + " PARTITION BY RANGE_BUCKET(id, GENERATE_ARRAY(0, 10)) OPTIONS(require_partition_filter=true)",
+                null);
+        Table ranged = service.getTable(PROJECT, DATASET, "range_req");
+        assertEquals(true, ranged.getExtra().get("requirePartitionFilter"));
+        assertNull(ranged.getExtra().get("timePartitioning"));
+    }
+
+    @Test
     void createTableAsSelectBindsItsQueryToTheParametersAfterTheOptionExpressions() {
         String sql = "CREATE TABLE ds1.cached OPTIONS(description=?) AS SELECT ? AS value";
         List<Map<String, Object>> parameters = List.of(positionalParameter("cache"), positionalParameter("wanted"));

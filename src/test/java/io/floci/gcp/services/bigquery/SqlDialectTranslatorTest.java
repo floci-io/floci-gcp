@@ -4537,6 +4537,34 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void createTableAcceptsBigQueryTableOptionsOnlyOnCreate() {
+        SqlDialectTranslator.Statement options = statement("""
+                CREATE TABLE ds.model (id INT64, d DATE) PARTITION BY d
+                OPTIONS(require_partition_filter=true, partition_expiration_days=7,
+                        kms_key_name='projects/p/locations/us/keyRings/r/cryptoKeys/k',
+                        enable_change_history=true, tags=[('123/env', 'prod')])
+                """);
+        assertEquals(Boolean.TRUE, options.options().get("require_partition_filter"));
+        assertEquals(604800000L, options.options().get("partition_expiration_days"));
+        assertEquals("projects/p/locations/us/keyRings/r/cryptoKeys/k",
+                options.options().get("kms_key_name"));
+        assertFalse(options.options().containsKey("enable_change_history"));
+        assertFalse(options.options().containsKey("tags"));
+
+        SqlDialectTranslator.Statement ctas = statement("CREATE TABLE ds.model2"
+                + " OPTIONS(require_partition_filter=false, partition_expiration_days=1.5) AS SELECT 1 AS id");
+        assertEquals(Boolean.FALSE, ctas.options().get("require_partition_filter"));
+        assertEquals(129600000L, ctas.options().get("partition_expiration_days"));
+
+        assertEquals("Option require_partition_filter is not supported by the floci BigQuery emulator yet.",
+                assertThrows(GcpException.class, () -> statement(
+                        "ALTER TABLE ds.t SET OPTIONS(require_partition_filter=true)")).getMessage());
+        assertEquals("Option kms_key_name is not supported by the floci BigQuery emulator yet.",
+                assertThrows(GcpException.class, () -> statement(
+                        "CREATE TABLE ds.c COPY ds.src OPTIONS(kms_key_name='k')")).getMessage());
+    }
+
+    @Test
     void alterSetOptionsIsClassifiedWithItsOptions() {
         SqlDialectTranslator.Statement empty = statement("ALTER TABLE ds.t SET OPTIONS()");
         assertEquals(SqlDialectTranslator.StatementKind.ALTER_TABLE, empty.kind());

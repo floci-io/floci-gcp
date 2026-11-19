@@ -2699,6 +2699,43 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(2)
+    void createTableAcceptsDbtShapedBigQueryTableOptions() {
+        query(Map.of("query", "CREATE SCHEMA dbt_options", "useLegacySql", false)).then().statusCode(200);
+        query(Map.of("query", """
+                        CREATE OR REPLACE TABLE dbt_options.model
+                        PARTITION BY d
+                        CLUSTER BY id
+                        OPTIONS(
+                          require_partition_filter=true,
+                          partition_expiration_days=7,
+                          kms_key_name='projects/p/locations/us/keyRings/r/cryptoKeys/k',
+                          enable_change_history=true,
+                          tags=[('123/env', 'prod')],
+                          description='dbt model'
+                        )
+                        AS SELECT DATE '2026-10-29' AS d, 1 AS id
+                        """, "useLegacySql", false))
+                .then().statusCode(200);
+
+        given().when().get(BASE + "/datasets/dbt_options/tables/model")
+                .then().statusCode(200)
+                .body("requirePartitionFilter", equalTo(true))
+                .body("timePartitioning.requirePartitionFilter", equalTo(true))
+                .body("timePartitioning.expirationMs", equalTo("604800000"))
+                .body("encryptionConfiguration.kmsKeyName",
+                        equalTo("projects/p/locations/us/keyRings/r/cryptoKeys/k"))
+                .body("clustering.fields", equalTo(List.of("id")))
+                .body("description", equalTo("dbt model"));
+
+        query(Map.of("query", "CREATE TABLE dbt_options.unpartitioned (id INT64)"
+                        + " OPTIONS(require_partition_filter=true)", "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", equalTo("require_partition_filter value in table OPTIONS is only supported"
+                        + " for a CREATE TABLE statement with a PARTITION BY clause"));
+    }
+
+    @Test
+    @Order(2)
     void joinGroupByOrderBy() {
         query("""
                 {"query": "SELECT u.name, SUM(o.total) AS spent, COUNT(*) FROM `bq-duck-it.shop.users` u JOIN shop.orders o ON u.id = o.user_id GROUP BY u.name ORDER BY spent DESC", "useLegacySql": false}

@@ -1062,11 +1062,16 @@ public class BigQueryService {
                 }
                 if (statement.kind() == SqlDialectTranslator.StatementKind.CREATE_TABLE
                         && statement.copySource() == null) {
+                    Map<String, Object> evaluatedOptions = null;
                     if (statement.options() != null) {
-                        evaluateOptions(projectId, jobProjectId, statement.options(), options, jobLocation);
+                        evaluatedOptions = evaluateOptions(projectId, jobProjectId, statement.options(), options,
+                                jobLocation);
                     }
                     Table candidate = createStatementTable(statement,
                             described != null ? described.schema() : null);
+                    if (evaluatedOptions != null) {
+                        applyTableOptions(candidate, evaluatedOptions);
+                    }
                     if (existing.isPresent() && statement.orReplace()
                             && !samePartitioning(existing.get(), candidate)) {
                         throw QueryEngine.invalidQuery(
@@ -5121,6 +5126,7 @@ public class BigQueryService {
                 options.rangePartitioning(), options.defaultProjectId(), options.scriptIncompatibleOptions());
     }
 
+    @SuppressWarnings("unchecked")
     private static void applyTableOptions(Table table, Map<String, Object> options) {
         if (options.containsKey("description")) {
             table.setDescription((String) options.get("description"));
@@ -5142,6 +5148,39 @@ public class BigQueryService {
             } else {
                 table.getExtra().put("expirationTime", String.valueOf(expiration));
             }
+        }
+        if (options.containsKey("require_partition_filter")) {
+            if (!table.getExtra().containsKey("timePartitioning")
+                    && !table.getExtra().containsKey("rangePartitioning")) {
+                throw QueryEngine.invalidQuery("require_partition_filter value in table OPTIONS is only supported"
+                        + " for a CREATE TABLE statement with a PARTITION BY clause");
+            }
+            boolean required = Boolean.TRUE.equals(options.get("require_partition_filter"));
+            table.getExtra().put("requirePartitionFilter", required);
+            if (table.getExtra().get("timePartitioning") instanceof Map<?, ?> partitioning) {
+                Map<String, Object> updated = new LinkedHashMap<>((Map<String, Object>) partitioning);
+                if (required) {
+                    updated.put("requirePartitionFilter", true);
+                } else {
+                    updated.remove("requirePartitionFilter");
+                }
+                table.getExtra().put("timePartitioning", updated);
+            }
+        }
+        if (options.containsKey("partition_expiration_days")) {
+            if (!(table.getExtra().get("timePartitioning") instanceof Map<?, ?> partitioning)) {
+                throw QueryEngine.invalidQuery(table.getExtra().containsKey("rangePartitioning")
+                        ? "partition_expiration_days in table OPTIONS is only supported for time partitioned tables."
+                        : "partition_expiration_days value in table OPTIONS is only supported for a CREATE TABLE"
+                                + " statement with a PARTITION BY clause");
+            }
+            Map<String, Object> updated = new LinkedHashMap<>((Map<String, Object>) partitioning);
+            updated.put("expirationMs",
+                    String.valueOf(((Number) options.get("partition_expiration_days")).longValue()));
+            table.getExtra().put("timePartitioning", updated);
+        }
+        if (options.containsKey("kms_key_name")) {
+            table.getExtra().put("encryptionConfiguration", Map.of("kmsKeyName", options.get("kms_key_name")));
         }
     }
 

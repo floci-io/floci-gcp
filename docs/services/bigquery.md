@@ -579,8 +579,8 @@ Not supported: `AVRO`, `ORC` and `DATASTORE_BACKUP` sources, Hive partitioning,
 | `DELETE [FROM] t WHERE ...` | `WHERE` is required |
 | `MERGE [INTO] t USING s ON ... WHEN [NOT] MATCHED ...` | `dmlStats` splits inserted, updated and deleted rows |
 | `TRUNCATE TABLE t` | `dmlStats.deletedRowCount` |
-| `CREATE [OR REPLACE] TABLE [IF NOT EXISTS] t (col TYPE [NOT NULL] [OPTIONS(description=...)], ...)` | Column types keep their exact BigQuery type (`BIGNUMERIC`, `GEOGRAPHY`, `ARRAY<...>`, `STRUCT<...>`); supported time and integer-range `PARTITION BY` expressions, `CLUSTER BY` fields, and table options populate metadata |
-| `CREATE [OR REPLACE] TABLE [IF NOT EXISTS] t [PARTITION BY ...] [CLUSTER BY ...] [OPTIONS(...)] AS SELECT ...` | Schema and rows come from the query; field-based time and integer-range `PARTITION BY` expressions, `CLUSTER BY` fields, and supported table options populate metadata; ingestion-time partitioning is rejected |
+| `CREATE [OR REPLACE] TABLE [IF NOT EXISTS] t (col TYPE [NOT NULL] [OPTIONS(description=...)], ...)` | Column types keep their exact BigQuery type (`BIGNUMERIC`, `GEOGRAPHY`, `ARRAY<...>`, `STRUCT<...>`); supported time and integer-range `PARTITION BY` expressions, `CLUSTER BY` fields, and table options populate metadata. BigQuery's remaining table options are accepted: `require_partition_filter`, `partition_expiration_days` and `kms_key_name` are stored, the rest are ignored |
+| `CREATE [OR REPLACE] TABLE [IF NOT EXISTS] t [PARTITION BY ...] [CLUSTER BY ...] [OPTIONS(...)] AS SELECT ...` | Schema and rows come from the query; field-based time and integer-range `PARTITION BY` expressions, `CLUSTER BY` fields, and supported table options populate metadata; ingestion-time partitioning is rejected. BigQuery's remaining table options are accepted as on a plain `CREATE TABLE` |
 | `CREATE [OR REPLACE] TABLE [IF NOT EXISTS] t COPY source [OPTIONS(...)]` | Copies a table, clone, or snapshot in the same job location; views are rejected. Trailing options override inherited metadata: `description`, `friendly_name`, `labels`, and `expiration_timestamp`, using the same literal values and `NULL` clearing as `ALTER TABLE SET OPTIONS`. Other options and computed expressions are unsupported |
 | `CREATE [OR REPLACE] [MATERIALIZED] VIEW [IF NOT EXISTS] v AS SELECT ...` | |
 | `DROP TABLE / VIEW / MATERIALIZED VIEW [IF EXISTS]` | Dropping a view with `DROP TABLE` (or the reverse) is rejected |
@@ -730,8 +730,14 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
 - `CLUSTER BY` is stored as table metadata but does not physically cluster rows. Plain `CREATE TABLE`
   and `CREATE TABLE AS SELECT` support the table options `description`, `friendly_name`, `labels`,
   and `expiration_timestamp`; timestamp-valued expiration expressions are evaluated by the configured
-  SQL engine. `CREATE TABLE COPY` applies the option subset documented above. Time-based `PARTITION BY`
-  metadata is stored for the supported expressions documented above.
+  SQL engine. They also accept BigQuery's remaining table options: `require_partition_filter`,
+  `partition_expiration_days` and `kms_key_name` are stored in the Table resource (`requirePartitionFilter`,
+  `timePartitioning.expirationMs` and `encryptionConfiguration.kmsKeyName`), while `default_rounding_mode`,
+  `enable_change_history`, `max_staleness`, `enable_fine_grained_mutations`, `storage_uri`, `file_format`,
+  `table_format` and `tags` are accepted and ignored. An expression value for an option the emulator does
+  not evaluate leaves the option unset. `ALTER TABLE SET OPTIONS` and `CREATE TABLE COPY` still reject
+  these options, as before. `CREATE TABLE COPY` applies the option subset documented above. Time-based
+  `PARTITION BY` metadata is stored for the supported expressions documented above.
 - Option values in `ALTER TABLE` / `ALTER VIEW SET OPTIONS` and `CREATE TABLE COPY` are evaluated
   without BigQuery's limits on the functions they call. BigQuery rejects aggregate functions
   (`Aggregate function MAX not allowed in option`), analytic functions and some scalar functions such

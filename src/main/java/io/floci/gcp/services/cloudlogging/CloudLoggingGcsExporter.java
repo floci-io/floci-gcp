@@ -1,10 +1,8 @@
 package io.floci.gcp.services.cloudlogging;
 
-import com.google.logging.v2.LogExclusion;
 import com.google.logging.v2.LogSink;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
-import io.floci.gcp.core.common.ProjectRecord;
 import io.floci.gcp.core.common.ProjectRegistry;
 import io.floci.gcp.core.common.ProtoJson;
 import io.floci.gcp.services.cloudlogging.model.StoredLogEntry;
@@ -27,7 +25,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
 /** Prompt local batches, authorized as the sink writer using the destination's stored IAM policies. */
@@ -42,6 +39,7 @@ public class CloudLoggingGcsExporter {
     private final GcsService storage;
     private final GcsIamAuthorizationService authorization;
     private final ProjectRegistry projects;
+    private final SinkRouting routing;
     private final EmulatorConfig config;
 
     @Inject
@@ -50,21 +48,14 @@ public class CloudLoggingGcsExporter {
         this.storage = storage;
         this.authorization = authorization;
         this.projects = projects;
+        this.routing = new SinkRouting(projects);
         this.config = config;
     }
 
     public void export(String parent, LogSink sink, List<StoredLogEntry> entries) {
-        Predicate<StoredLogEntry> matches = SinkLogEntryFilter.parse(sink.getFilter());
-        for (LogExclusion exclusion : sink.getExclusionsList()) {
-            if (!exclusion.getDisabled()) {
-                matches = matches.and(SinkLogEntryFilter.parse(exclusion.getFilter()).negate());
-            }
-        }
         Map<String, List<StoredLogEntry>> batches = new LinkedHashMap<>();
-        for (StoredLogEntry entry : entries) {
-            if (belongsTo(parent, sink.getIncludeChildren(), entry.getLogName()) && matches.test(entry)) {
-                batches.computeIfAbsent(objectPrefix(entry), ignored -> new ArrayList<>()).add(entry);
-            }
+        for (StoredLogEntry entry : routing.select(parent, sink, entries)) {
+            batches.computeIfAbsent(objectPrefix(entry), ignored -> new ArrayList<>()).add(entry);
         }
         if (batches.isEmpty()) {
             return;
@@ -108,32 +99,6 @@ public class CloudLoggingGcsExporter {
         }
         return projects.find(project).map(record -> parent.equals("projects/" + record.getProjectNumber())
                 || parent.equals("projects/" + record.getProjectId())).orElse(false);
-    }
-
-    private boolean belongsTo(String parent, boolean includeChildren, String logName) {
-        int logs = logName.indexOf("/logs/");
-        if (logs < 0) {
-            return false;
-        }
-        String owner = logName.substring(0, logs);
-        if (parent.equals(owner)) {
-            return true;
-        }
-        if (!owner.startsWith("projects/")) {
-            return false;
-        }
-        ProjectRecord project = projects.find(owner.substring("projects/".length())).orElse(null);
-        if (project == null) {
-            return false;
-        }
-        if (parent.equals("projects/" + project.getProjectId())
-                || parent.equals("projects/" + project.getProjectNumber())) {
-            return true;
-        }
-        if (!includeChildren || (!parent.startsWith("folders/") && !parent.startsWith("organizations/"))) {
-            return false;
-        }
-        return project.hasParent() && parent.equals(project.getParentType() + "s/" + project.getParentId());
     }
 
     private static String objectPrefix(StoredLogEntry entry) {

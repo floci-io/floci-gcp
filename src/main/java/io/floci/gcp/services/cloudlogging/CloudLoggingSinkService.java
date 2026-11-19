@@ -36,28 +36,40 @@ public class CloudLoggingSinkService {
     private static final FieldMask DEFAULT_UPDATE_MASK = FieldMask.newBuilder()
             .addPaths("destination").addPaths("filter").addPaths("include_children").build();
 
+    private static final String STORAGE_PREFIX = "storage.googleapis.com/";
+
     private final StorageBackend<String, StoredLogSink> sinks;
     private final CloudLoggingGcsExporter exporter;
+    private final CloudLoggingPubSubExporter pubSubExporter;
+    private final CloudLoggingBigQueryExporter bigQueryExporter;
     // All sink checks and mutations share this lock; no mutable protobuf or store value escapes it.
     private final Object sinkLock = new Object();
 
     @Inject
-    public CloudLoggingSinkService(StorageFactory storageFactory, CloudLoggingGcsExporter exporter) {
+    public CloudLoggingSinkService(StorageFactory storageFactory, CloudLoggingGcsExporter exporter,
+            CloudLoggingPubSubExporter pubSubExporter, CloudLoggingBigQueryExporter bigQueryExporter) {
         this(storageFactory.createGlobal("logging", "cloudlogging-sinks.json",
-                new TypeReference<Map<String, StoredLogSink>>() {}), exporter);
+                new TypeReference<Map<String, StoredLogSink>>() {}), exporter, pubSubExporter, bigQueryExporter);
     }
 
     CloudLoggingSinkService(StorageFactory storageFactory) {
-        this(storageFactory, null);
+        this(storageFactory, null, null, null);
     }
 
     CloudLoggingSinkService(StorageBackend<String, StoredLogSink> sinks) {
-        this(sinks, null);
+        this(sinks, null, null, null);
     }
 
     CloudLoggingSinkService(StorageBackend<String, StoredLogSink> sinks, CloudLoggingGcsExporter exporter) {
+        this(sinks, exporter, null, null);
+    }
+
+    CloudLoggingSinkService(StorageBackend<String, StoredLogSink> sinks, CloudLoggingGcsExporter exporter,
+            CloudLoggingPubSubExporter pubSubExporter, CloudLoggingBigQueryExporter bigQueryExporter) {
         this.sinks = sinks;
         this.exporter = exporter;
+        this.pubSubExporter = pubSubExporter;
+        this.bigQueryExporter = bigQueryExporter;
     }
 
     public LogSink createSink(String parent, LogSink requested, boolean uniqueWriterIdentity) {
@@ -182,8 +194,16 @@ public class CloudLoggingSinkService {
             for (String key : sinks.keys().stream().sorted().toList()) {
                 try {
                     LogSink sink = read(requireSink(key));
-                    if (!sink.getDisabled() && sink.getDestination().startsWith("storage.googleapis.com/")) {
-                        exporter.export(key.substring(0, key.lastIndexOf("/sinks/")), sink, entries);
+                    if (sink.getDisabled()) {
+                        continue;
+                    }
+                    String parent = key.substring(0, key.lastIndexOf("/sinks/"));
+                    if (sink.getDestination().startsWith(STORAGE_PREFIX)) {
+                        exporter.export(parent, sink, entries);
+                    } else if (sink.getDestination().startsWith(CloudLoggingPubSubExporter.DESTINATION_PREFIX)) {
+                        pubSubExporter.export(parent, sink, entries);
+                    } else if (sink.getDestination().startsWith(CloudLoggingBigQueryExporter.DESTINATION_PREFIX)) {
+                        bigQueryExporter.export(parent, sink, entries);
                     }
                 } catch (RuntimeException exception) {
                     // Destination failures must not reject entries already accepted by Logging.

@@ -210,7 +210,8 @@ After accepting a non-dry-run `WriteLogEntries` request, both REST and gRPC inge
 active Cloud Storage sinks and route matching entries. Request defaults, timestamps, insert IDs,
 and labels are applied before routing. Enabled exclusions remove matching entries. Disabled sinks
 and disabled exclusions are respected. Deleting a log does not delete objects already exported.
-Pub/Sub and BigQuery destinations can be configured but do not receive deliveries.
+Pub/Sub and BigQuery destinations are delivered as described under [Pub/Sub export](#pubsub-export)
+and [BigQuery export](#bigquery-export).
 
 Each local write produces immutable JSON-array batches of protobuf-JSON `LogEntry` objects,
 grouped by log ID and UTC timestamp hour. URL-encoded log IDs are decoded in object paths:
@@ -336,9 +337,72 @@ and the [Logging query language](https://docs.cloud.google.com/logging/docs/view
 Live verification covered folder identity behavior and date-only timestamp comparisons at midnight UTC.
 Export file bytes and exact validation messages were not verified live.
 
+## Pub/Sub export
+
+Sinks whose destination is `pubsub.googleapis.com/projects/{project}/topics/{topic}` use the same
+routing as Cloud Storage sinks: the same filter subset, exclusions, `includeChildren` hierarchy,
+disabled flags and dry-run handling. Each routed entry is published as its own message, in the
+order the request supplied it, right after the write is accepted. The message data is the
+protobuf-JSON `LogEntry` (the same bytes a Cloud Storage export would hold for that entry, as a
+single object rather than an array), and the message carries the
+`logging.googleapis.com/timestamp` attribute with the entry's `timestamp`.
+
+Only entries received after the sink exists are published; nothing is backfilled when a sink is
+created or re-enabled. A missing topic, a denied writer, or a disabled Pub/Sub service is logged,
+does not fail the accepted write, and does not affect other sinks. The failed entries are not
+retried. Real Cloud Logging also writes a `logging.googleapis.com/sink_error` entry and emails the
+project owners for these errors; the emulator does neither.
+
+With `iam.authorization-mode=enforce`, grant the `writerIdentity` `roles/pubsub.publisher` on the
+topic or its project. Export checks `pubsub.topics.publish` against that principal. As with Cloud
+Storage delivery, the sink lock and then the topic and project policy locks are held through the
+check and the publication, so a revocation is ordered before or after it, never in between.
+
+Deviations: real Pub/Sub sinks deliver within about a minute and some sample messages carry
+additional `<service>/resource_type` and `<service>/resource_id` attributes; the emulator publishes
+synchronously and sets only the timestamp attribute. Semantics follow
+[Pub/Sub routing](https://docs.cloud.google.com/logging/docs/export/pubsub) and
+[sink troubleshooting](https://docs.cloud.google.com/logging/docs/export/troubleshoot).
+
+## BigQuery export
+
+Sinks whose destination is `bigquery.googleapis.com/projects/{project}/datasets/{dataset}` use the
+same routing as the other sinks and stream routed entries into the dataset right after the write is
+accepted. The dataset must exist; tables are created on demand, under the dataset's project even
+when the sink lives in another project.
+
+- Tables: one per log, named after the log ID with `-`, `.`, `/` and other unsupported characters
+  replaced by `_`, plus the entry timestamp's UTC date (`syslog_20170523`,
+  `compute_googleapis_com_activity_log_20171231`). With `bigqueryOptions.usePartitionedTables`
+  the suffix is dropped and the table is day-partitioned on the `timestamp` column.
+- Columns: `LogEntry` field names are kept (`logName`, `insertId`, `receiveTimestamp`, ...);
+  `timestamp` and `receiveTimestamp` are `TIMESTAMP`. The keys of `labels`, `resource.labels` and
+  `jsonPayload` are lowercased, unsupported characters become `_`, leading underscores are removed
+  and names are capped at 128 characters. JSON objects become `RECORD` columns, arrays `REPEATED`
+  columns, numbers `FLOAT`, booleans `BOOLEAN` and strings `STRING`. An array's columns cover the
+  keys of all its items. Null values, empty objects and empty arrays add no column and are left out
+  of the row.
+- Schema: the first entries of a table determine its schema, and later entries may add columns.
+  An entry whose field changes type, or whose array mixes item types or holds arrays, is written
+  instead to `export_errors_YYYYMMDD` (or `export_errors` for partitioned sinks) with `logEntry` (the entry as JSON), `schemaErrorDetail`,
+  `sink`, `logName`, `timestamp`, `receiveTimestamp`, `severity`, `insertId`, `trace` and
+  `resourceType`.
+
+A missing dataset or a disabled BigQuery service is logged, does not fail the accepted write, and
+does not affect other sinks. BigQuery has no IAM enforcement in the emulator, so the writer
+identity needs no `roles/bigquery.dataEditor` grant here. Inserts run under the sink lock; with the
+DuckDB sidecar they add a network round trip to the write.
+
+Deviations: real BigQuery sinks stream in small batches with some latency, shorten audit log
+payload names, store `protoPayload` and `httpRequest`, and email project owners on schema
+mismatches. The emulator inserts synchronously, has no `protoPayload` or `httpRequest` to store, and
+represents `labels` and `resource.labels` as `RECORD` columns keyed by label name (the saved
+documentation does not state their shape). Semantics follow
+[BigQuery routing](https://docs.cloud.google.com/logging/docs/export/bigquery).
+
 ## Not Yet Supported
 
 `TailLogEntries` (streaming), `protoPayload`/`httpRequest`/`operation`/`sourceLocation`/`split`
-fields, monitored-resource-descriptor catalog, log-based metrics (`MetricsServiceV2`), non-GCS sink export,
+fields, monitored-resource-descriptor catalog, log-based metrics (`MetricsServiceV2`),
 log buckets and other `ConfigServiceV2` methods, advanced filter operators, and retention/dedup
 semantics.

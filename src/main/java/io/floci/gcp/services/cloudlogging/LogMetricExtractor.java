@@ -2,6 +2,7 @@ package io.floci.gcp.services.cloudlogging;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.gcp.core.common.BoundedRegex;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.services.cloudlogging.model.StoredLogEntry;
 import org.jboss.logging.Logger;
@@ -13,6 +14,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.function.Function;
+import java.util.regex.MatchResult;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -29,8 +31,6 @@ final class LogMetricExtractor {
             "(?s)\\s*REGEXP_EXTRACT\\s*\\((.+?),\\s*\"((?:[^\"\\\\]|\\\\.)*)\"\\s*\\)\\s*");
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final Logger LOG = Logger.getLogger(LogMetricExtractor.class);
-    private static final long MATCH_STEP_BUDGET = 1_000_000;
-    private static final long MATCH_STEPS_PER_CHAR = 100;
     private static final double LONG_RANGE = 0x1p63;
 
     private final Function<StoredLogEntry, Object> field;
@@ -77,20 +77,17 @@ final class LogMetricExtractor {
         if (regex == null) {
             return Optional.of(text);
         }
-        Matcher matcher = regex.matcher(new BoundedCharSequence(text));
+        Optional<MatchResult> match;
         try {
-            if (!matcher.find() || matcher.group(1) == null) {
-                return Optional.empty();
-            }
-        } catch (StepBudgetExceeded e) {
-            LOG.debugf("Regular expression %s exceeded its matching budget; nothing extracted", regex.pattern());
-            return Optional.empty();
-        } catch (StackOverflowError e) {
-            LOG.debugf("Regular expression %s recursed too deeply over %d characters; nothing extracted",
-                    regex.pattern(), text.length());
+            match = BoundedRegex.find(regex, text);
+        } catch (BoundedRegex.BudgetExceeded e) {
+            LOG.debugf("Regular expression %s %s; nothing extracted", regex.pattern(), e.getMessage());
             return Optional.empty();
         }
-        return Optional.of(text.substring(matcher.start(1), matcher.end(1)));
+        if (match.isEmpty() || match.get().group(1) == null) {
+            return Optional.empty();
+        }
+        return Optional.of(text.substring(match.get().start(1), match.get().end(1)));
     }
 
     private static Function<StoredLogEntry, Object> field(String name, String expression) {
@@ -149,50 +146,5 @@ final class LogMetricExtractor {
             }
         }
         return result.toString();
-    }
-
-    private static final class BoundedCharSequence implements CharSequence {
-        private final CharSequence delegate;
-        private final long budget;
-        private final long[] steps;
-
-        BoundedCharSequence(CharSequence delegate) {
-            this(delegate, MATCH_STEP_BUDGET + MATCH_STEPS_PER_CHAR * delegate.length(), new long[1]);
-        }
-
-        private BoundedCharSequence(CharSequence delegate, long budget, long[] steps) {
-            this.delegate = delegate;
-            this.budget = budget;
-            this.steps = steps;
-        }
-
-        @Override
-        public int length() {
-            return delegate.length();
-        }
-
-        @Override
-        public char charAt(int index) {
-            if (++steps[0] > budget) {
-                throw new StepBudgetExceeded();
-            }
-            return delegate.charAt(index);
-        }
-
-        @Override
-        public CharSequence subSequence(int start, int end) {
-            return new BoundedCharSequence(delegate.subSequence(start, end), budget, steps);
-        }
-
-        @Override
-        public String toString() {
-            return delegate.toString();
-        }
-    }
-
-    private static final class StepBudgetExceeded extends RuntimeException {
-        StepBudgetExceeded() {
-            super(null, null, false, false);
-        }
     }
 }

@@ -17,9 +17,11 @@ import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.core.storage.StorageFactory;
 import io.floci.gcp.lifecycle.GrpcServerManager;
 import io.quarkus.runtime.StartupEvent;
+import jakarta.annotation.Priority;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
+import jakarta.interceptor.Interceptor;
 
 import java.security.SecureRandom;
 import java.util.List;
@@ -27,6 +29,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
 
 /**
  * UptimeCheckService configuration. Checks live in a global store keyed by full resource name so
@@ -66,7 +69,8 @@ public class UptimeCheckService {
         this.grpcServerManager = grpcServerManager;
     }
 
-    void onStart(@Observes StartupEvent ev) {
+    /** Binds after CloudMonitoringService registers the monitoring descriptor, so the service usage gate applies. */
+    void onStart(@Observes @Priority(Interceptor.Priority.LIBRARY_AFTER + 100) StartupEvent ev) {
         grpcServerManager.bind(new UptimeCheckController(this));
     }
 
@@ -128,6 +132,9 @@ public class UptimeCheckService {
                 for (String path : updateMask.getPathsList()) {
                     if (!MUTABLE.contains(path.split("\\.", 2)[0])) {
                         throw GcpException.invalidArgument("Field " + path + " of an uptime check cannot be updated");
+                    }
+                    if (!FieldMaskUtil.isValid(UptimeCheckConfig.getDescriptor(), path)) {
+                        throw GcpException.invalidArgument("Invalid update mask path for an uptime check: " + path);
                     }
                 }
                 FieldMaskUtil.merge(updateMask, requested, updated, new FieldMaskUtil.MergeOptions()
@@ -216,6 +223,17 @@ public class UptimeCheckService {
         long timeout = check.getTimeout().getSeconds();
         if (!check.hasTimeout() || timeout < 1 || timeout > 60 || (timeout == 60 && check.getTimeout().getNanos() > 0)) {
             throw GcpException.invalidArgument("The timeout is required and must be between 1 and 60 seconds");
+        }
+        for (UptimeCheckConfig.ContentMatcher matcher : check.getContentMatchersList()) {
+            if (matcher.getMatcher() == UptimeCheckConfig.ContentMatcher.ContentMatcherOption.MATCHES_REGEX
+                    || matcher.getMatcher() == UptimeCheckConfig.ContentMatcher.ContentMatcherOption.NOT_MATCHES_REGEX) {
+                try {
+                    Pattern.compile(matcher.getContent());
+                } catch (PatternSyntaxException e) {
+                    throw GcpException.invalidArgument("Invalid regular expression in a content matcher: "
+                            + matcher.getContent());
+                }
+            }
         }
     }
 

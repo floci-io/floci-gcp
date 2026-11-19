@@ -18,12 +18,17 @@ import org.junit.jupiter.api.Test;
 
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Flow;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -36,6 +41,7 @@ class UptimeCheckServiceTest {
     private CloudMonitoringService monitoring;
     private UptimeCheckProber prober;
     private HttpServer server;
+    private ExecutorService serverThreads;
     private volatile int status = 200;
     private volatile String body = "service is healthy";
     private volatile long delayMs = 0;
@@ -58,12 +64,15 @@ class UptimeCheckServiceTest {
             exchange.getResponseBody().write(bytes);
             exchange.close();
         });
+        serverThreads = Executors.newCachedThreadPool();
+        server.setExecutor(serverThreads);
         server.start();
     }
 
     @AfterEach
     void tearDown() {
         server.stop(0);
+        serverThreads.shutdownNow();
     }
 
     // ── Configuration ────────────────────────────────────────────────────
@@ -95,6 +104,10 @@ class UptimeCheckServiceTest {
                 http("no check", "/").clearHttpCheck().build())));
         assertEquals(Status.Code.INVALID_ARGUMENT, code(() -> checks.create(PROJECT, http("no host", "/")
                 .setMonitoredResource(MonitoredResource.newBuilder().setType("uptime_url")).build())));
+        assertEquals(Status.Code.INVALID_ARGUMENT, code(() -> checks.create(PROJECT, http("bad regex", "/")
+                .addContentMatchers(regex("[", UptimeCheckConfig.ContentMatcher.ContentMatcherOption.MATCHES_REGEX)).build())));
+        assertEquals(Status.Code.INVALID_ARGUMENT, code(() -> checks.create(PROJECT, http("bad negated regex", "/")
+                .addContentMatchers(regex("(", UptimeCheckConfig.ContentMatcher.ContentMatcherOption.NOT_MATCHES_REGEX)).build())));
     }
 
     @Test
@@ -109,6 +122,10 @@ class UptimeCheckServiceTest {
 
         assertEquals(Status.Code.INVALID_ARGUMENT, code(() -> checks.update(renamed,
                 FieldMask.newBuilder().addPaths("period").build())));
+        assertEquals(Status.Code.INVALID_ARGUMENT, code(() -> checks.update(renamed,
+                FieldMask.newBuilder().addPaths("http_check.typo").build())));
+        assertEquals("/v2", checks.update(renamed.toBuilder().setHttpCheck(renamed.getHttpCheck().toBuilder().setPath("/v2"))
+                .build(), FieldMask.newBuilder().addPaths("http_check.path").build()).getHttpCheck().getPath());
         assertEquals(Status.Code.INVALID_ARGUMENT, code(() -> checks.update(renamed.toBuilder()
                 .setMonitoredResource(MonitoredResource.newBuilder().setType("uptime_url").putLabels("host", "other"))
                 .build(), FieldMask.getDefaultInstance())));
@@ -124,7 +141,7 @@ class UptimeCheckServiceTest {
         UptimeCheckConfig check = checks.create(PROJECT, http("Home", "/health").addContentMatchers(
                 UptimeCheckConfig.ContentMatcher.newBuilder().setContent("healthy")).build());
 
-        prober.tick(NOW);
+        prober.tick(NOW).join();
 
         String checkId = check.getName().substring(check.getName().lastIndexOf('/') + 1);
         TimeSeries passed = only("check_passed");
@@ -141,7 +158,7 @@ class UptimeCheckServiceTest {
     void aWrongStatusAMismatchOrATimeoutFailsTheCheck() {
         checks.create(PROJECT, http("Home", "/").build());
         status = 503;
-        prober.tick(NOW);
+        prober.tick(NOW).join();
         assertFalse(only("check_passed").getPoints(0).getValue().getBoolValue());
         assertEquals("503", only("http_status").getPoints(0).getValue().getStringValue());
 
@@ -152,7 +169,7 @@ class UptimeCheckServiceTest {
         delayMs = 0;
         checks.create(PROJECT, http("Slow", "/").setTimeout(Duration.newBuilder().setSeconds(1)).build());
         delayMs = 1500;
-        prober.tick(NOW.plusSeconds(60));
+        prober.tick(NOW.plusSeconds(60)).join();
         delayMs = 0;
 
         Map<String, Boolean> passedByCheck = all("check_passed").stream().collect(Collectors.groupingBy(
@@ -175,7 +192,7 @@ class UptimeCheckServiceTest {
             checks.create(PROJECT, tcp("TCP closed", closedPort).build());
         }
 
-        prober.tick(NOW);
+        prober.tick(NOW).join();
 
         Map<String, Boolean> passed = all("check_passed").stream().collect(Collectors.toMap(
                 ts -> ts.getMetric().getLabelsOrThrow("check_id").replaceAll("-[0-9a-f]+$", ""),
@@ -189,12 +206,99 @@ class UptimeCheckServiceTest {
         checks.create(PROJECT, http("VM", "/").setMonitoredResource(MonitoredResource.newBuilder()
                 .setType("gce_instance").putLabels("instance_id", "1").putLabels("zone", "us-central1-a")).build());
 
-        prober.tick(NOW);
-        prober.tick(NOW.plusSeconds(60));
-        prober.tick(NOW.plusSeconds(301));
+        prober.tick(NOW).join();
+        prober.tick(NOW.plusSeconds(60)).join();
+        prober.tick(NOW.plusSeconds(301)).join();
 
         assertEquals(1, all("check_passed").size());
         assertEquals(2, all("check_passed").getFirst().getPointsCount());
+    }
+
+    @Test
+    void aBacktrackingRegexFailsItsCheckWithoutHoldingUpTheOthers() {
+        body = "a".repeat(64) + "!";
+        checks.create(PROJECT, http("Backtracking", "/").addContentMatchers(
+                regex("(a+){10}$", UptimeCheckConfig.ContentMatcher.ContentMatcherOption.MATCHES_REGEX)).build());
+        checks.create(PROJECT, http("Negated backtracking", "/").addContentMatchers(
+                regex("(a+){10}$", UptimeCheckConfig.ContentMatcher.ContentMatcherOption.NOT_MATCHES_REGEX)).build());
+        checks.create(PROJECT, http("Plain", "/").addContentMatchers(
+                UptimeCheckConfig.ContentMatcher.newBuilder().setContent("aaa")).build());
+
+        long started = System.nanoTime();
+        prober.tick(NOW).join();
+
+        assertTrue(System.nanoTime() - started < 10_000_000_000L, "the tick finished");
+        assertEquals(Map.of("backtracking", false, "negated-backtracking", false, "plain", true), passedByCheck());
+    }
+
+    @Test
+    void slowTargetsAreProbedInParallel() {
+        delayMs = 1500;
+        for (int i = 0; i < 4; i++) {
+            checks.create(PROJECT, http("Slow " + i, "/").setTimeout(Duration.newBuilder().setSeconds(10)).build());
+        }
+
+        long started = System.nanoTime();
+        prober.tick(NOW).join();
+
+        assertTrue(System.nanoTime() - started < 4_500_000_000L, "four 1.5 s probes ran in parallel");
+        assertEquals(4, passedByCheck().values().stream().filter(Boolean::booleanValue).count());
+        prober.tick(NOW.plusSeconds(1)).join();
+        assertEquals(4, all("check_passed").size(), "a check is not started again before its period");
+    }
+
+    @Test
+    void contentMatchersReadOnlyTheFirstMebibyteOfTheBody() {
+        body = "healthy" + "x".repeat(2 * 1024 * 1024) + "tail-marker";
+        checks.create(PROJECT, http("Head", "/").addContentMatchers(
+                UptimeCheckConfig.ContentMatcher.newBuilder().setContent("healthy")).build());
+        checks.create(PROJECT, http("Tail", "/").addContentMatchers(
+                UptimeCheckConfig.ContentMatcher.newBuilder().setContent("tail-marker")).build());
+
+        prober.tick(NOW).join();
+
+        assertEquals(Map.of("head", true, "tail", false), passedByCheck());
+    }
+
+    @Test
+    void theCappedBodyStopsReadingAtItsLimit() {
+        AtomicBoolean cancelled = new AtomicBoolean();
+        UptimeCheckProber.CappedBody capped = new UptimeCheckProber.CappedBody(4);
+        capped.onSubscribe(subscription(cancelled));
+        capped.onNext(List.of(ByteBuffer.wrap("abc".getBytes(StandardCharsets.UTF_8)),
+                ByteBuffer.wrap("defgh".getBytes(StandardCharsets.UTF_8))));
+        assertTrue(cancelled.get());
+        assertEquals("abcd", new String(capped.getBody().toCompletableFuture().join(), StandardCharsets.UTF_8));
+
+        AtomicBoolean discarded = new AtomicBoolean();
+        UptimeCheckProber.CappedBody none = new UptimeCheckProber.CappedBody(0);
+        none.onSubscribe(subscription(discarded));
+        assertTrue(discarded.get());
+        assertEquals(0, none.getBody().toCompletableFuture().join().length);
+    }
+
+    private static Flow.Subscription subscription(AtomicBoolean cancelled) {
+        return new Flow.Subscription() {
+            @Override
+            public void request(long n) {
+            }
+
+            @Override
+            public void cancel() {
+                cancelled.set(true);
+            }
+        };
+    }
+
+    private static UptimeCheckConfig.ContentMatcher regex(String pattern,
+            UptimeCheckConfig.ContentMatcher.ContentMatcherOption option) {
+        return UptimeCheckConfig.ContentMatcher.newBuilder().setContent(pattern).setMatcher(option).build();
+    }
+
+    private Map<String, Boolean> passedByCheck() {
+        return all("check_passed").stream().collect(Collectors.toMap(
+                ts -> ts.getMetric().getLabelsOrThrow("check_id").replaceAll("-[0-9a-f]+$", ""),
+                ts -> ts.getPoints(0).getValue().getBoolValue()));
     }
 
     private TimeSeries only(String metric) {

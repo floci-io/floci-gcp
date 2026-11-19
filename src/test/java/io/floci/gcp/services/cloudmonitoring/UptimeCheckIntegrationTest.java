@@ -57,7 +57,7 @@ class UptimeCheckIntegrationTest {
                     .body("timeout", equalTo("10s"));
 
             Instant now = Instant.now();
-            prober.tick(now);
+            prober.tick(now).join();
 
             String checkId = name.substring(name.lastIndexOf('/') + 1);
             given().queryParam("filter", "metric.type=\"monitoring.googleapis.com/uptime_check/check_passed\" AND "

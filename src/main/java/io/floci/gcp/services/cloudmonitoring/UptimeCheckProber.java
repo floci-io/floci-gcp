@@ -11,6 +11,7 @@ import com.google.monitoring.v3.TypedValue;
 import com.google.monitoring.v3.UptimeCheckConfig;
 import com.google.protobuf.Timestamp;
 import io.floci.gcp.config.EmulatorConfig;
+import io.floci.gcp.core.common.BoundedRegex;
 import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -26,7 +27,9 @@ import java.net.Socket;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
+import java.io.ByteArrayOutputStream;
 import java.net.http.HttpResponse;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.cert.X509Certificate;
 import java.time.Duration;
@@ -34,21 +37,33 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Flow;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
 
 /**
  * Runs each {@code uptime_url} uptime check every {@code period} and writes the
  * {@code monitoring.googleapis.com/uptime_check/*} series into Cloud Monitoring under the check's
  * project: {@code check_passed} (BOOL), {@code request_latency} (DOUBLE, ms), and for HTTP checks
  * {@code http_status} (STRING) and, when content matchers are set, {@code content_mismatch} (BOOL).
- * Checks on other resource types are stored but not probed.
+ * Checks on other resource types are stored but not probed. Due checks run in parallel on a small
+ * pool, each under its own timeout (response body included), and a check still running is not
+ * started again.
  */
 @ApplicationScoped
 public class UptimeCheckProber {
@@ -56,6 +71,7 @@ public class UptimeCheckProber {
     static final String METRIC_PREFIX = "monitoring.googleapis.com/uptime_check/";
     static final String CHECKER_LOCATION = "local";
     private static final int MAX_BODY_BYTES = 1024 * 1024;
+    private static final int PROBE_THREADS = 8;
 
     record Outcome(boolean passed, double latencyMs, Integer httpStatus, Boolean contentMismatch) {}
 
@@ -64,10 +80,12 @@ public class UptimeCheckProber {
     private final boolean enabled;
     private final long tickSeconds;
     private final ScheduledExecutorService executor;
+    private final ExecutorService probes;
     private final HttpClient validating;
     private final HttpClient trusting;
     private final Map<String, Instant> lastRun = new HashMap<>();
-    private final Set<String> describedProjects = new HashSet<>();
+    private final Set<String> running = ConcurrentHashMap.newKeySet();
+    private final Set<String> describedProjects = ConcurrentHashMap.newKeySet();
 
     @Inject
     public UptimeCheckProber(UptimeCheckService checks, CloudMonitoringService monitoring, EmulatorConfig config) {
@@ -82,6 +100,12 @@ public class UptimeCheckProber {
         this.tickSeconds = Math.max(1, tickSeconds);
         this.executor = Executors.newSingleThreadScheduledExecutor(runnable -> {
             Thread thread = new Thread(runnable, "monitoring-uptime-prober");
+            thread.setDaemon(true);
+            return thread;
+        });
+        AtomicInteger probeThreads = new AtomicInteger();
+        this.probes = Executors.newFixedThreadPool(PROBE_THREADS, runnable -> {
+            Thread thread = new Thread(runnable, "monitoring-uptime-probe-" + probeThreads.incrementAndGet());
             thread.setDaemon(true);
             return thread;
         });
@@ -100,6 +124,7 @@ public class UptimeCheckProber {
 
     void onStop(@Observes ShutdownEvent ignored) {
         executor.shutdownNow();
+        probes.shutdownNow();
     }
 
     void tickSafely() {
@@ -110,9 +135,16 @@ public class UptimeCheckProber {
         }
     }
 
-    synchronized void tick(Instant now) {
+    /**
+     * Starts every due check on the probe pool and returns once they are queued; the future
+     * completes when all of them are recorded. Each point carries the time its probe started,
+     * offset from {@code now}.
+     */
+    synchronized CompletableFuture<Void> tick(Instant now) {
+        long tickStarted = System.nanoTime();
         List<UptimeCheckConfig> all = checks.listAll();
         lastRun.keySet().retainAll(all.stream().map(UptimeCheckConfig::getName).toList());
+        List<CompletableFuture<Void>> started = new ArrayList<>();
         for (UptimeCheckConfig check : all) {
             if (!check.hasMonitoredResource() || !check.getMonitoredResource().getType().equals("uptime_url")) {
                 continue;
@@ -121,13 +153,26 @@ public class UptimeCheckProber {
             if (previous != null && now.isBefore(previous.plusSeconds(check.getPeriod().getSeconds()))) {
                 continue;
             }
+            if (!running.add(check.getName())) {
+                continue;
+            }
             lastRun.put(check.getName(), now);
             try {
-                record(check, probe(check), now);
-            } catch (RuntimeException e) {
-                LOG.warnf(e, "Uptime check %s could not be recorded", check.getName());
+                started.add(CompletableFuture.runAsync(() -> {
+                    try {
+                        Instant at = now.plusNanos(System.nanoTime() - tickStarted);
+                        record(check, probe(check), at);
+                    } catch (RuntimeException e) {
+                        LOG.warnf(e, "Uptime check %s could not be recorded", check.getName());
+                    } finally {
+                        running.remove(check.getName());
+                    }
+                }, probes));
+            } catch (RejectedExecutionException shuttingDown) {
+                running.remove(check.getName());
             }
         }
+        return CompletableFuture.allOf(started.toArray(CompletableFuture[]::new));
     }
 
     Outcome probe(UptimeCheckConfig check) {
@@ -169,20 +214,26 @@ public class UptimeCheckProber {
         } else {
             request.GET();
         }
+        int bodyLimit = check.getContentMatchersCount() > 0 ? MAX_BODY_BYTES : 0;
         HttpResponse<byte[]> response;
+        CompletableFuture<HttpResponse<byte[]>> sent = (http.getUseSsl() && http.getValidateSsl() ? validating : trusting)
+                .sendAsync(request.build(), info -> new CappedBody(bodyLimit));
         try {
-            response = (http.getUseSsl() && http.getValidateSsl() ? validating : trusting)
-                    .send(request.build(), HttpResponse.BodyHandlers.ofByteArray());
-        } catch (Exception e) {
-            return new Outcome(false, elapsedMs(started), null, check.getContentMatchersCount() > 0 ? Boolean.TRUE : null);
+            response = sent.get(timeout.toNanos(), TimeUnit.NANOSECONDS);
+        } catch (InterruptedException e) {
+            sent.cancel(true);
+            Thread.currentThread().interrupt();
+            return new Outcome(false, elapsedMs(started), null, bodyLimit > 0 ? Boolean.TRUE : null);
+        } catch (TimeoutException | ExecutionException e) {
+            sent.cancel(true);
+            return new Outcome(false, elapsedMs(started), null, bodyLimit > 0 ? Boolean.TRUE : null);
         }
         double latency = elapsedMs(started);
         boolean statusAccepted = accepted(http.getAcceptedResponseStatusCodesList(), response.statusCode());
         Boolean mismatch = null;
-        if (check.getContentMatchersCount() > 0) {
-            byte[] body = response.body();
-            String text = new String(body, 0, Math.min(body.length, MAX_BODY_BYTES), StandardCharsets.UTF_8);
-            mismatch = !check.getContentMatchersList().stream().allMatch(matcher -> matches(matcher, text));
+        if (bodyLimit > 0) {
+            String text = new String(response.body(), StandardCharsets.UTF_8);
+            mismatch = !check.getContentMatchersList().stream().allMatch(matcher -> matches(check, matcher, text));
         }
         return new Outcome(statusAccepted && !Boolean.TRUE.equals(mismatch), latency, response.statusCode(), mismatch);
     }
@@ -260,18 +311,82 @@ public class UptimeCheckProber {
         return false;
     }
 
-    private static boolean matches(UptimeCheckConfig.ContentMatcher matcher, String body) {
+    private static boolean matches(UptimeCheckConfig check, UptimeCheckConfig.ContentMatcher matcher, String body) {
         return switch (matcher.getMatcher()) {
             case NOT_CONTAINS_STRING -> !body.contains(matcher.getContent());
-            case MATCHES_REGEX -> Pattern.compile(matcher.getContent()).matcher(body).find();
-            case NOT_MATCHES_REGEX -> !Pattern.compile(matcher.getContent()).matcher(body).find();
+            case MATCHES_REGEX -> regexFinds(check, matcher.getContent(), body).orElse(false);
+            case NOT_MATCHES_REGEX -> regexFinds(check, matcher.getContent(), body).map(found -> !found).orElse(false);
             case MATCHES_JSON_PATH, NOT_MATCHES_JSON_PATH -> true;
             default -> body.contains(matcher.getContent());
         };
     }
 
+    /** Whether the regex finds a match; empty, and so a failed matcher, when it cannot be decided. */
+    private static Optional<Boolean> regexFinds(UptimeCheckConfig check, String regex, String body) {
+        try {
+            return Optional.of(BoundedRegex.find(Pattern.compile(regex), body).isPresent());
+        } catch (PatternSyntaxException | BoundedRegex.BudgetExceeded e) {
+            LOG.debugf("Uptime check %s content matcher %s could not be evaluated: %s", check.getName(), regex, e.getMessage());
+            return Optional.empty();
+        }
+    }
+
     private static double elapsedMs(long started) {
         return (System.nanoTime() - started) / 1_000_000.0;
+    }
+
+    /** Keeps at most {@code limit} bytes of a response body and stops reading once it has them. */
+    static final class CappedBody implements HttpResponse.BodySubscriber<byte[]> {
+        private final int limit;
+        private final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        private final CompletableFuture<byte[]> body = new CompletableFuture<>();
+        private Flow.Subscription subscription;
+
+        CappedBody(int limit) {
+            this.limit = limit;
+        }
+
+        @Override
+        public CompletionStage<byte[]> getBody() {
+            return body;
+        }
+
+        @Override
+        public void onSubscribe(Flow.Subscription subscription) {
+            this.subscription = subscription;
+            if (limit == 0) {
+                subscription.cancel();
+                body.complete(new byte[0]);
+            } else {
+                subscription.request(1);
+            }
+        }
+
+        @Override
+        public void onNext(List<ByteBuffer> buffers) {
+            for (ByteBuffer buffer : buffers) {
+                int take = Math.min(buffer.remaining(), limit - bytes.size());
+                byte[] chunk = new byte[take];
+                buffer.get(chunk);
+                bytes.write(chunk, 0, take);
+            }
+            if (bytes.size() >= limit) {
+                subscription.cancel();
+                body.complete(bytes.toByteArray());
+            } else {
+                subscription.request(1);
+            }
+        }
+
+        @Override
+        public void onError(Throwable error) {
+            body.completeExceptionally(error);
+        }
+
+        @Override
+        public void onComplete() {
+            body.complete(bytes.toByteArray());
+        }
     }
 
     private static SSLContext trustAll() {

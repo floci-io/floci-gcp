@@ -156,8 +156,12 @@ against their `uptime_url` host: an HTTP(S) request with the configured method, 
 authentication, body and content type, or a TCP connect. HTTPS certificates are verified only with
 `validateSsl`. A response passes when its status is accepted (`acceptedResponseStatusCodes`, by
 value or class, 2xx by default) and every content matcher (`CONTAINS_STRING`, `NOT_CONTAINS_STRING`,
-`MATCHES_REGEX`, `NOT_MATCHES_REGEX`) holds over the first MiB of the body; a timeout or
-connection failure fails it.
+`MATCHES_REGEX`, `NOT_MATCHES_REGEX`) holds over the first MiB of the body (the rest is not read);
+a timeout, which covers the whole response, or a connection failure fails it. Regex matchers are
+compiled on create and update, and an invalid one is rejected with `INVALID_ARGUMENT`. They use
+`java.util.regex` rather than RE2 and run under a step budget: a pattern that cannot be decided
+within it fails its matcher. Due checks run in parallel on a small pool, and a check still running
+is not started again; each point carries the time its probe started.
 
 Each run writes, under the check's project and on its monitored resource (with `project_id` added
 when missing), the GAUGE series the

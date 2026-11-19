@@ -28,6 +28,7 @@ the API endpoint / transport channel and disabling credentials:
   raw or aggregated).
 - Log-based metrics: creating a Cloud Logging metric publishes its `logging.googleapis.com/user/<name>`
   descriptor here, and matching log writes add `DELTA` points (see [Log-based metrics](logging.md#log-based-metrics)).
+- Uptime checks: `UptimeCheckService` configuration and a prober that writes `uptime_check/*` series (see [Uptime checks](#uptime-checks)).
 - `TypedValue` point values (`bool`, `int64`, `double`, `string`, `distribution`) are preserved round-trip.
 - `CreateTimeSeries` writes the valid series of a request even when others fail. It then answers
   `INVALID_ARGUMENT` with a `CreateTimeSeriesSummary` in the error details, over gRPC and REST. A
@@ -132,6 +133,48 @@ emulated; alerts open and close at evaluation ticks, not continuously. Semantics
 [alerting concepts](https://docs.cloud.google.com/monitoring/alerts/concepts-indepth),
 [incidents](https://docs.cloud.google.com/monitoring/alerts/incidents-events) and
 [notification options](https://docs.cloud.google.com/monitoring/support/notification-options).
+
+## Uptime checks
+
+`UptimeCheckService` is served on gRPC and REST JSON (`/v3/projects/{project}/uptimeCheckConfigs`
+and `/v3/uptimeCheckIps`).
+
+- Create assigns `name` (`projects/{project}/uptimeCheckConfigs/{display-name-slug}-{id}`) and fills
+  `period` (default `60s`; only `60s`, `300s`, `600s` and `900s` are accepted), the HTTP method
+  (`GET`), path (`/`) and port (80, or 443 with `useSsl`). `timeout` is required, from 1 to 60s. A
+  check needs a monitored resource, resource group or synthetic monitor, and an HTTP or TCP check;
+  an `uptime_url` resource needs a `host` label.
+- Without `updateMask` the configuration is replaced (the monitored resource cannot change); with
+  one, only `display_name`, `http_check`, `tcp_check`, `timeout`, `content_matchers`,
+  `selected_regions` and `user_labels` may be listed.
+- `ListUptimeCheckIps` returns four placeholder checker locations with the address `127.0.0.1`;
+  the emulator has no regional checkers.
+
+With `floci-gcp.services.monitoring.uptime-checks-enabled` (default `true`), a prober looks every
+`uptime-tick-interval-seconds` (default 10) for checks whose `period` has elapsed and runs them
+against their `uptime_url` host: an HTTP(S) request with the configured method, headers, basic
+authentication, body and content type, or a TCP connect. HTTPS certificates are verified only with
+`validateSsl`. A response passes when its status is accepted (`acceptedResponseStatusCodes`, by
+value or class, 2xx by default) and every content matcher (`CONTAINS_STRING`, `NOT_CONTAINS_STRING`,
+`MATCHES_REGEX`, `NOT_MATCHES_REGEX`) holds over the first MiB of the body (the rest is not read);
+a timeout, which covers the whole response, or a connection failure fails it. Regex matchers are
+compiled on create and update, and an invalid one is rejected with `INVALID_ARGUMENT`. They use
+`java.util.regex` rather than RE2 and run under a step budget: a pattern that cannot be decided
+within it fails its matcher. Due checks run in parallel on a small pool, and a check still running
+is not started again; each point carries the time its probe started.
+
+Each run writes, under the check's project and on its monitored resource (with `project_id` added
+when missing), the GAUGE series the
+[GCP metrics list](https://docs.cloud.google.com/monitoring/api/metrics_gcp_i_o) defines:
+`monitoring.googleapis.com/uptime_check/check_passed` (BOOL), `request_latency` (DOUBLE, ms), and for
+HTTP checks `http_status` (STRING) and, when content matchers are set, `content_mismatch` (BOOL),
+labelled `check_id` (the check's ID) and `checker_location` (`local`). Alert policies can watch these
+series like any other.
+
+Deviations: checks on resources other than `uptime_url` are stored but not probed; there is one
+checker instead of one per region; JSON path matchers, `pingConfig`, service agent authentication,
+`time_until_ssl_cert_expires` and synthetic monitors are not run. Semantics follow
+[uptime checks](https://docs.cloud.google.com/monitoring/uptime-checks).
 
 ## Aggregation
 

@@ -28,7 +28,9 @@ import com.google.logging.v2.WriteLogEntriesRequest;
 import com.google.monitoring.v3.AlertPolicyServiceGrpc;
 import com.google.monitoring.v3.ListAlertPoliciesRequest;
 import com.google.monitoring.v3.ListNotificationChannelsRequest;
+import com.google.monitoring.v3.ListUptimeCheckConfigsRequest;
 import com.google.monitoring.v3.NotificationChannelServiceGrpc;
+import com.google.monitoring.v3.UptimeCheckServiceGrpc;
 import com.google.protobuf.Any;
 import com.google.pubsub.v1.GetTopicRequest;
 import com.google.pubsub.v1.PublisherGrpc;
@@ -278,6 +280,23 @@ class ServiceUsageEnforcementIntegrationTest {
         enable(project, "monitoring.googleapis.com");
         assertEquals(0, policies.listAlertPolicies(listPolicies).getAlertPoliciesCount());
         assertEquals(0, channels.listNotificationChannels(listChannels).getNotificationChannelsCount());
+    }
+
+    @Test
+    void uptimeCheckGrpcCallsAreGatedOnMonitoring() {
+        String project = "su-enforce-uptime";
+        disable(project, "monitoring.googleapis.com");
+        UptimeCheckServiceGrpc.UptimeCheckServiceBlockingStub uptime = UptimeCheckServiceGrpc.newBlockingStub(channel)
+                .withDeadlineAfter(10, TimeUnit.SECONDS);
+        ListUptimeCheckConfigsRequest list = ListUptimeCheckConfigsRequest.newBuilder()
+                .setParent("projects/" + project).build();
+
+        StatusRuntimeException error = assertThrows(StatusRuntimeException.class, () -> uptime.listUptimeCheckConfigs(list));
+        assertEquals(Status.Code.PERMISSION_DENIED, error.getStatus().getCode());
+        assertEquals("monitoring.googleapis.com", errorInfo(error).getMetadataOrThrow("service"));
+
+        enable(project, "monitoring.googleapis.com");
+        assertEquals(0, uptime.listUptimeCheckConfigs(list).getUptimeCheckConfigsCount());
     }
 
     @Test

@@ -484,3 +484,29 @@ resource "google_logging_metric" "latency" {
     }
   }
 }
+
+resource "google_monitoring_uptime_check_config" "health" {
+  display_name = "floci-compat-health"
+  timeout      = "10s"
+  period       = "300s"
+
+  http_check {
+    path         = "/_floci-gcp/health"
+    port         = 4588
+    use_ssl      = false
+    validate_ssl = false
+  }
+
+  monitored_resource {
+    type = "uptime_url"
+    labels = {
+      project_id = var.project
+      host       = "floci-gcp"
+    }
+  }
+
+  content_matchers {
+    content = "status"
+    matcher = "CONTAINS_STRING"
+  }
+}

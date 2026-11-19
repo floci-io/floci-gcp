@@ -564,6 +564,14 @@ public interface EmulatorConfig {
         /** Interval between alert policy evaluations. */
         @WithDefault("30")
         long evaluationIntervalSeconds();
+
+        /** When false, uptime checks are stored but never run, so no uptime_check series is written. */
+        @WithDefault("true")
+        boolean uptimeChecksEnabled();
+
+        /** How often the prober looks for uptime checks whose period has elapsed. */
+        @WithDefault("10")
+        long uptimeTickIntervalSeconds();
     }
 
     interface EventarcServiceConfig {

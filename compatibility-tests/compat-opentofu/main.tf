@@ -449,3 +449,38 @@ resource "google_monitoring_alert_policy" "cpu" {
     team = "compat"
   }
 }
+
+resource "google_logging_metric" "errors" {
+  name   = "floci_compat/errors_tofu"
+  filter = "resource.type=\"global\" AND severity>=ERROR"
+
+  metric_descriptor {
+    metric_kind = "DELTA"
+    value_type  = "INT64"
+    labels {
+      key = "method"
+    }
+  }
+  label_extractors = {
+    method = "EXTRACT(jsonPayload.method)"
+  }
+}
+
+resource "google_logging_metric" "latency" {
+  name            = "floci_compat_latency_tofu"
+  filter          = "resource.type=\"global\""
+  value_extractor = "EXTRACT(jsonPayload.latency)"
+
+  metric_descriptor {
+    metric_kind = "DELTA"
+    value_type  = "DISTRIBUTION"
+    unit        = "ms"
+  }
+  bucket_options {
+    linear_buckets {
+      num_finite_buckets = 3
+      width              = 10
+      offset             = 0
+    }
+  }
+}

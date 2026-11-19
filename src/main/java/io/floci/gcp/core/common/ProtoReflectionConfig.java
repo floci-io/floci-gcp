@@ -3,7 +3,7 @@ package io.floci.gcp.core.common;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 /**
- * Registers Cloud Run, Cloud Functions, and Logging sink protobuf message classes (and the shared
+ * Registers Cloud Run, Cloud Functions, and Logging sink and log-based metric protobuf message classes (and the shared
  * common-protos / LRO / IAM types in their JSON request/response graphs) for
  * native-image reflection. Cloud Run and Cloud Functions use REST/httpjson with proto-only stubs;
  * Logging uses protobuf JSON for sink REST/storage and GCS log-entry export. Without this,
@@ -1649,6 +1649,8 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
         "com.google.logging.type.LogSeverityProto",
         "com.google.logging.v2.BigQueryOptions",
         "com.google.logging.v2.BigQueryOptions$Builder",
+        "com.google.logging.v2.ListLogMetricsResponse",
+        "com.google.logging.v2.ListLogMetricsResponse$Builder",
         "com.google.logging.v2.ListSinksResponse",
         "com.google.logging.v2.ListSinksResponse$Builder",
         "com.google.logging.v2.LogEntry",
@@ -1659,6 +1661,9 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
         "com.google.logging.v2.LogEntrySourceLocation$Builder",
         "com.google.logging.v2.LogSplit",
         "com.google.logging.v2.LogSplit$Builder",
+        "com.google.logging.v2.LogMetric",
+        "com.google.logging.v2.LogMetric$ApiVersion",
+        "com.google.logging.v2.LogMetric$Builder",
         "com.google.logging.v2.LogExclusion",
         "com.google.logging.v2.LogExclusion$Builder",
         "com.google.logging.v2.LogSink",

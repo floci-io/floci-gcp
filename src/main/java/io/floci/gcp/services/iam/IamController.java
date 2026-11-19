@@ -41,7 +41,7 @@ public class IamController {
     private static final Logger LOG = Logger.getLogger(IamController.class);
 
     private static final List<String> CUSTOM_METHODS =
-            List.of("getIamPolicy", "setIamPolicy", "testIamPermissions", "signBlob");
+            List.of("getIamPolicy", "setIamPolicy", "testIamPermissions", "signBlob", "disable", "enable");
 
     @Inject
     IamService service;
@@ -209,6 +209,13 @@ public class IamController {
 
     @SuppressWarnings("unchecked")
     private Response handleCustomMethod(IamPath p, Map<String, Object> body) {
+        if ("disable".equals(p.customMethod()) || "enable".equals(p.customMethod())) {
+            if (p.identifier().contains("/")) {
+                return Response.status(Response.Status.NOT_FOUND).build();
+            }
+            service.setServiceAccountDisabled(p.project(), p.identifier(), "disable".equals(p.customMethod()));
+            return Response.ok(Map.of()).build();
+        }
         String resource = "testIamPermissions".equals(p.customMethod())
                 ? "projects/" + p.project() + "/serviceAccounts/" + p.identifier()
                 : service.serviceAccountResource(p.project(), p.identifier());

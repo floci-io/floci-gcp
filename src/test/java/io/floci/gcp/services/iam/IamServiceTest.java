@@ -178,6 +178,46 @@ class IamServiceTest {
     }
 
     @Test
+    void disablingByUniqueIdDoesNotReachAReplacementAccount() throws Exception {
+        // The request is held after it has resolved the unique ID to an email and before it takes the
+        // account's lock, while the account is deleted and created again with the same email.
+        AtomicBoolean armed = new AtomicBoolean(false);
+        CountDownLatch resolved = new CountDownLatch(1);
+        CountDownLatch released = new CountDownLatch(1);
+        IamService iam = new IamService(new InMemoryStorage<>() {
+            @Override
+            public List<StoredServiceAccount> scan(Predicate<String> keyFilter) {
+                List<StoredServiceAccount> found = super.scan(keyFilter);
+                if (armed.compareAndSet(true, false)) {
+                    resolved.countDown();
+                    await(released);
+                }
+                return found;
+            }
+        }, new InMemoryStorage<>(), new InMemoryStorage<>());
+        String email = iam.createServiceAccount("p1", "target", "", "").getEmail();
+        String uniqueId = iam.getServiceAccount("p1", email).getUniqueId();
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            armed.set(true);
+            Future<?> disabling = executor.submit(() -> iam.setServiceAccountDisabled("p1", uniqueId, true));
+            await(resolved);
+            iam.deleteServiceAccount("p1", email);
+            String replacement = iam.createServiceAccount("p1", "target", "", "").getUniqueId();
+            released.countDown();
+
+            ExecutionException failure = assertThrows(ExecutionException.class,
+                    () -> disabling.get(5, TimeUnit.SECONDS));
+            assertEquals(io.grpc.Status.Code.NOT_FOUND, ((GcpException) failure.getCause()).getGrpcCode());
+            assertNotEquals(uniqueId, replacement);
+            assertFalse(iam.getServiceAccount("p1", email).isDisabled());
+        } finally {
+            released.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
     void theSigningInputGetsTheIdOfTheKeyThatSignsIt() throws Exception {
         InMemoryStorage<String, StoredSigningKey> signingKeys = new InMemoryStorage<>();
         IamService iam = SigningKeyFixtures.iamService(signingKeys);

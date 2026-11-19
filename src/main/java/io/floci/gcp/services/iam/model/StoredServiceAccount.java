@@ -17,6 +17,9 @@ public class StoredServiceAccount {
     private String description;
     private String createTime;
     private String etag;
+    // Proto3 JSON omits a false bool, so real IAM returns "disabled" only for a disabled account.
+    @JsonInclude(JsonInclude.Include.NON_DEFAULT)
+    private boolean disabled;
 
     public StoredServiceAccount() {}
 
@@ -55,4 +58,7 @@ public class StoredServiceAccount {
 
     public String getEtag() { return etag; }
     public void setEtag(String etag) { this.etag = etag; }
+
+    public boolean isDisabled() { return disabled; }
+    public void setDisabled(boolean disabled) { this.disabled = disabled; }
 }

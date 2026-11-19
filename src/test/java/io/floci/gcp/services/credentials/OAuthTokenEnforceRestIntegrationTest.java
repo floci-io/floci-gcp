@@ -8,6 +8,7 @@ import io.floci.gcp.services.iam.model.StoredServiceAccountKey;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
+import io.quarkus.test.junit.mockito.InjectSpy;
 import io.restassured.RestAssured;
 import io.restassured.response.Response;
 import jakarta.inject.Inject;
@@ -27,10 +28,18 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.startsWith;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 
 /**
  * The JWT bearer grant of https://developers.google.com/identity/protocols/oauth2/service-account,
@@ -46,6 +55,9 @@ class OAuthTokenEnforceRestIntegrationTest {
 
     @Inject
     IamService iam;
+
+    @InjectSpy
+    CredentialTokenService tokens;
 
     private String project;
     private String email;
@@ -92,6 +104,74 @@ class OAuthTokenEnforceRestIntegrationTest {
 
         invalidGrant(exchange("/token", assertion(key, claims(key.email(), AUDIENCE, 0, 3600), "RS256", key.keyId())),
                 OAuthTokenService.ACCOUNT_NOT_FOUND);
+    }
+
+    @Test
+    void jwtOfADisabledAccountIsADisabledClientUntilTheAccountIsEnabled() throws Exception {
+        KeyFile key = createKey(email);
+        String assertion = assertion(key, claims(key.email(), AUDIENCE, 0, 3600), "RS256", key.keyId());
+
+        iam.setServiceAccountDisabled(project, email, true);
+
+        exchange("/token", assertion).then().statusCode(401)
+                .body("error", equalTo("disabled_client"))
+                .body("error_description", equalTo("The OAuth client was disabled."));
+
+        iam.setServiceAccountDisabled(project, email, false);
+
+        exchange("/token", assertion).then().statusCode(200);
+    }
+
+    @Test
+    void jwtExchangedWhileItsAccountIsDeletedGetsNoToken() throws Exception {
+        KeyFile key = createKey(email);
+        String assertion = assertion(key, claims(key.email(), AUDIENCE, 0, 3600), "RS256", key.keyId());
+        // The exchange is held after it has read the account's keys and before it stores its token, while the
+        // account is deleted; without the check run under the issuance lock, the token escapes revocation.
+        AtomicBoolean armed = new AtomicBoolean(true);
+        CountDownLatch paused = new CountDownLatch(1);
+        CountDownLatch released = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            if (armed.compareAndSet(true, false)) {
+                paused.countDown();
+                assertTrue(released.await(10, TimeUnit.SECONDS), "the exchange was never released");
+            }
+            return invocation.callRealMethod();
+        }).when(tokens).mintImpersonatedToken(eq(email), any(), any());
+
+        CompletableFuture<Response> exchanged = CompletableFuture.supplyAsync(() -> exchange("/token", assertion));
+        assertTrue(paused.await(10, TimeUnit.SECONDS), "the exchange never reached the token store");
+        iam.deleteServiceAccount(project, email);
+        released.countDown();
+
+        invalidGrant(exchanged.get(10, TimeUnit.SECONDS), OAuthTokenService.ACCOUNT_NOT_FOUND);
+    }
+
+    @Test
+    void jwtExchangedWhileItsAccountIsReplacedGetsNoToken() throws Exception {
+        KeyFile key = createKey(email);
+        String assertion = assertion(key, claims(key.email(), AUDIENCE, 0, 3600), "RS256", key.keyId());
+        // The exchange is held after the deleted account's key has verified the assertion and before the
+        // issuance lock, while an account with the same email replaces it; the replacement is not the
+        // account that signed.
+        AtomicBoolean armed = new AtomicBoolean(true);
+        CountDownLatch paused = new CountDownLatch(1);
+        CountDownLatch released = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            if (armed.compareAndSet(true, false)) {
+                paused.countDown();
+                assertTrue(released.await(10, TimeUnit.SECONDS), "the exchange was never released");
+            }
+            return invocation.callRealMethod();
+        }).when(tokens).mintImpersonatedToken(eq(email), any(), any());
+
+        CompletableFuture<Response> exchanged = CompletableFuture.supplyAsync(() -> exchange("/token", assertion));
+        assertTrue(paused.await(10, TimeUnit.SECONDS), "the exchange never reached the token store");
+        iam.deleteServiceAccount(project, email);
+        iam.createServiceAccount(project, "app", null, null);
+        released.countDown();
+
+        invalidGrant(exchanged.get(10, TimeUnit.SECONDS), OAuthTokenService.ACCOUNT_NOT_FOUND);
     }
 
     @Test

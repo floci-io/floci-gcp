@@ -100,4 +100,60 @@ class IamServiceAccountRestIntegrationTest {
                 .body("displayName", equalTo("Named"))
                 .body("description", equalTo("Changed"));
     }
+
+    // https://docs.cloud.google.com/iam/docs/reference/rest/v1/projects.serviceAccounts/disable and /enable:
+    // empty response bodies, and the ServiceAccount "disabled" field ("Output only. Whether the service
+    // account is disabled."), which proto3 JSON omits while false.
+    @Test
+    void disableAndEnableToggleTheDisabledField() {
+        String sa = create("toggled", Map.of());
+
+        given().contentType("application/json").body(Map.of())
+                .when().post(sa + ":disable")
+                .then().statusCode(200)
+                .body("$", equalTo(Map.of()));
+        given().when().get(sa)
+                .then().statusCode(200)
+                .body("disabled", equalTo(true));
+
+        given().contentType("application/json").body(Map.of())
+                .when().post(sa + ":enable")
+                .then().statusCode(200)
+                .body("$", equalTo(Map.of()));
+        given().when().get(sa)
+                .then().statusCode(200)
+                .body("$", not(hasKey("disabled")));
+    }
+
+    // "If you attempt to disable an already disabled service account, it will have no effect", and the
+    // same for enable (https://docs.cloud.google.com/iam/docs/service-accounts-disable-enable).
+    @Test
+    void disablingOrEnablingTwiceHasNoEffect() {
+        String sa = create("twice", Map.of());
+
+        for (String method : new String[] {"disable", "disable", "enable", "enable"}) {
+            given().contentType("application/json").body(Map.of())
+                    .when().post(sa + ":" + method)
+                    .then().statusCode(200);
+        }
+        given().when().get(sa)
+                .then().statusCode(200)
+                .body("$", not(hasKey("disabled")));
+    }
+
+    @Test
+    void disableAcceptsTheWildcardProjectAndReportsAMissingAccount() {
+        create("wildcard", Map.of());
+
+        given().contentType("application/json").body(Map.of())
+                .when().post("/v1/projects/-/serviceAccounts/wildcard@" + PROJECT + ".iam.gserviceaccount.com:disable")
+                .then().statusCode(200);
+        given().when().get(ACCOUNTS + "/wildcard@" + PROJECT + ".iam.gserviceaccount.com")
+                .then().statusCode(200)
+                .body("disabled", equalTo(true));
+        given().contentType("application/json").body(Map.of())
+                .when().post(ACCOUNTS + "/missing@" + PROJECT + ".iam.gserviceaccount.com:disable")
+                .then().statusCode(404)
+                .body("error.status", equalTo("NOT_FOUND"));
+    }
 }

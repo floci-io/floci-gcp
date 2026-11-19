@@ -1,11 +1,18 @@
 package io.floci.gcp.services.cloudlogging;
 
+import com.google.api.MonitoredResource;
+import com.google.logging.type.LogSeverity;
 import com.google.logging.v2.CreateLogMetricRequest;
 import com.google.logging.v2.DeleteLogMetricRequest;
 import com.google.logging.v2.GetLogMetricRequest;
 import com.google.logging.v2.ListLogMetricsRequest;
+import com.google.logging.v2.LogEntry;
 import com.google.logging.v2.LogMetric;
+import com.google.logging.v2.LoggingServiceV2Grpc;
 import com.google.logging.v2.MetricsServiceV2Grpc;
+import com.google.logging.v2.WriteLogEntriesRequest;
+import com.google.protobuf.Struct;
+import com.google.protobuf.Value;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import io.grpc.Status;
@@ -110,6 +117,52 @@ class CloudLoggingMetricsIntegrationTest {
             given().get("/v3/" + PARENT + "/metricDescriptors/logging.googleapis.com/user/" + id).then()
                     .statusCode(200).body("metricKind", equalTo("DELTA")).body("valueType", equalTo("INT64"));
         } finally {
+            given().delete("/v2/" + PARENT + "/metrics/" + id).then().statusCode(200);
+        }
+    }
+
+    @Test
+    void wholeNumbersWrittenOverGrpcAndRestGiveTheSameInt64Label() throws Exception {
+        String id = "statuses_" + UUID.randomUUID().toString().replace("-", "");
+        String log = PARENT + "/logs/" + id;
+        given().contentType("application/json").body(Map.of(
+                        "name", id, "filter", "logName=\"" + log + "\"",
+                        "metricDescriptor", Map.of("labels", List.of(
+                                Map.of("key", "code", "valueType", "INT64"), Map.of("key", "transport"))),
+                        "labelExtractors", Map.of("code", "EXTRACT(jsonPayload.status)",
+                                "transport", "EXTRACT(jsonPayload.transport)")))
+                .post("/v2/" + PARENT + "/metrics").then().statusCode(200);
+        Instant start = Instant.now().minusSeconds(120);
+        ManagedChannel channel = ManagedChannelBuilder.forAddress(endpoint.getHost(), endpoint.getPort()).usePlaintext().build();
+        try {
+            LoggingServiceV2Grpc.newBlockingStub(channel).withDeadlineAfter(10, TimeUnit.SECONDS)
+                    .writeLogEntries(WriteLogEntriesRequest.newBuilder().setLogName(log)
+                            .setResource(MonitoredResource.newBuilder().setType("global"))
+                            .addEntries(LogEntry.newBuilder().setSeverity(LogSeverity.ERROR)
+                                    .setJsonPayload(Struct.newBuilder()
+                                            .putFields("status", Value.newBuilder().setNumberValue(503).build())
+                                            .putFields("transport", Value.newBuilder().setStringValue("grpc").build())))
+                            .build());
+            given().urlEncodingEnabled(false).contentType("application/json")
+                    .body(Map.of("logName", log, "resource", Map.of("type", "global"), "entries", List.of(
+                            Map.of("severity", "ERROR", "jsonPayload", Map.of("status", 503, "transport", "rest")))))
+                    .post("/v2/entries:write").then().statusCode(200);
+
+            JsonPath series = given()
+                    .queryParam("filter", "metric.type=\"logging.googleapis.com/user/" + id + "\"")
+                    .queryParam("interval.startTime", start.toString())
+                    .queryParam("interval.endTime", Instant.now().plusSeconds(60).toString())
+                    .get("/v3/" + PARENT + "/timeSeries").then().statusCode(200).extract().jsonPath();
+            List<Map<String, Object>> all = series.getList("timeSeries");
+            assertEquals(2, all.size(), series.prettify());
+            assertEquals(List.of("grpc", "rest"), all.stream()
+                    .map(one -> ((Map<?, ?>) one.get("metric")).get("labels"))
+                    .map(labels -> String.valueOf(((Map<?, ?>) labels).get("transport"))).sorted().toList());
+            for (int i = 0; i < all.size(); i++) {
+                assertEquals("503", series.getString("timeSeries[" + i + "].metric.labels.code"), series.prettify());
+            }
+        } finally {
+            channel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
             given().delete("/v2/" + PARENT + "/metrics/" + id).then().statusCode(200);
         }
     }

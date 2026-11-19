@@ -6,7 +6,10 @@ import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.services.cloudlogging.model.StoredLogEntry;
 import org.jboss.logging.Logger;
 
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.function.Function;
@@ -28,7 +31,7 @@ final class LogMetricExtractor {
     private static final Logger LOG = Logger.getLogger(LogMetricExtractor.class);
     private static final long MATCH_STEP_BUDGET = 1_000_000;
     private static final long MATCH_STEPS_PER_CHAR = 100;
-    private static final double MAX_EXACT_WHOLE = 9_007_199_254_740_992d;
+    private static final double LONG_RANGE = 0x1p63;
 
     private final Function<StoredLogEntry, Object> field;
     private final Pattern regex;
@@ -82,6 +85,10 @@ final class LogMetricExtractor {
         } catch (StepBudgetExceeded e) {
             LOG.debugf("Regular expression %s exceeded its matching budget; nothing extracted", regex.pattern());
             return Optional.empty();
+        } catch (StackOverflowError e) {
+            LOG.debugf("Regular expression %s recursed too deeply over %d characters; nothing extracted",
+                    regex.pattern(), text.length());
+            return Optional.empty();
         }
         return Optional.of(text.substring(matcher.start(1), matcher.end(1)));
     }
@@ -95,20 +102,40 @@ final class LogMetricExtractor {
     }
 
     private static String stringify(Object value) {
-        if (value instanceof Map<?, ?> || value instanceof Collection<?>) {
+        Object normalized = wholeNumbersAsIntegers(value);
+        if (normalized instanceof Map<?, ?> || normalized instanceof Collection<?>) {
             try {
-                return JSON.writeValueAsString(value);
+                return JSON.writeValueAsString(normalized);
             } catch (JsonProcessingException e) {
-                return String.valueOf(value);
+                return String.valueOf(normalized);
             }
         }
+        return String.valueOf(normalized);
+    }
+
+    /**
+     * A gRPC {@code jsonPayload} carries every number as a double; REST keeps integers as written.
+     * Whole doubles in the long range become longs so both transports extract the same text.
+     */
+    private static Object wholeNumbersAsIntegers(Object value) {
         if (value instanceof Double || value instanceof Float) {
             double number = ((Number) value).doubleValue();
-            if (number == Math.rint(number) && Math.abs(number) <= MAX_EXACT_WHOLE) {
-                return String.valueOf((long) number);
+            if (number == Math.rint(number) && number >= -LONG_RANGE && number < LONG_RANGE) {
+                return (long) number;
             }
+            return value;
         }
-        return String.valueOf(value);
+        if (value instanceof Map<?, ?> map) {
+            Map<Object, Object> result = new LinkedHashMap<>();
+            map.forEach((key, item) -> result.put(key, wholeNumbersAsIntegers(item)));
+            return result;
+        }
+        if (value instanceof Collection<?> collection) {
+            List<Object> result = new ArrayList<>(collection.size());
+            collection.forEach(item -> result.add(wholeNumbersAsIntegers(item)));
+            return result;
+        }
+        return value;
     }
 
     private static String unescape(String quoted) {

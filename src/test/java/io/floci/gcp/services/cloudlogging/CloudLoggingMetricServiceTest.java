@@ -5,6 +5,7 @@ import com.google.api.LabelDescriptor;
 import com.google.api.MetricDescriptor;
 import com.google.logging.v2.LogMetric;
 import com.google.monitoring.v3.TimeSeries;
+import com.google.protobuf.ListValue;
 import com.google.protobuf.Struct;
 import com.google.protobuf.Value;
 import io.floci.gcp.core.common.GcpException;
@@ -181,18 +182,46 @@ class CloudLoggingMetricServiceTest {
                 .setMetricDescriptor(MetricDescriptor.newBuilder()
                         .addLabels(LabelDescriptor.newBuilder().setKey("code").setValueType(LabelDescriptor.ValueType.INT64))
                         .addLabels(LabelDescriptor.newBuilder().setKey("text"))
-                        .addLabels(LabelDescriptor.newBuilder().setKey("ratio")))
+                        .addLabels(LabelDescriptor.newBuilder().setKey("ratio"))
+                        .addLabels(LabelDescriptor.newBuilder().setKey("nested"))
+                        .addLabels(LabelDescriptor.newBuilder().setKey("big").setValueType(LabelDescriptor.ValueType.INT64)))
                 .putLabelExtractors("code", "EXTRACT(jsonPayload.status)")
                 .putLabelExtractors("text", "EXTRACT(jsonPayload.status)")
-                .putLabelExtractors("ratio", "EXTRACT(jsonPayload.ratio)").build());
+                .putLabelExtractors("ratio", "EXTRACT(jsonPayload.ratio)")
+                .putLabelExtractors("nested", "EXTRACT(jsonPayload.http)")
+                .putLabelExtractors("big", "EXTRACT(jsonPayload.bytes)").build());
         Map<String, Object> grpcPayload = (Map<String, Object>) Structs.toJava(Struct.newBuilder()
                 .putFields("status", Value.newBuilder().setNumberValue(503).build())
-                .putFields("ratio", Value.newBuilder().setNumberValue(0.5).build()).build());
+                .putFields("ratio", Value.newBuilder().setNumberValue(0.5).build())
+                .putFields("bytes", Value.newBuilder().setNumberValue(1e16).build())
+                .putFields("http", Value.newBuilder().setStructValue(Struct.newBuilder()
+                        .putFields("code", Value.newBuilder().setNumberValue(503).build())
+                        .putFields("sizes", Value.newBuilder().setListValue(ListValue.newBuilder()
+                                .addValues(Value.newBuilder().setNumberValue(2))
+                                .addValues(Value.newBuilder().setNumberValue(2.5)))
+                                .build())).build()).build());
         assertEquals(503.0, grpcPayload.get("status"));
 
         service.record(List.of(entry("app", "ERROR", grpcPayload, null)));
 
-        series(written(), Map.of("log", "app", "code", "503", "text", "503", "ratio", "0.5"));
+        series(written(), Map.of("log", "app", "code", "503", "text", "503", "ratio", "0.5",
+                "nested", "{\"code\":503,\"sizes\":[2,2.5]}", "big", "10000000000000000"));
+    }
+
+    @Test
+    void aRegexThatRecursesTooDeeplyExtractsNothingInsteadOfFailingTheWrite() {
+        service.createLogMetric(PARENT, LogMetric.newBuilder().setName("letters").setFilter("severity>=DEFAULT")
+                .setMetricDescriptor(MetricDescriptor.newBuilder()
+                        .addLabels(LabelDescriptor.newBuilder().setKey("last")))
+                .putLabelExtractors("last", "REGEXP_EXTRACT(textPayload, \"(a|b)*\")").build());
+
+        assertDoesNotThrow(() -> service.record(List.of(
+                entry("app", "INFO", null, "ab".repeat(100_000)),
+                entry("app", "INFO", null, "ab"))));
+
+        List<TimeSeries> written = written();
+        assertEquals(1, series(written, Map.of("log", "app", "last", "")).getPoints(0).getValue().getInt64Value());
+        assertEquals(1, series(written, Map.of("log", "app", "last", "b")).getPoints(0).getValue().getInt64Value());
     }
 
     @Test

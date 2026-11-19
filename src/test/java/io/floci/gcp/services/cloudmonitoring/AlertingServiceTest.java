@@ -169,6 +169,21 @@ class AlertingServiceTest {
         assertEquals(Status.Code.INVALID_ARGUMENT, code(() -> channels.verify(pending.getName(), sent)));
     }
 
+    @Test
+    void aRejectedUpdateKeepsTheSentCode() {
+        NotificationChannel sms = channels.create(PARENT, sms("+15550000005"));
+        channels.sendVerificationCode(sms.getName());
+        String sent = channels.sentCode(sms.getName());
+
+        assertEquals(Status.Code.INVALID_ARGUMENT, code(() -> channels.update(
+                NotificationChannel.newBuilder().setName(sms.getName()).setType("pager").build(),
+                FieldMask.newBuilder().addPaths("type").build())));
+
+        assertEquals(sent, channels.sentCode(sms.getName()));
+        channels.verify(sms.getName(), sent);
+        assertEquals(NotificationChannel.VerificationStatus.VERIFIED, channels.get(sms.getName()).getVerificationStatus());
+    }
+
     // ── Alert policies ───────────────────────────────────────────────────
 
     @Test

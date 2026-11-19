@@ -199,8 +199,9 @@ public class NotificationChannelService {
                 FieldMaskUtil.merge(updateMask, requested, updated, new FieldMaskUtil.MergeOptions()
                         .setReplaceRepeatedFields(true).setReplaceMessageFields(true));
             }
-            if (!updated.getType().equals(current.getType()) || !identity(updated.build()).equals(identity(current))) {
-                codes.remove(key);
+            boolean identityChanged = !updated.getType().equals(current.getType())
+                    || !identity(updated.build()).equals(identity(current));
+            if (identityChanged) {
                 updated.setVerificationStatus(DESCRIPTORS.containsKey(updated.getType())
                         && DESCRIPTORS.get(updated.getType()).verified()
                         ? NotificationChannel.VerificationStatus.UNVERIFIED
@@ -208,6 +209,9 @@ public class NotificationChannelService {
             }
             NotificationChannel result = updated.addMutationRecords(record()).build();
             validate(result);
+            if (identityChanged) {
+                codes.remove(key);
+            }
             channels.put(key, ProtoJson.print(result));
             return result;
         }

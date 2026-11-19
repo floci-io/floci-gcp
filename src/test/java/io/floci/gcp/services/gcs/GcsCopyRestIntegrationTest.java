@@ -155,10 +155,70 @@ class GcsCopyRestIntegrationTest {
                 .extract().path("rewriteToken");
 
         // Overwrite the live object while the chunked rewrite of firstGen is in flight.
+        String liveGeneration = upload(srcBucket, "blob.bin", "newer-live-version");
+
+        // A mismatched generation is refused and leaves the token usable.
+        given()
+                .queryParam("rewriteToken", token)
+                .queryParam("sourceGeneration", liveGeneration)
+                .queryParam("maxBytesRewrittenPerCall", oneMiB)
+                .when().post("/storage/v1/b/{src}/o/blob.bin/rewriteTo/b/{dst}/o/out.bin", srcBucket, dstBucket)
+                .then().statusCode(400);
+
+        // Token only: the generation pinned by the token is still copied.
+        given()
+                .queryParam("rewriteToken", token)
+                .queryParam("maxBytesRewrittenPerCall", oneMiB)
+                .when().post("/storage/v1/b/{src}/o/blob.bin/rewriteTo/b/{dst}/o/out.bin", srcBucket, dstBucket)
+                .then().statusCode(200)
+                .body("done", equalTo(true));
+
+        byte[] copied = given()
+                .queryParam("alt", "media")
+                .when().get("/storage/v1/b/{bucket}/o/out.bin", dstBucket)
+                .then().statusCode(200)
+                .extract().asByteArray();
+        assertArrayEquals(firstBytes, copied);
+    }
+
+    @Test
+    void chunkedRewriteAcceptsMatchingSourceGenerationOnContinuation() {
+        String srcBucket = "rewrite-chunked-match-src";
+        String dstBucket = "rewrite-chunked-match-dst";
+        int oneMiB = 1024 * 1024;
+        byte[] firstBytes = new byte[2 * oneMiB];
+        firstBytes[0] = 'A';
+        firstBytes[firstBytes.length - 1] = 'Z';
+
+        createVersionedBucket(srcBucket);
+        given()
+                .contentType("application/json")
+                .body(Map.of("name", dstBucket, "storageClass", "NEARLINE"))
+                .when().post("/storage/v1/b?project=test-project")
+                .then().statusCode(200);
+
+        String firstGen = given()
+                .queryParam("uploadType", "media")
+                .queryParam("name", "blob.bin")
+                .contentType("application/octet-stream")
+                .body(firstBytes)
+                .when().post("/upload/storage/v1/b/{bucket}/o", srcBucket)
+                .then().statusCode(200)
+                .extract().path("generation");
+
+        String token = given()
+                .queryParam("sourceGeneration", firstGen)
+                .queryParam("maxBytesRewrittenPerCall", oneMiB)
+                .when().post("/storage/v1/b/{src}/o/blob.bin/rewriteTo/b/{dst}/o/out.bin", srcBucket, dstBucket)
+                .then().statusCode(200)
+                .body("done", equalTo(false))
+                .extract().path("rewriteToken");
+
         upload(srcBucket, "blob.bin", "newer-live-version");
 
         given()
                 .queryParam("rewriteToken", token)
+                .queryParam("sourceGeneration", firstGen)
                 .queryParam("maxBytesRewrittenPerCall", oneMiB)
                 .when().post("/storage/v1/b/{src}/o/blob.bin/rewriteTo/b/{dst}/o/out.bin", srcBucket, dstBucket)
                 .then().statusCode(200)

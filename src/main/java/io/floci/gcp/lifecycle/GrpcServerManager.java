@@ -12,9 +12,11 @@ import io.floci.gcp.core.common.ServiceUsageGate;
 import io.floci.gcp.core.common.ServiceUsageGrpcInterceptor;
 import io.floci.gcp.services.iam.authorization.IamGrpcAuthorizationInterceptor;
 import io.grpc.BindableService;
+import io.grpc.Context;
 import io.grpc.ServerInterceptor;
 import io.grpc.ServerInterceptors;
 import io.grpc.ServerServiceDefinition;
+import io.grpc.Status;
 import io.quarkus.runtime.Startup;
 import io.vertx.core.Vertx;
 import io.vertx.ext.web.Router;
@@ -81,9 +83,15 @@ public class GrpcServerManager {
             if (ct != null && ct.startsWith("application/grpc")) {
                 long start = System.currentTimeMillis();
                 String remoteAddr = ctx.request().remoteAddress() != null ? ctx.request().remoteAddress().host() : "-";
-                ctx.request().response().endHandler(v ->
-                        LOG.infof("%s gRPC %s %dms", remoteAddr, path, System.currentTimeMillis() - start));
-                grpcServer.handle(ctx.request());
+                // The Vert.x gRPC bridge forwards stream resets, but not a closed TCP connection.
+                Context.CancellableContext callContext = Context.current().withCancellation();
+                ctx.request().response().closeHandler(v ->
+                        callContext.cancel(Status.CANCELLED.withDescription("HTTP connection closed").asException()));
+                ctx.request().response().endHandler(v -> {
+                    callContext.cancel(null);
+                    LOG.infof("%s gRPC %s %dms", remoteAddr, path, System.currentTimeMillis() - start);
+                });
+                callContext.run(() -> grpcServer.handle(ctx.request()));
             } else {
                 ctx.next();
             }

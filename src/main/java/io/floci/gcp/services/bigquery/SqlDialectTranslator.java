@@ -15205,8 +15205,8 @@ final class SqlDialectTranslator {
         if (arguments.size() == 1) {
             return "coalesce(" + rendered + ", 'null')";
         }
-        return "coalesce(" + rendered + ", CASE WHEN " + at(arguments, 1)
-                + " IS NULL THEN NULL ELSE 'null' END)";
+        return "coalesce(" + rendered + ", CASE WHEN (" + at(arguments, 1)
+                + ") IS NULL THEN NULL ELSE 'null' END)";
     }
 
     private static String renderApproxQuantiles(List<String> arguments, String name) {

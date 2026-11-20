@@ -1125,15 +1125,19 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
             "SELECT list is empty after resolving \\* expressions");
 
     /** The sidecar shims, and the GoogleSQL function each one stands in for. */
-    private static final Map<String, String> SHIMMED_FUNCTION_NAMES = Map.of(
-            "floci_length", "LENGTH",
-            "floci_byte_length", "BYTE_LENGTH",
-            "floci_to_json_string", "TO_JSON_STRING",
-            "farm_fingerprint", "FARM_FINGERPRINT",
-            "ip_from_string", "NET.IP_FROM_STRING",
-            "safe_ip_from_string", "NET.SAFE_IP_FROM_STRING",
-            "ip_to_string", "NET.IP_TO_STRING",
-            "ip_trunc", "NET.IP_TRUNC");
+    private static final Map<String, String> SHIMMED_FUNCTION_NAMES = Map.ofEntries(
+            Map.entry("floci_length", "LENGTH"),
+            Map.entry("floci_byte_length", "BYTE_LENGTH"),
+            Map.entry("floci_to_json_string", "TO_JSON_STRING"),
+            Map.entry("farm_fingerprint", "FARM_FINGERPRINT"),
+            Map.entry("ip_from_string", "NET.IP_FROM_STRING"),
+            Map.entry("safe_ip_from_string", "NET.SAFE_IP_FROM_STRING"),
+            Map.entry("ip_to_string", "NET.IP_TO_STRING"),
+            Map.entry("ip_trunc", "NET.IP_TRUNC"),
+            Map.entry("floci_hll_init", "HLL_COUNT.INIT"),
+            Map.entry("floci_hll_extract", "HLL_COUNT.EXTRACT"),
+            Map.entry("floci_hll_merge", "HLL_COUNT.MERGE"),
+            Map.entry("floci_hll_merge_partial", "HLL_COUNT.MERGE_PARTIAL"));
 
     private static final Pattern SHIM_BINDER_MISS = Pattern.compile(
             "No function matches the given name and argument types '(?<call>[^']*)'");

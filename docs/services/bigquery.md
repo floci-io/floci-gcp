@@ -352,7 +352,9 @@ Queries are translated to DuckDB SQL and executed on the sidecar, so most of Goo
   exchange BigQuery's HLL++ ZetaSketch `BYTES`: `INIT` and `MERGE_PARTIAL` return a sketch, `EXTRACT`
   and `MERGE` return the estimate. Initialization supports `INT64`, `STRING` and `BYTES`, BigQuery's
   whole precision range of 10 to 24, and its null behavior, and produces the sketch bytes BigQuery
-  produces for the same input. `NUMERIC` and `BIGNUMERIC` initialization are not supported.
+  produces for the same input. `NUMERIC` and `BIGNUMERIC` initialization are not supported. The
+  three aggregating forms update the sketch as rows arrive, so the memory a query needs stays at the
+  size of the sketch instead of growing with the group.
 - `LENGTH` counts Unicode characters for `STRING` and bytes for `BYTES`. `BYTE_LENGTH` returns
   the UTF-8 byte length of `STRING` and the byte length of `BYTES`.
 - `FARM_FINGERPRINT` accepts `STRING` and `BYTES` and returns the BigQuery-compatible signed

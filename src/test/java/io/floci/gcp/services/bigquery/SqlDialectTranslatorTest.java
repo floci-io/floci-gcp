@@ -3547,11 +3547,15 @@ class SqlDialectTranslatorTest {
                         + " _floci_concat_arrays -> CASE WHEN coalesce(len(_floci_concat_arrays), 0) = 0"
                         + " THEN NULL ELSE flatten(_floci_concat_arrays) END), 1) AS tags FROM \"ds\".\"t\"",
                 sql("SELECT ARRAY_CONCAT_AGG(tags) AS tags FROM ds.t"));
-        assertEquals("SELECT floci_hll_init(list_filter(list(id), value -> value IS NOT NULL),"
-                        + " CAST(20 AS INTEGER)) AS sketch FROM \"ds\".\"t\"",
+        // HLL_COUNT.INIT and MERGE are aggregates on the sidecar too, so a group is sketched as its
+        // rows arrive rather than being collected into a list first.
+        assertEquals("SELECT floci_hll_init(id, CAST(20 AS INTEGER)) AS sketch FROM \"ds\".\"t\"",
                 sql("SELECT HLL_COUNT.INIT(id, 20) AS sketch FROM ds.t"));
-        assertEquals("SELECT floci_hll_merge(list_filter(list(CAST(sketch AS BLOB)),"
-                        + " sketch -> sketch IS NOT NULL)) AS cardinality FROM \"ds\".\"t\"",
+        assertEquals("SELECT floci_hll_init(id) AS sketch FROM \"ds\".\"t\"",
+                sql("SELECT HLL_COUNT.INIT(id) AS sketch FROM ds.t"));
+        assertEquals("SELECT floci_hll_init(DISTINCT id) AS sketch FROM \"ds\".\"t\"",
+                sql("SELECT HLL_COUNT.INIT(DISTINCT id) AS sketch FROM ds.t"));
+        assertEquals("SELECT floci_hll_merge(CAST(sketch AS BLOB)) AS cardinality FROM \"ds\".\"t\"",
                 sql("SELECT HLL_COUNT.MERGE(sketch) AS cardinality FROM ds.t"));
         assertEquals("SELECT floci_hll_extract(CAST(sketch AS BLOB)) AS cardinality FROM \"ds\".\"t\"",
                 sql("SELECT HLL_COUNT.EXTRACT(sketch) AS cardinality FROM ds.t"));

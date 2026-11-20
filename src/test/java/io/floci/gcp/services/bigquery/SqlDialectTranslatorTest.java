@@ -2143,13 +2143,13 @@ class SqlDialectTranslatorTest {
     @Test
     void structStarReplaceProjectsTheWholeStructWhenTheExpressionUsesIt() {
         assertEquals("SELECT * EXCLUDE (\"_floci_struct_0\")"
-                        + " REPLACE (coalesce(floci_to_json_string(\"_floci_struct_0\"), 'null') AS b)"
+                        + " REPLACE (floci_to_json_string(\"_floci_struct_0\") AS b)"
                         + " FROM (SELECT unnest(t.s), t.s AS \"_floci_struct_0\""
                         + " FROM (SELECT {'a': 1, 'b': 'x'} AS \"s\") t) AS \"_expanded\"",
                 sql("SELECT t.s.* REPLACE (TO_JSON_STRING(t.s) AS b)"
                         + " FROM (SELECT STRUCT(1 AS a, 'x' AS b) s) t"));
         assertEquals("SELECT * EXCLUDE (\"a\", \"_floci_struct_0\")"
-                        + " REPLACE (coalesce(floci_to_json_string(\"_floci_struct_0\"), 'null') AS b), COUNT(*) AS n"
+                        + " REPLACE (floci_to_json_string(\"_floci_struct_0\") AS b), COUNT(*) AS n"
                         + " FROM (SELECT unnest(t.s), t.s AS \"_floci_struct_0\""
                         + " FROM (SELECT {'a': 1, 'b': 'x'} AS \"s\") t) AS \"_expanded\" GROUP BY 1",
                 sql("SELECT t.s.* EXCEPT(a) REPLACE (TO_JSON_STRING(t.s) AS b), COUNT(*) AS n"
@@ -3386,8 +3386,7 @@ class SqlDialectTranslatorTest {
         assertFalse(aggregateConcat.contains("FROM (SELECT COUNT"), aggregateConcat);
         assertEquals("SELECT floci_length(value) AS n", sql("SELECT LENGTH(value) AS n"));
         assertEquals("SELECT floci_byte_length(value) AS n", sql("SELECT BYTE_LENGTH(value) AS n"));
-        assertEquals("SELECT coalesce(floci_to_json_string(value, TRUE),"
-                        + " CASE WHEN (TRUE) IS NULL THEN NULL ELSE 'null' END) AS json",
+        assertEquals("SELECT floci_to_json_string(value, TRUE) AS json",
                 sql("SELECT TO_JSON_STRING(value, TRUE) AS json"));
         assertEquals("SELECT (CASE WHEN x THEN 1 ELSE 2 END) AS c", sql("SELECT IF(x, 1, 2) AS c"));
         assertEquals("SELECT date_diff('day', b, a) AS d", sql("SELECT DATE_DIFF(a, b, DAY) AS d"));
@@ -3573,12 +3572,11 @@ class SqlDialectTranslatorTest {
 
     @Test
     void toJsonStringUsesTheTypeAwareSidecarSerializer() {
-        assertEquals("SELECT coalesce(floci_to_json_string(\"row\"), 'null') AS json",
+        assertEquals("SELECT floci_to_json_string(\"row\") AS json",
                 sql("SELECT TO_JSON_STRING(row) AS json"));
-        // The pretty_print argument is parenthesized: `NOT flag IS NULL` would read as
-        // `NOT (flag IS NULL)` and turn a NULL value into SQL NULL instead of the text null.
-        assertEquals("SELECT coalesce(floci_to_json_string(\"row\", NOT flag),"
-                        + " CASE WHEN (NOT flag) IS NULL THEN NULL ELSE 'null' END) AS json",
+        // The serializer itself decides between the JSON text null and SQL NULL, so pretty_print is
+        // rendered once: evaluating it again would run a volatile expression twice.
+        assertEquals("SELECT floci_to_json_string(\"row\", NOT flag) AS json",
                 sql("SELECT TO_JSON_STRING(row, NOT flag) AS json"));
     }
 

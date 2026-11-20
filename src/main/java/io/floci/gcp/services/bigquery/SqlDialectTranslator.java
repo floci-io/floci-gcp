@@ -5068,13 +5068,12 @@ final class SqlDialectTranslator {
                 continue;
             }
             Token token = tokens.get(i);
-            if (token.kind != Kind.IDENT || isPrecededByDot(i)
-                    || !STRUCT_STAR_AGGREGATES.contains(token.upper())) {
+            if (token.kind != Kind.IDENT || isPrecededByDot(i)) {
                 i++;
                 continue;
             }
-            int open = nextSignificant(i + 1, end);
-            if (open < 0 || !tokens.get(open).isPunct("(")) {
+            int open = aggregateCallOpen(i, end);
+            if (open < 0) {
                 i++;
                 continue;
             }
@@ -7133,7 +7132,7 @@ final class SqlDialectTranslator {
             }
             int close = matchingParen(i);
             int after = close < 0 ? -1 : nextSignificant(close + 1, tokens.size());
-            return STRUCT_STAR_AGGREGATES.contains(name)
+            return isAggregateCallName(call)
                     && (after < 0 || !tokens.get(after).isKeyword("OVER"));
         }
         return false;
@@ -7360,6 +7359,57 @@ final class SqlDialectTranslator {
             "APPROX_COUNT_DISTINCT", "APPROX_QUANTILES", "APPROX_TOP_COUNT", "APPROX_TOP_SUM", "STDDEV",
             "STDDEV_POP", "STDDEV_SAMP", "VAR_POP", "VAR_SAMP", "VARIANCE", "CORR", "COVAR_POP", "COVAR_SAMP");
 
+    /** The HLL counters that aggregate; {@code HLL_COUNT.EXTRACT} is a scalar and is not one of them. */
+    private static final Set<String> HLL_COUNT_AGGREGATES = Set.of("INIT", "MERGE", "MERGE_PARTIAL");
+
+    /**
+     * The opening parenthesis of the aggregate call that starts at token {@code start}, or -1. GoogleSQL
+     * spells the HLL counters with a qualifier, so their call starts at {@code HLL_COUNT} rather than at
+     * the function name, which a bare set membership test would miss.
+     */
+    private int aggregateCallOpen(int start, int end) {
+        if (start < 0 || start >= tokens.size() || tokens.get(start).kind != Kind.IDENT) {
+            return -1;
+        }
+        String name = tokens.get(start).upper();
+        int function = start;
+        if (name.equals("HLL_COUNT")) {
+            int dot = nextSignificant(start + 1, end);
+            if (dot < 0 || !tokens.get(dot).isPunct(".")) {
+                return -1;
+            }
+            function = nextSignificant(dot + 1, end);
+            if (function < 0 || function >= tokens.size()
+                    || !HLL_COUNT_AGGREGATES.contains(tokens.get(function).upper())) {
+                return -1;
+            }
+        } else if (!STRUCT_STAR_AGGREGATES.contains(name)) {
+            return -1;
+        }
+        int open = nextSignificant(function + 1, end);
+        return open >= 0 && open < end && tokens.get(open).isPunct("(") ? open : -1;
+    }
+
+    /** True when the call whose function name sits at {@code function} is an aggregate, HLL counters included. */
+    private boolean isAggregateCallName(int function) {
+        if (function < 0 || function >= tokens.size()) {
+            return false;
+        }
+        String name = tokens.get(function).upper();
+        if (STRUCT_STAR_AGGREGATES.contains(name)) {
+            return true;
+        }
+        if (!HLL_COUNT_AGGREGATES.contains(name)) {
+            return false;
+        }
+        int dot = significantBefore(function);
+        if (dot < 0 || !tokens.get(dot).isPunct(".")) {
+            return false;
+        }
+        int qualifier = significantBefore(dot);
+        return qualifier >= 0 && tokens.get(qualifier).upper().equals("HLL_COUNT");
+    }
+
     /**
      * Rejects a star over an aggregate that cannot produce a STRUCT. BigQuery errors before expansion, and
      * letting DuckDB do it would return rows for {@code MAX(t.s).*} instead.
@@ -7380,13 +7430,15 @@ final class SqlDialectTranslator {
             return;
         }
         Token token = tokens.get(first);
-        if (token.kind != Kind.IDENT || !STRUCT_STAR_AGGREGATES.contains(token.upper())
-                || token.isKeyword("ANY_VALUE")) {
+        if (token.kind != Kind.IDENT || token.isKeyword("ANY_VALUE")) {
             return;
         }
-        int open = nextSignificant(first + 1, operand[1]);
-        if (open < 0 || !tokens.get(open).isPunct("(")) {
+        int open = aggregateCallOpen(first, operand[1]);
+        if (open < 0) {
             return;
+        }
+        if (token.upper().equals("HLL_COUNT")) {
+            throw invalidQuery("Dot-star is not supported for type BYTES");
         }
         int close = matchingParen(open);
         int afterCall = close < 0 ? -1 : nextNonSpace(close + 1, operand[1]);
@@ -7459,13 +7511,12 @@ final class SqlDialectTranslator {
     private boolean structStarAggregates(int start, int end) {
         for (int i = start; i < end; i++) {
             Token token = tokens.get(i);
-            if (token.kind != Kind.IDENT || !STRUCT_STAR_AGGREGATES.contains(token.upper())
-                    || insideNestedQuery(i, start)) {
+            if (token.kind != Kind.IDENT || isPrecededByDot(i) || insideNestedQuery(i, start)) {
                 // An aggregate inside a nested query belongs to that query, not to this one.
                 continue;
             }
-            int next = nextSignificant(i + 1, end);
-            if (next >= 0 && tokens.get(next).isPunct("(")) {
+            int next = aggregateCallOpen(i, end);
+            if (next >= 0) {
                 // A call, not an alias: `sum.s.*` reads a source named `sum`, it does not aggregate. A call
                 // followed by OVER is a window function, which computes per row rather than per group.
                 int close = matchingParen(next);
@@ -12474,7 +12525,7 @@ final class SqlDialectTranslator {
                 return -1;
             }
             int next = nextSignificant(i + 1, close);
-            if (token.isKeyword("OVER") || token.kind == Kind.IDENT && STRUCT_STAR_AGGREGATES.contains(token.upper())
+            if (token.isKeyword("OVER") || token.kind == Kind.IDENT && aggregateCallOpen(i, close) >= 0
                     && next >= 0 && tokens.get(next).isPunct("(")) {
                 return -1;
             }
@@ -15199,14 +15250,14 @@ final class SqlDialectTranslator {
                 + ") END), 1)";
     }
 
+    /**
+     * The sidecar serializer renders a NULL value as the JSON text {@code null} and answers NULL only
+     * when {@code pretty_print} is NULL, so the call stands on its own: rendering {@code pretty_print}
+     * a second time to decide that would evaluate a volatile argument twice.
+     */
     private static String renderToJsonString(List<String> arguments, String name) {
         rangedArgs(arguments, 1, 2, name);
-        String rendered = "floci_to_json_string(" + String.join(", ", arguments) + ")";
-        if (arguments.size() == 1) {
-            return "coalesce(" + rendered + ", 'null')";
-        }
-        return "coalesce(" + rendered + ", CASE WHEN (" + at(arguments, 1)
-                + ") IS NULL THEN NULL ELSE 'null' END)";
+        return "floci_to_json_string(" + String.join(", ", arguments) + ")";
     }
 
     private static String renderApproxQuantiles(List<String> arguments, String name) {

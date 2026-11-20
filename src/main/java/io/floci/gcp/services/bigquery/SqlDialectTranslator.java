@@ -15234,15 +15234,18 @@ final class SqlDialectTranslator {
                 + " AS BIGINT)), x -> CAST(x AS DOUBLE) / CAST(" + quantileCount + " AS DOUBLE)))";
     }
 
-    /** DuckDB has no HLL++ functions, so the sidecar supplies BigQuery-compatible ZetaSketch UDFs. */
+    /** DuckDB has no HLL++ functions, so the sidecar supplies BigQuery-compatible ZetaSketch aggregates. */
     private String renderHllCount(String function, int open, int close) {
         List<String> arguments = arguments(open, close);
         return switch (function) {
+            // HLL_COUNT.INIT, MERGE and MERGE_PARTIAL are aggregates in BigQuery, and the sidecar
+            // implements them as aggregates too, so a group is sketched as its rows arrive.
             case "INIT" -> {
                 hllArgs(arguments, 1, 2, function);
-                yield "floci_hll_init(list_filter(list(" + at(arguments, 0)
-                        + "), value -> value IS NOT NULL), CAST("
-                        + (arguments.size() == 2 ? at(arguments, 1) : "15") + " AS INTEGER))";
+                String precision = arguments.size() == 2
+                        ? ", CAST(" + at(arguments, 1) + " AS INTEGER)"
+                        : "";
+                yield "floci_hll_init(" + at(arguments, 0) + precision + ")";
             }
             case "EXTRACT" -> {
                 hllArgs(arguments, 1, 1, function);
@@ -15250,13 +15253,11 @@ final class SqlDialectTranslator {
             }
             case "MERGE" -> {
                 hllArgs(arguments, 1, 1, function);
-                yield "floci_hll_merge(list_filter(list(CAST(" + at(arguments, 0)
-                        + " AS BLOB)), sketch -> sketch IS NOT NULL))";
+                yield "floci_hll_merge(CAST(" + at(arguments, 0) + " AS BLOB))";
             }
             case "MERGE_PARTIAL" -> {
                 hllArgs(arguments, 1, 1, function);
-                yield "floci_hll_merge_partial(list_filter(list(CAST(" + at(arguments, 0)
-                        + " AS BLOB)), sketch -> sketch IS NOT NULL))";
+                yield "floci_hll_merge_partial(CAST(" + at(arguments, 0) + " AS BLOB))";
             }
             default -> null;
         };

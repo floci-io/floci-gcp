@@ -58,6 +58,9 @@ class DuckSqlEngineServiceTest {
         assertEquals("No matching signature for function FARM_FINGERPRINT Argument types: ARRAY<INT64>",
                 DuckSqlEngine.queryErrorMessage("Binder Error: No function matches the given name and argument "
                         + "types 'farm_fingerprint(LIST(BIGINT))'."));
+        assertEquals("No matching signature for function HLL_COUNT.INIT Argument types: NUMERIC, INT64",
+                DuckSqlEngine.queryErrorMessage("Binder Error: No function matches the given name and argument "
+                        + "types 'floci_hll_init(DECIMAL(38,9), INTEGER)'."));
     }
 
     @Test

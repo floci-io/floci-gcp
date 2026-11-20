@@ -363,7 +363,8 @@ Queries are translated to DuckDB SQL and executed on the sidecar, so most of Goo
   forms, `NUMERIC` and `BIGNUMERIC` render as BigQuery renders them (a JSON string when the value has
   a fractional part, a JSON number when it is integral, without trailing zeros), UUID and `HUGEINT`
   values serialize as strings, and ordinary `STRING` values are not reinterpreted based on their
-  contents. The optional `pretty_print` argument is supported.
+  contents. A `NULL` value serializes as the JSON text `null`, and a `NULL` `pretty_print` makes the
+  call `NULL`; the optional `pretty_print` argument is supported.
 - `NET.IP_FROM_STRING` and `NET.SAFE_IP_FROM_STRING` parse IPv4 and IPv6 into `BYTES`.
   `NET.IP_TRUNC` applies a prefix length and `NET.IP_TO_STRING` formats the bytes canonically.
   A rejected address, prefix or `HLL_COUNT.INIT` precision quotes BigQuery's message

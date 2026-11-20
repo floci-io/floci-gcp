@@ -4227,6 +4227,18 @@ class BigQueryDuckIntegrationTest {
                 .body("rows[0].f[1].v", equalTo("1"))
                 .body("rows[0].f[2].v", equalTo("\"-0.5\""))
                 .body("rows[0].f[3].v", equalTo("{\"n\":7}"));
+
+        // A NULL value serializes as the JSON text null whatever the pretty_print expression is:
+        // `NOT FALSE` must not read as `NOT (FALSE IS NULL)`, which would answer SQL NULL.
+        query(Map.of("query", """
+                SELECT TO_JSON_STRING(CAST(NULL AS STRING), NOT FALSE) AS negated,
+                  TO_JSON_STRING(CAST(NULL AS STRING), 1 = 1) AS compared,
+                  TO_JSON_STRING(CAST(NULL AS STRING), NOT TRUE) AS disabled
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("null"))
+                .body("rows[0].f[1].v", equalTo("null"))
+                .body("rows[0].f[2].v", equalTo("null"));
     }
 
     @Test

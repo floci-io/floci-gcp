@@ -3387,7 +3387,7 @@ class SqlDialectTranslatorTest {
         assertEquals("SELECT floci_length(value) AS n", sql("SELECT LENGTH(value) AS n"));
         assertEquals("SELECT floci_byte_length(value) AS n", sql("SELECT BYTE_LENGTH(value) AS n"));
         assertEquals("SELECT coalesce(floci_to_json_string(value, TRUE),"
-                        + " CASE WHEN TRUE IS NULL THEN NULL ELSE 'null' END) AS json",
+                        + " CASE WHEN (TRUE) IS NULL THEN NULL ELSE 'null' END) AS json",
                 sql("SELECT TO_JSON_STRING(value, TRUE) AS json"));
         assertEquals("SELECT (CASE WHEN x THEN 1 ELSE 2 END) AS c", sql("SELECT IF(x, 1, 2) AS c"));
         assertEquals("SELECT date_diff('day', b, a) AS d", sql("SELECT DATE_DIFF(a, b, DAY) AS d"));
@@ -3571,6 +3571,11 @@ class SqlDialectTranslatorTest {
     void toJsonStringUsesTheTypeAwareSidecarSerializer() {
         assertEquals("SELECT coalesce(floci_to_json_string(\"row\"), 'null') AS json",
                 sql("SELECT TO_JSON_STRING(row) AS json"));
+        // The pretty_print argument is parenthesized: `NOT flag IS NULL` would read as
+        // `NOT (flag IS NULL)` and turn a NULL value into SQL NULL instead of the text null.
+        assertEquals("SELECT coalesce(floci_to_json_string(\"row\", NOT flag),"
+                        + " CASE WHEN (NOT flag) IS NULL THEN NULL ELSE 'null' END) AS json",
+                sql("SELECT TO_JSON_STRING(row, NOT flag) AS json"));
     }
 
     @Test

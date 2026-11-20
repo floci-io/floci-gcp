@@ -1796,19 +1796,22 @@ final class SqlDialectTranslator {
      * of a plain {@code CREATE TABLE}, already in BigQuery schema form. {@code options} are the
      * {@code SET OPTIONS} of an {@code ALTER TABLE}/{@code ALTER VIEW} or the overrides of
      * {@code CREATE TABLE COPY}, by option name; a null value clears the option.
+     * {@code queryFirstParameter} is the number of positional parameters the clause in front of
+     * {@code AS} already takes, so the query's own {@code ?} start after them.
      */
     record Statement(StatementKind kind, String statementType, TableRef target, String datasetTarget,
                      boolean orReplace, boolean ifNotExists, boolean ifExists, boolean cascade,
                      boolean materialized, String querySql, List<TableFieldSchema> columns,
                      Map<String, Object> options, TableRef copySource,
                      Map<String, Object> timePartitioning, Map<String, Object> rangePartitioning,
-                     PartitionExpression partitionExpression) {
+                     PartitionExpression partitionExpression, List<String> clusteringFields,
+                     int queryFirstParameter) {
 
         Statement(StatementKind kind, String statementType, TableRef target, String datasetTarget,
                   boolean orReplace, boolean ifNotExists, boolean ifExists, boolean cascade,
                   boolean materialized, String querySql, List<TableFieldSchema> columns) {
             this(kind, statementType, target, datasetTarget, orReplace, ifNotExists, ifExists, cascade,
-                    materialized, querySql, columns, null, null, null, null, null);
+                    materialized, querySql, columns, null, null, null, null, null, null, 0);
         }
 
         Statement(StatementKind kind, String statementType, TableRef target, String datasetTarget,
@@ -1816,7 +1819,7 @@ final class SqlDialectTranslator {
                   boolean materialized, String querySql, List<TableFieldSchema> columns,
                   Map<String, Object> options) {
             this(kind, statementType, target, datasetTarget, orReplace, ifNotExists, ifExists, cascade,
-                    materialized, querySql, columns, options, null, null, null, null);
+                    materialized, querySql, columns, options, null, null, null, null, null, 0);
         }
 
         Statement(StatementKind kind, String statementType, TableRef target, String datasetTarget,
@@ -1826,7 +1829,7 @@ final class SqlDialectTranslator {
                   PartitionExpression partitionExpression) {
             this(kind, statementType, target, datasetTarget, orReplace, ifNotExists, ifExists, cascade,
                     materialized, querySql, columns, null, null, timePartitioning, rangePartitioning,
-                    partitionExpression);
+                    partitionExpression, null, 0);
         }
 
         Statement(StatementKind kind, String statementType, TableRef target, String datasetTarget,
@@ -1837,7 +1840,7 @@ final class SqlDialectTranslator {
                   PartitionExpression partitionExpression) {
             this(kind, statementType, target, datasetTarget, orReplace, ifNotExists, ifExists, cascade,
                     materialized, querySql, columns, null, copySource, timePartitioning, rangePartitioning,
-                    partitionExpression);
+                    partitionExpression, null, 0);
         }
 
         boolean isDml() {
@@ -1847,8 +1850,8 @@ final class SqlDialectTranslator {
 
         Statement withQuerySql(String sql) {
             return new Statement(kind, statementType, target, datasetTarget, orReplace, ifNotExists, ifExists,
-                    cascade, materialized, sql, columns, copySource, timePartitioning, rangePartitioning,
-                    partitionExpression);
+                    cascade, materialized, sql, columns, options, copySource, timePartitioning, rangePartitioning,
+                    partitionExpression, clusteringFields, queryFirstParameter);
         }
 
     }
@@ -2388,11 +2391,11 @@ final class SqlDialectTranslator {
                         if (!tokens.get(afterSource).isKeyword("OPTIONS")) {
                             throw invalidQuery("Syntax error: Unexpected tokens after COPY source table.");
                         }
-                        options = tableOptions(afterSource);
+                        options = tableOptions(afterSource, OptionContext.COPY);
                     }
                     return new Statement(StatementKind.CREATE_TABLE, "CREATE_TABLE_COPY", target, null,
                             orReplace, ifNotExists, false, false, false, null, null, options,
-                            resolveTable(source.segments()), null, null, null);
+                            resolveTable(source.segments()), null, null, null, null, 0);
                 }
                 int asIndex = topLevelAsSelect(path.end());
                 if (asIndex >= 0) {
@@ -2401,23 +2404,34 @@ final class SqlDialectTranslator {
                             && !partitioning.timeMetadata().containsKey("field")) {
                         throw invalidQuery("CREATE TABLE AS SELECT does not support ingestion-time partitioning");
                     }
+                    List<String> clusteringFields = createTableClustering(path.end(), asIndex);
+                    int options = topLevelKeyword(path.end(), asIndex, "OPTIONS");
+                    Map<String, Object> tableOptions = options >= 0
+                            ? tableOptions(options, OptionContext.CREATE_TABLE, asIndex) : null;
                     return new Statement(StatementKind.CREATE_TABLE, "CREATE_TABLE_AS_SELECT", target, null,
                             orReplace, ifNotExists, false, false, false, text(asIndex + 1, tokens.size()), null,
-                            partitioning != null ? partitioning.timeMetadata() : null,
+                            tableOptions, null, partitioning != null ? partitioning.timeMetadata() : null,
                             partitioning != null ? partitioning.rangeMetadata() : null,
-                            partitioning != null ? partitioning.expression() : null);
+                            partitioning != null ? partitioning.expression() : null, clusteringFields,
+                            positionalParametersBefore(asIndex));
                 }
                 int open = nextSignificant(path.end(), tokens.size());
                 if (open < 0 || !tokens.get(open).isPunct("(")) {
                     throw invalidQuery("CREATE TABLE needs a column list, AS SELECT, or COPY source_table");
                 }
-                List<TableFieldSchema> columns = columnDefinitions(open, matchingParen(open));
-                PartitionSpec partitioning = createTablePartitioning(matchingParen(open) + 1, tokens.size());
+                int close = matchingParen(open);
+                List<TableFieldSchema> columns = columnDefinitions(open, close);
+                int suffixStart = close + 1;
+                PartitionSpec partitioning = createTablePartitioning(suffixStart, tokens.size());
+                List<String> clusteringFields = createTableClustering(suffixStart, tokens.size());
+                int options = topLevelKeyword(suffixStart, tokens.size(), "OPTIONS");
+                Map<String, Object> tableOptions = options >= 0
+                        ? tableOptions(options, OptionContext.CREATE_TABLE) : null;
                 return new Statement(StatementKind.CREATE_TABLE, "CREATE_TABLE", target, null, orReplace,
-                        ifNotExists, false, false, false, null, columns,
+                        ifNotExists, false, false, false, null, columns, tableOptions, null,
                         partitioning != null ? partitioning.timeMetadata() : null,
                         partitioning != null ? partitioning.rangeMetadata() : null,
-                        partitioning != null ? partitioning.expression() : null);
+                        partitioning != null ? partitioning.expression() : null, clusteringFields, 0);
             }
             case "VIEW" -> {
                 TableRef target = resolveTable(path.segments());
@@ -2486,10 +2500,23 @@ final class SqlDialectTranslator {
     private static final Set<String> ALTERABLE_OPTIONS = Set.of("description", "friendly_name", "labels",
             "expiration_timestamp");
 
+    /**
+     * BigQuery table options the emulator takes on CREATE TABLE and CREATE TABLE AS SELECT. The first
+     * three are stored in the Table resource, the rest are accepted and ignored; ALTER SET OPTIONS and
+     * CREATE TABLE COPY still reject them.
+     */
+    private static final Set<String> BIGQUERY_TABLE_OPTIONS = Set.of("partition_expiration_days",
+            "require_partition_filter", "kms_key_name", "default_rounding_mode", "enable_change_history",
+            "max_staleness", "enable_fine_grained_mutations", "storage_uri", "file_format", "table_format",
+            "tags");
+
     private static final Set<String> UNSUPPORTED_TABLE_OPTIONS = Set.of("partition_expiration_days",
             "require_partition_filter", "kms_key_name", "default_rounding_mode", "enable_change_history",
             "max_staleness", "enable_fine_grained_mutations", "storage_uri", "file_format", "table_format",
             "tags", "privacy_policy");
+
+    /** Which statement reads an option list: only CREATE TABLE and CREATE TABLE AS SELECT take the extras. */
+    private enum OptionContext { CREATE_TABLE, ALTER, COPY }
 
     /** {@code ALTER {TABLE|VIEW} [IF EXISTS] name SET OPTIONS (name = value, ...)}. */
     private Statement classifyAlter(List<Integer> sig) {
@@ -2514,20 +2541,25 @@ final class SqlDialectTranslator {
         }
         return new Statement(object.equals("TABLE") ? StatementKind.ALTER_TABLE : StatementKind.ALTER_VIEW,
                 "ALTER_" + object, target, null, false, false, ifExists, false, false, null, null,
-                tableOptions(options));
+                tableOptions(options, OptionContext.ALTER));
     }
 
-    private Map<String, Object> tableOptions(int options) {
-        int open = nextSignificant(options + 1, tokens.size());
+    private Map<String, Object> tableOptions(int options, OptionContext context) {
+        return tableOptions(options, context, tokens.size());
+    }
+
+    private Map<String, Object> tableOptions(int options, OptionContext context, int end) {
+        int open = nextSignificant(options + 1, end);
         if (open < 0 || !tokens.get(open).isPunct("(")) {
             throw invalidQuery("Syntax error: Expected \"(\" after OPTIONS");
         }
         int close = matchingParen(open);
-        int trailing = nextSignificant(close + 1, tokens.size());
+        int trailing = nextSignificant(close + 1, end);
         if (trailing >= 0) {
             throw invalidQuery("Syntax error: Unexpected \"" + tokens.get(trailing).text + "\"");
         }
         Map<String, Object> values = new LinkedHashMap<>();
+        List<String> optionNames = new ArrayList<>();
         int depth = 0;
         int start = open + 1;
         int positionalBefore = 0;
@@ -2536,7 +2568,8 @@ final class SqlDialectTranslator {
             if (k == close || (depth == 0 && t.isPunct(","))) {
                 List<Token> item = significant(start, k);
                 if (!item.isEmpty()) {
-                    readOption(item, values, positionalBefore);
+                    readOption(item, values, positionalBefore, context);
+                    optionNames.add(item.getFirst().text.toLowerCase(Locale.ROOT));
                     positionalBefore += (int) item.stream()
                             .filter(token -> token.kind == Kind.POSITIONAL_PARAM).count();
                 }
@@ -2547,22 +2580,36 @@ final class SqlDialectTranslator {
                 depth--;
             }
         }
+        Set<String> seen = new HashSet<>();
+        for (String name : optionNames) {
+            if (!seen.add(name)) {
+                throw invalidQuery("'" + name + "' is specified more than once in table OPTIONS");
+            }
+        }
         return values;
     }
 
-    private static void readOption(List<Token> item, Map<String, Object> values, int positionalBefore) {
+    private static void readOption(List<Token> item, Map<String, Object> values, int positionalBefore,
+                                   OptionContext context) {
         if (item.size() < 3 || item.get(0).kind != Kind.IDENT || !item.get(1).isPunct("=")) {
             throw invalidQuery("Syntax error: Expected an option assignment in OPTIONS");
         }
         String name = item.get(0).text.toLowerCase(Locale.ROOT);
+        List<Token> value = item.subList(2, item.size());
+        boolean nullValue = value.size() == 1 && value.getFirst().isKeyword("NULL");
         if (UNSUPPORTED_TABLE_OPTIONS.contains(name)) {
-            throw invalidQuery("Option " + name + " is not supported by the floci BigQuery emulator yet.");
+            if (context != OptionContext.CREATE_TABLE || !BIGQUERY_TABLE_OPTIONS.contains(name)) {
+                throw invalidQuery("Option " + name + " is not supported by the floci BigQuery emulator yet.");
+            }
+            if (!nullValue) {
+                readBigQueryTableOption(name, value, values);
+            }
+            return;
         }
         if (!ALTERABLE_OPTIONS.contains(name)) {
             throw invalidQuery("Unknown option: " + name);
         }
-        List<Token> value = item.subList(2, item.size());
-        if (value.size() == 1 && value.getFirst().isKeyword("NULL")) {
+        if (nullValue) {
             values.put(name, null);
             return;
         }
@@ -2570,9 +2617,57 @@ final class SqlDialectTranslator {
             case "description", "friendly_name" -> values.put(name, isLiteral(value) ? stringOption(name, value)
                     : optionExpression(name, value, positionalBefore));
             case "labels" -> values.put(name, labelsOption(value));
-            default -> values.put(name, isLiteral(value) || isTimestampLiteral(value) ? timestampOption(value)
-                    : optionExpression(name, value, positionalBefore));
+            case "expiration_timestamp" -> values.put(name,
+                    isLiteral(value) || isTimestampLiteral(value) || context == OptionContext.COPY
+                            ? timestampOption(value)
+                            : optionExpression(name, value, positionalBefore));
+            default -> throw new IllegalStateException("Unhandled ALTER TABLE option: " + name);
         }
+    }
+
+    /**
+     * The values the Table resource has a field for are kept; an expression the emulator does not
+     * evaluate leaves the option unset, which is what the emulator did with the whole list before.
+     */
+    private static void readBigQueryTableOption(String name, List<Token> value, Map<String, Object> values) {
+        switch (name) {
+            case "require_partition_filter" -> {
+                if (value.size() == 1 && value.getFirst().isKeyword("TRUE")) {
+                    values.put(name, Boolean.TRUE);
+                } else if (value.size() == 1 && value.getFirst().isKeyword("FALSE")) {
+                    values.put(name, Boolean.FALSE);
+                }
+            }
+            case "partition_expiration_days" -> {
+                BigDecimal days = null;
+                try {
+                    days = numericOption(value);
+                } catch (NumberFormatException expected) {
+                    // A numeric literal BigDecimal cannot read stays unset, like any other expression value.
+                }
+                if (days != null) {
+                    values.put(name, days);
+                }
+            }
+            case "kms_key_name" -> {
+                if (value.size() == 1 && value.getFirst().kind == Kind.STRING) {
+                    values.put(name, value.getFirst().value);
+                }
+            }
+            default -> { }
+        }
+    }
+
+    /** A numeric literal, optionally signed; null for anything else. */
+    private static BigDecimal numericOption(List<Token> value) {
+        if (value.size() == 1 && value.getFirst().kind == Kind.NUMBER) {
+            return new BigDecimal(value.getFirst().text);
+        }
+        if (value.size() == 2 && (value.getFirst().isPunct("-") || value.getFirst().isPunct("+"))
+                && value.get(1).kind == Kind.NUMBER) {
+            return new BigDecimal(value.getFirst().text + value.get(1).text);
+        }
+        return null;
     }
 
     private static boolean isLiteral(List<Token> value) {
@@ -2817,6 +2912,60 @@ final class SqlDialectTranslator {
                     PartitionExpression.BARE_DATE);
         }
         throw invalidQuery("Unsupported PARTITION BY expression in CREATE TABLE: " + expression);
+    }
+
+    private List<String> createTableClustering(int from, int to) {
+        int cluster = topLevelKeyword(from, to, "CLUSTER");
+        if (cluster < 0) {
+            return null;
+        }
+        int by = nextSignificant(cluster + 1, to);
+        if (by < 0 || !tokens.get(by).isKeyword("BY")) {
+            throw invalidQuery("Syntax error: Expected BY after CLUSTER");
+        }
+        int options = topLevelKeyword(by + 1, to, "OPTIONS");
+        int end = options >= 0 ? options : to;
+        List<String> fields = new ArrayList<>();
+        int start = by + 1;
+        int depth = 0;
+        for (int index = start; index <= end; index++) {
+            Token token = index < end ? tokens.get(index) : null;
+            if (index == end || depth == 0 && token.isPunct(",")) {
+                List<Token> field = significant(start, index);
+                if (field.isEmpty()) {
+                    throw invalidQuery("Syntax error: Expected a column name in CLUSTER BY");
+                }
+                if (field.size() != 1 || field.getFirst().kind != Kind.IDENT
+                        && field.getFirst().kind != Kind.QIDENT) {
+                    throw invalidQuery("Entries in the CLUSTER BY clause must be column names");
+                }
+                fields.add(field.getFirst().identifierText());
+                start = index + 1;
+            } else if (token.isPunct("(") || token.isPunct("[")) {
+                depth++;
+            } else if (token.isPunct(")") || token.isPunct("]")) {
+                depth--;
+            }
+        }
+        if (fields.size() > 4) {
+            throw invalidQuery(fields.size() + " clustering fields specified, exceeding the limit of 4.");
+        }
+        return List.copyOf(fields);
+    }
+
+    /**
+     * How many positional parameters the text before {@code end} already binds. The {@code ?} of an
+     * {@code OPTIONS} list come before the query of a {@code CREATE TABLE ... AS}, so they take the
+     * parameters the query would otherwise read.
+     */
+    private int positionalParametersBefore(int end) {
+        int count = 0;
+        for (int index = 0; index < end; index++) {
+            if (tokens.get(index).kind == Kind.POSITIONAL_PARAM) {
+                count++;
+            }
+        }
+        return count;
     }
 
     private static String unquoteIdentifier(String identifier) {

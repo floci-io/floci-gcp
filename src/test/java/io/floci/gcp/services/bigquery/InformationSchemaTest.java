@@ -11,6 +11,7 @@ import io.floci.gcp.services.bigquery.model.TableSchema;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 
@@ -151,6 +152,22 @@ class InformationSchemaTest {
         List<Map<String, Object>> rows = service.informationSchemaRows("p", "TABLE_OPTIONS", "shop", null);
         assertEquals("\"all \\\"orders\\\"\"", rows.get(0).get("option_value"));
         assertEquals("[STRUCT(\"team\", \"data\")]", rows.get(1).get("option_value"));
+    }
+
+    @Test
+    void tableOptionsExposeExpirationTimestampAsGoogleSqlLiteral() {
+        long expirationMillis = Instant.parse("2099-01-01T00:00:00Z").toEpochMilli();
+        Table expiring = table("expiring", List.of(field("id", "INTEGER", null)),
+                "expirationTime", expirationMillis);
+        service.createTable("p", "shop", expiring);
+
+        List<Map<String, Object>> options = service.informationSchemaRows("p", "TABLE_OPTIONS", "shop", null)
+                .stream().filter(row -> "expiring".equals(row.get("table_name"))).toList();
+
+        assertEquals(List.of(List.of("expiration_timestamp", "TIMESTAMP",
+                "TIMESTAMP \"2099-01-01T00:00:00.000Z\"")), options.stream()
+                .map(row -> List.of(row.get("option_name"), row.get("option_type"), row.get("option_value")))
+                .toList());
     }
 
     @Test

@@ -40,6 +40,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -782,6 +783,31 @@ class BigQueryServiceTest {
     }
 
     @Test
+    void executeImmediateEvaluatesConcatenatedTripleQuotedSqlText() {
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        BigQuerySqlEngine.Result sqlText = new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("_floci_script_value", "STRING", null))),
+                List.of(Map.of("_floci_script_value", "SELECT 9 AS result")), "SELECT", 0);
+        BigQuerySqlEngine.Result queryResult = new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("result", "INTEGER", null))),
+                List.of(Map.of("result", 9L)), "SELECT", 0);
+        when(engine.execute(any(), any())).thenReturn(sqlText, queryResult);
+        BigQueryService dynamicService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), engine);
+
+        dynamicService.query(PROJECT, "US", null, """
+                DECLARE sql_suffix STRING DEFAULT "9";
+                EXECUTE IMMEDIATE '''SELECT ''' || sql_suffix || ''' AS result''';
+                """, null);
+
+        ArgumentCaptor<BigQuerySqlEngine.Request> requests = ArgumentCaptor.forClass(BigQuerySqlEngine.Request.class);
+        verify(engine, times(2)).execute(requests.capture(), any());
+        assertTrue(requests.getAllValues().getFirst().sql().contains("|| '9' ||"),
+                requests.getAllValues().getFirst().sql());
+        assertEquals("SELECT 9 AS result", requests.getAllValues().getLast().sql());
+    }
+
+    @Test
     void executeImmediateCannotBeNested() {
         BigQueryService dynamicService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), mock(BigQuerySqlEngine.class));
@@ -828,6 +854,230 @@ class BigQueryServiceTest {
     }
 
     @Test
+    void alterExpirationTimestampEvaluatesTimestampExpressions() {
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        when(engine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("_floci_expiration_timestamp", "TIMESTAMP", null))),
+                List.of(Map.of("_floci_expiration_timestamp", "4071081600.123456")), "SELECT", 0));
+        BigQueryService alterService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), engine);
+        alterService.createDataset(PROJECT, newDataset(DATASET));
+        alterService.createTable(PROJECT, DATASET, newTable(DATASET, TABLE));
+
+        alterService.query(PROJECT, "US", null, """
+                DECLARE table_creation_time TIMESTAMP DEFAULT TIMESTAMP '2099-01-01 00:00:00+00';
+                ALTER TABLE ds1.t1 SET OPTIONS (
+                  expiration_timestamp = TIMESTAMP_ADD(
+                    table_creation_time, INTERVAL 172800000 MILLISECOND
+                  )
+                );
+                """, null);
+
+        assertEquals(String.valueOf(Instant.parse("2099-01-03T00:00:00.123456Z").toEpochMilli()),
+                alterService.getTable(PROJECT, DATASET, TABLE).getExtra().get("expirationTime"));
+    }
+
+    @Test
+    void createTableAsSelectStoresClusteringAndEvaluatedExpiration() {
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        TableSchema querySchema = new TableSchema(List.of(field("entity_id", "STRING", null)));
+        BigQuerySqlEngine.Result described = new BigQuerySqlEngine.Result(querySchema, List.of(), "SELECT", 0);
+        BigQuerySqlEngine.Result expirationDryRun = new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("_floci_expiration_timestamp", "TIMESTAMP", null))),
+                List.of(), "SELECT", 0);
+        BigQuerySqlEngine.Result expiration = new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("_floci_expiration_timestamp", "TIMESTAMP", null))),
+                List.of(Map.of("_floci_expiration_timestamp", "4070908800.123456")), "SELECT", 0);
+        BigQuerySqlEngine.Result queryResult = new BigQuerySqlEngine.Result(querySchema,
+                List.of(Map.of("entity_id", "item-1")), "SELECT", 0);
+        when(engine.execute(any(), any())).thenAnswer(invocation -> {
+            BigQuerySqlEngine.Request request = invocation.getArgument(0);
+            if (request.sql().contains("TIMESTAMP_ADD")) {
+                return request.dryRun() ? expirationDryRun : expiration;
+            }
+            if (request.sql().contains("ds1.source")) {
+                return request.dryRun() ? described : queryResult;
+            }
+            throw new AssertionError("Unexpected SQL request: " + request.sql());
+        });
+        BigQueryService createService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), engine);
+        createService.createDataset(PROJECT, newDataset(DATASET));
+
+        createService.query(PROJECT, "US", null, """
+                CREATE TABLE IF NOT EXISTS ds1.cached CLUSTER BY entity_id
+                OPTIONS(expiration_timestamp=TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 40 DAY))
+                AS SELECT entity_id FROM ds1.source
+                """, null);
+
+        Table created = createService.getTable(PROJECT, DATASET, "cached");
+        assertEquals(Map.of("fields", List.of("entity_id")), created.getExtra().get("clustering"));
+        assertEquals(String.valueOf(Instant.parse("2099-01-01T00:00:00.123456Z").toEpochMilli()),
+                created.getExtra().get("expirationTime"));
+    }
+
+    @Test
+    void clusteringTypeErrorsQuoteWhatBigQueryReports() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+        String[][] rejected = {
+                {"CREATE TABLE ds1.nested (s STRUCT<x INT64>) CLUSTER BY s",
+                        "CLUSTER BY columns may only have simple types, but column s has type STRUCT<x INT64>"},
+                {"CREATE TABLE ds1.repeated (arr ARRAY<INT64>) CLUSTER BY arr",
+                        "CLUSTER BY columns may only have simple types, but column arr has type ARRAY<INT64>"},
+                {"CREATE TABLE ds1.floating (f FLOAT64) CLUSTER BY f",
+                        "CLUSTER BY expression may not be a floating point type"},
+                {"CREATE TABLE ds1.json (j JSON) CLUSTER BY j",
+                        "CLUSTER BY expression must be groupable, but type is JSON"},
+                {"CREATE TABLE ds1.bytes (b BYTES) CLUSTER BY b",
+                        "Field b has type BYTES, which is not supported for clustering."},
+                {"CREATE TABLE ds1.unresolved (id STRING) CLUSTER BY missing_id",
+                        "Unrecognized name: missing_id"},
+                {"CREATE TABLE ds1.duplicate (a INT64) CLUSTER BY a, A",
+                        "Field can only appear once in clustering fields. Invalid field: a."}
+        };
+        for (String[] c : rejected) {
+            GcpException error = assertThrows(GcpException.class, () ->
+                    service.query(PROJECT, "US", null, c[0], null), c[0]);
+            assertEquals("invalidQuery", error.getReason(), c[0]);
+            assertEquals(c[1], error.getMessage(), c[0]);
+        }
+
+        service.query(PROJECT, "US", null, "CREATE TABLE ds1.geography (g GEOGRAPHY) CLUSTER BY g", null);
+
+        assertEquals(Map.of("fields", List.of("g")),
+                service.getTable(PROJECT, DATASET, "geography").getExtra().get("clustering"));
+    }
+
+    @Test
+    void createTableAsSelectRejectsADuplicateClusteringColumn() {
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        when(engine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("id", "INTEGER", null))),
+                List.of(Map.of("id", 1L)), "SELECT", 0));
+        BigQueryService duplicateService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), engine);
+        duplicateService.createDataset(PROJECT, newDataset(DATASET));
+
+        GcpException duplicate = assertThrows(GcpException.class, () -> duplicateService.query(PROJECT, "US", null,
+                "CREATE TABLE ds1.ctas_duplicate CLUSTER BY id, ID AS SELECT 1 AS id", null));
+
+        assertEquals("invalidQuery", duplicate.getReason());
+        assertEquals("Same column cannot be used multiple times as clustering column: 'id'",
+                duplicate.getMessage());
+    }
+
+    @Test
+    void createTableStoresTheBigQueryTableOptionsItModels() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+        service.query(PROJECT, "US", null, """
+                CREATE TABLE ds1.model (id INT64, d DATE) PARTITION BY d
+                OPTIONS(require_partition_filter=true, partition_expiration_days=7,
+                        kms_key_name='projects/p/locations/us/keyRings/r/cryptoKeys/k',
+                        enable_change_history=true, tags=[('123/env', 'prod')])
+                """, null);
+
+        Table created = service.getTable(PROJECT, DATASET, "model");
+        assertEquals(true, created.getExtra().get("requirePartitionFilter"));
+        assertEquals(Map.of("type", "DAY", "field", "d", "requirePartitionFilter", true,
+                        "expirationMs", "604800000"),
+                created.getExtra().get("timePartitioning"));
+        assertEquals(Map.of("kmsKeyName", "projects/p/locations/us/keyRings/r/cryptoKeys/k"),
+                created.getExtra().get("encryptionConfiguration"));
+        assertNull(created.getExtra().get("resourceTags"));
+
+        service.query(PROJECT, "US", null, "CREATE TABLE ds1.model_false (id INT64, d DATE) PARTITION BY d"
+                + " OPTIONS(require_partition_filter=false)", null);
+        Table notRequired = service.getTable(PROJECT, DATASET, "model_false");
+        assertEquals(false, notRequired.getExtra().get("requirePartitionFilter"));
+        assertEquals(Map.of("type", "DAY", "field", "d"), notRequired.getExtra().get("timePartitioning"));
+    }
+
+    @Test
+    void createTableValidatesThePartitionOnlyTableOptions() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+        String[][] rejected = {
+                {"CREATE TABLE ds1.unpartitioned_req (id INT64) OPTIONS(require_partition_filter=true)",
+                        "require_partition_filter value in table OPTIONS is only supported for a CREATE TABLE"
+                                + " statement with a PARTITION BY clause"},
+                {"CREATE TABLE ds1.unpartitioned_exp (id INT64) OPTIONS(partition_expiration_days=7)",
+                        "partition_expiration_days value in table OPTIONS is only supported for a CREATE TABLE"
+                                + " statement with a PARTITION BY clause"},
+                {"CREATE TABLE ds1.range_exp (id INT64) PARTITION BY RANGE_BUCKET(id, GENERATE_ARRAY(0, 10))"
+                        + " OPTIONS(partition_expiration_days=7)",
+                        "partition_expiration_days in table OPTIONS is only supported for time partitioned tables."}
+        };
+        for (String[] c : rejected) {
+            GcpException error = assertThrows(GcpException.class, () ->
+                    service.query(PROJECT, "US", null, c[0], null), c[0]);
+            assertEquals("invalidQuery", error.getReason(), c[0]);
+            assertEquals(c[1], error.getMessage(), c[0]);
+        }
+
+        for (String days : List.of("0", "-1")) {
+            GcpException notPositive = assertThrows(GcpException.class, () -> service.query(PROJECT, "US", null,
+                    "CREATE TABLE ds1.not_positive (id INT64, d DATE) PARTITION BY d"
+                            + " OPTIONS(partition_expiration_days=" + days + ")", null));
+            assertEquals("invalidQuery", notPositive.getReason());
+            assertEquals("partition_expiration_days value in table OPTIONS must be positive",
+                    notPositive.getMessage());
+        }
+
+        service.query(PROJECT, "US", null, "CREATE TABLE ds1.tiny_expiration (id INT64, d DATE) PARTITION BY d"
+                + " OPTIONS(partition_expiration_days=0.00000001)", null);
+        assertEquals(Map.of("type", "DAY", "field", "d", "expirationMs", "1"),
+                service.getTable(PROJECT, DATASET, "tiny_expiration").getExtra().get("timePartitioning"));
+
+        service.query(PROJECT, "US", null, "CREATE TABLE ds1.range_req (id INT64)"
+                + " PARTITION BY RANGE_BUCKET(id, GENERATE_ARRAY(0, 10)) OPTIONS(require_partition_filter=true)",
+                null);
+        Table ranged = service.getTable(PROJECT, DATASET, "range_req");
+        assertEquals(true, ranged.getExtra().get("requirePartitionFilter"));
+        assertNull(ranged.getExtra().get("timePartitioning"));
+    }
+
+    @Test
+    void createTableAsSelectBindsItsQueryToTheParametersAfterTheOptionExpressions() {
+        String sql = "CREATE TABLE ds1.cached OPTIONS(description=?) AS SELECT ? AS value";
+        List<Map<String, Object>> parameters = List.of(positionalParameter("cache"), positionalParameter("wanted"));
+
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        when(engine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("value", "STRING", null))),
+                List.of(Map.of("value", "wanted")), "SELECT", 0));
+        BigQueryService parameterizedService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), engine);
+        parameterizedService.createDataset(PROJECT, newDataset(DATASET));
+
+        parameterizedService.query(PROJECT, "US", null,
+                new BigQueryService.QueryOptions(sql, null, parameters, "POSITIONAL", false, false));
+
+        List<BigQuerySqlEngine.Request> executed = queryRequests(engine, "AS value");
+        assertEquals(1, executed.size());
+        assertEquals(List.of(parameters.get(1)), executed.getFirst().queryParameters());
+
+        BigQuerySqlEngine dryRunEngine = mock(BigQuerySqlEngine.class);
+        when(dryRunEngine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("value", "STRING", null))), List.of(), "SELECT", 0));
+        BigQueryService dryRunService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), dryRunEngine);
+        dryRunService.createDataset(PROJECT, newDataset(DATASET));
+
+        dryRunService.query(PROJECT, "US", null,
+                new BigQueryService.QueryOptions(sql, null, parameters, "POSITIONAL", true, false));
+
+        List<BigQuerySqlEngine.Request> described = queryRequests(dryRunEngine, "AS value");
+        assertEquals(1, described.size());
+        assertTrue(described.getFirst().dryRun());
+        assertEquals(List.of(parameters.get(1)), described.getFirst().queryParameters());
+    }
+
+    private static List<BigQuerySqlEngine.Request> queryRequests(BigQuerySqlEngine engine, String sqlFragment) {
+        ArgumentCaptor<BigQuerySqlEngine.Request> requests = ArgumentCaptor.forClass(BigQuerySqlEngine.Request.class);
+        verify(engine, atLeastOnce()).execute(requests.capture(), any());
+        return requests.getAllValues().stream().filter(request -> request.sql().contains(sqlFragment)).toList();
+    }
+
+    @Test
     void dateAndTimestampVariablesCanBeDeclaredAndAssigned() {
         BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
         when(engine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
@@ -851,6 +1101,30 @@ class BigQueryServiceTest {
         assertTrue(request.getValue().sql().contains("DATE '2025-01-02'"), request.getValue().sql());
         assertTrue(request.getValue().sql().contains("TIMESTAMP '2025-01-02T12:00:00Z'"),
                 request.getValue().sql());
+    }
+
+    @Test
+    void timestampVariablesAcceptEpochSecondsFromTypedQueryResults() {
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        when(engine.execute(any(), any())).thenReturn(
+                new BigQuerySqlEngine.Result(new TableSchema(List.of(field("creation_time", "TIMESTAMP", null))),
+                        List.of(Map.of("creation_time", "1704164645.123456")), "SELECT", 0),
+                new BigQuerySqlEngine.Result(new TableSchema(List.of(field("created_at", "TIMESTAMP", null))),
+                        List.of(Map.of("created_at", "2024-01-02T03:04:05.123456Z")), "SELECT", 0));
+        BigQueryService variableService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), engine);
+
+        variableService.query(PROJECT, "US", null, """
+                DECLARE created_at TIMESTAMP DEFAULT (
+                  SELECT creation_time FROM ds1.INFORMATION_SCHEMA.TABLES WHERE table_name = 't1'
+                );
+                SELECT created_at;
+                """, null);
+
+        ArgumentCaptor<BigQuerySqlEngine.Request> requests = ArgumentCaptor.forClass(BigQuerySqlEngine.Request.class);
+        verify(engine, times(2)).execute(requests.capture(), any());
+        assertTrue(requests.getAllValues().get(1).sql().contains(
+                "TIMESTAMP '2024-01-02T03:04:05.123456Z'"), requests.getAllValues().get(1).sql());
     }
 
     @Test
@@ -2542,6 +2816,13 @@ class BigQueryServiceTest {
                                 + "PARTITION BY TIMESTAMP_TRUNC(ts, HOUR)", null, List.of(),
                         null, true, false))).getReason());
 
+        assertEquals("partition_expiration_days value in table OPTIONS must be positive",
+                assertThrows(GcpException.class, () -> service.query(PROJECT, "US", null,
+                        new BigQueryService.QueryOptions(
+                                "CREATE TABLE ds1.zero_expiration (id INT64, d DATE) PARTITION BY d"
+                                        + " OPTIONS(partition_expiration_days=0)", null, List.of(),
+                                null, true, false))).getMessage());
+
         // A dry run that is valid still reports success and writes nothing.
         StoredJob ok = service.query(PROJECT, "US", null, new BigQueryService.QueryOptions(
                 "DROP TABLE IF EXISTS ds1.missing", null, List.of(), null, true, false));
@@ -3142,6 +3423,10 @@ class BigQueryServiceTest {
         Dataset d = new Dataset();
         d.setDatasetReference(new DatasetReference(null, datasetId));
         return d;
+    }
+
+    private static Map<String, Object> positionalParameter(String value) {
+        return Map.of("parameterType", Map.of("type", "STRING"), "parameterValue", Map.of("value", value));
     }
 
     private Table newTable(String datasetId, String tableId) {

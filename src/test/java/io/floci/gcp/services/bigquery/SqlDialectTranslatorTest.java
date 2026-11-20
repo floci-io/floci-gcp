@@ -4,6 +4,7 @@ import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.services.bigquery.model.TableFieldSchema;
 import org.junit.jupiter.api.Test;
 
+import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -4573,6 +4574,32 @@ class SqlDialectTranslatorTest {
         assertEquals(Map.of("field", "id", "range",
                 Map.of("start", "0", "end", "100", "interval", "1")), rangeCtas.rangePartitioning());
 
+        SqlDialectTranslator.Statement clusteredCtas = statement("""
+                CREATE TABLE IF NOT EXISTS ds.cached CLUSTER BY entity_id
+                OPTIONS(expiration_timestamp=TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 40 DAY))
+                AS (SELECT entity_id FROM ds.src)
+                """);
+        assertTrue(clusteredCtas.ifNotExists());
+        assertEquals(List.of("entity_id"), clusteredCtas.clusteringFields());
+        assertEquals("TIMESTAMP_ADD ( CURRENT_TIMESTAMP ( ) , INTERVAL 40 DAY )",
+                ((SqlDialectTranslator.OptionExpression) clusteredCtas.options().get("expiration_timestamp")).sql());
+        assertEquals("(SELECT entity_id FROM ds.src)", clusteredCtas.querySql().trim());
+
+        GcpException tooManyClusteringFields = assertThrows(GcpException.class, () -> statement(
+                "CREATE TABLE ds.wide (a INT64, b INT64, c INT64, d INT64, e INT64) CLUSTER BY a, b, c, d, e"));
+        assertEquals("5 clustering fields specified, exceeding the limit of 4.",
+                tooManyClusteringFields.getMessage());
+        GcpException clusteringExpression = assertThrows(GcpException.class, () ->
+                statement("CREATE TABLE ds.lowered (name STRING) CLUSTER BY LOWER(name)"));
+        assertEquals("Entries in the CLUSTER BY clause must be column names",
+                clusteringExpression.getMessage());
+        GcpException emptyClustering = assertThrows(GcpException.class, () ->
+                statement("CREATE TABLE ds.empty (id STRING) CLUSTER BY"));
+        assertEquals("Syntax error: Expected a column name in CLUSTER BY", emptyClustering.getMessage());
+        GcpException trailingClustering = assertThrows(GcpException.class, () ->
+                statement("CREATE TABLE ds.trailing (id STRING) CLUSTER BY id,"));
+        assertEquals("Syntax error: Expected a column name in CLUSTER BY", trailingClustering.getMessage());
+
         GcpException ingestionCtas = assertThrows(GcpException.class, () -> statement(
                 "CREATE TABLE ds.daily PARTITION BY DATE(_PARTITIONTIME) AS SELECT event_time FROM ds.src"));
         assertEquals("invalidQuery", ingestionCtas.getReason());
@@ -4583,6 +4610,38 @@ class SqlDialectTranslatorTest {
         assertEquals("SELECT 1 AS a", view.querySql());
         assertEquals("CREATE_MATERIALIZED_VIEW",
                 statement("CREATE MATERIALIZED VIEW ds.mv AS SELECT 1 AS a").statementType());
+    }
+
+    @Test
+    void createTableAcceptsBigQueryTableOptionsOnlyOnCreate() {
+        SqlDialectTranslator.Statement options = statement("""
+                CREATE TABLE ds.model (id INT64, d DATE) PARTITION BY d
+                OPTIONS(require_partition_filter=true, partition_expiration_days=7,
+                        kms_key_name='projects/p/locations/us/keyRings/r/cryptoKeys/k',
+                        enable_change_history=true, tags=[('123/env', 'prod')])
+                """);
+        assertEquals(Boolean.TRUE, options.options().get("require_partition_filter"));
+        assertEquals(new BigDecimal("7"), options.options().get("partition_expiration_days"));
+        assertEquals("projects/p/locations/us/keyRings/r/cryptoKeys/k",
+                options.options().get("kms_key_name"));
+        assertFalse(options.options().containsKey("enable_change_history"));
+        assertFalse(options.options().containsKey("tags"));
+
+        SqlDialectTranslator.Statement ctas = statement("CREATE TABLE ds.model2"
+                + " OPTIONS(require_partition_filter=false, partition_expiration_days=1.5) AS SELECT 1 AS id");
+        assertEquals(Boolean.FALSE, ctas.options().get("require_partition_filter"));
+        assertEquals(new BigDecimal("1.5"), ctas.options().get("partition_expiration_days"));
+        assertEquals(new BigDecimal("0"), statement("CREATE TABLE ds.z (d DATE) PARTITION BY d"
+                + " OPTIONS(partition_expiration_days=0)").options().get("partition_expiration_days"));
+        assertEquals(new BigDecimal("-1"), statement("CREATE TABLE ds.z (d DATE) PARTITION BY d"
+                + " OPTIONS(partition_expiration_days=-1)").options().get("partition_expiration_days"));
+
+        assertEquals("Option require_partition_filter is not supported by the floci BigQuery emulator yet.",
+                assertThrows(GcpException.class, () -> statement(
+                        "ALTER TABLE ds.t SET OPTIONS(require_partition_filter=true)")).getMessage());
+        assertEquals("Option kms_key_name is not supported by the floci BigQuery emulator yet.",
+                assertThrows(GcpException.class, () -> statement(
+                        "CREATE TABLE ds.c COPY ds.src OPTIONS(kms_key_name='k')")).getMessage());
     }
 
     @Test
@@ -4601,6 +4660,10 @@ class SqlDialectTranslatorTest {
         assertTrue(all.options().containsKey("friendly_name") && all.options().get("friendly_name") == null);
         assertEquals(Map.of("a", "b", "c", "d"), all.options().get("labels"));
         assertEquals(1795132800000L, all.options().get("expiration_timestamp"));
+        SqlDialectTranslator.Statement computed = statement("ALTER TABLE ds.t SET OPTIONS(expiration_timestamp="
+                + "TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 7 DAY))");
+        assertEquals("TIMESTAMP_ADD ( CURRENT_TIMESTAMP ( ) , INTERVAL 7 DAY )",
+                ((SqlDialectTranslator.OptionExpression) computed.options().get("expiration_timestamp")).sql());
         assertEquals("ALTER_VIEW", statement("ALTER VIEW ds.v SET OPTIONS(description='v')").statementType());
 
         SqlDialectTranslator.Statement expressions = statement("ALTER TABLE ds.t SET OPTIONS(description=CONCAT('a', 'b'),"
@@ -4621,6 +4684,9 @@ class SqlDialectTranslatorTest {
     void alterRejectsWhatBigQueryRejectsAndWhatFlociDoesNotSupport() {
         assertEquals("Unknown option: foo", assertThrows(GcpException.class,
                 () -> statement("ALTER TABLE ds.t SET OPTIONS(foo='bar')")).getMessage());
+        assertEquals("'description' is specified more than once in table OPTIONS",
+                assertThrows(GcpException.class, () -> statement(
+                        "ALTER TABLE ds.t SET OPTIONS(description='a', DESCRIPTION='b')")).getMessage());
         assertEquals("Option description value has type INT64 which cannot be coerced to expected type STRING",
                 assertThrows(GcpException.class,
                         () -> statement("ALTER TABLE ds.t SET OPTIONS(description=5)")).getMessage());

@@ -131,7 +131,7 @@ final class SqlDialectTranslator {
      * (https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/lexical#reserved_keywords).
      * BigQuery rejects them as an implicit alias, so they are never rewritten to one.
      */
-    private static final Set<String> GOOGLESQL_RESERVED = Set.of(
+    static final Set<String> GOOGLESQL_RESERVED = Set.of(
             "ALL", "AND", "ANY", "ARRAY", "AS", "ASC", "ASSERT_ROWS_MODIFIED", "AT", "BETWEEN", "BY", "CASE",
             "CAST", "COLLATE", "CONTAINS", "CREATE", "CROSS", "CUBE", "CURRENT", "DEFAULT", "DEFINE", "DESC",
             "DISTINCT", "ELSE", "END", "ENUM", "ESCAPE", "EXCEPT", "EXCLUDE", "EXISTS", "EXTRACT", "FALSE",
@@ -12379,6 +12379,18 @@ final class SqlDialectTranslator {
      */
     private void addNestedAnonymousFields(int start, int end, String field, Set<List<String>> anonymous) {
         int keyword = nextSignificant(start, end);
+        if (keyword >= 0 && tokens.get(keyword).isPunct("[")) {
+            // An array literal of structs ([STRUCT(x + 1)]): its elements share one type, read from the first.
+            int bracket = matchingBracket(keyword);
+            if (bracket < 0 || bracket >= end || nextSignificant(bracket + 1, end) >= 0) {
+                return;
+            }
+            int element = nextSignificant(keyword + 1, bracket);
+            if (element >= 0) {
+                addNestedAnonymousFields(element, structArgumentEnd(element, bracket), field, anonymous);
+            }
+            return;
+        }
         int open = keyword < 0 ? -1 : nextSignificant(keyword + 1, end);
         if (open < 0 || !tokens.get(keyword).isKeyword("STRUCT") || !tokens.get(open).isPunct("(")) {
             return;

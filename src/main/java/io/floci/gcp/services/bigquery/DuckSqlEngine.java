@@ -147,8 +147,9 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
 
     /**
      * A STRUCT column's GoogleSQL type as BigQuery writes it in an error: an anonymous field by its type alone, at
-     * any depth; {@code anonymousFields} holds their paths as name segments below {@code prefix}. A name that is not a
-     * plain identifier is quoted, as in {@code `m._field_1` INT64}.
+     * any depth, also in a struct that is an array's element; {@code anonymousFields} holds their paths as name
+     * segments below {@code prefix}. A name that is not a plain identifier, or is a reserved word, is quoted, as in
+     * {@code `m._field_1` INT64} and {@code `select` INT64}.
      */
     private static final Pattern PLAIN_IDENTIFIER = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*");
 
@@ -157,12 +158,12 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         for (TableFieldSchema child : field.getFields() != null ? field.getFields() : List.<TableFieldSchema>of()) {
             List<String> path = new ArrayList<>(prefix);
             path.add(child.getName().toLowerCase(Locale.ROOT));
-            boolean struct = ("RECORD".equals(child.getType()) || "STRUCT".equals(child.getType()))
-                    && !"REPEATED".equals(child.getMode());
-            String childType = struct
-                    ? structType(child, anonymousFields, path)
-                    : InformationSchema.dataType(child);
+            boolean struct = "RECORD".equals(child.getType()) || "STRUCT".equals(child.getType());
+            String childType = !struct ? InformationSchema.dataType(child)
+                    : "REPEATED".equals(child.getMode()) ? "ARRAY<" + structType(child, anonymousFields, path) + ">"
+                    : structType(child, anonymousFields, path);
             String name = PLAIN_IDENTIFIER.matcher(child.getName()).matches()
+                    && !SqlDialectTranslator.GOOGLESQL_RESERVED.contains(child.getName().toUpperCase(Locale.ROOT))
                     ? child.getName() : "`" + child.getName().replace("`", "\\`") + "`";
             parts.add(anonymousFields.contains(path) ? childType : name + " " + childType);
         }

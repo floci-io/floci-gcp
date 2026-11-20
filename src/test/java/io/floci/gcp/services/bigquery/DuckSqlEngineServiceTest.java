@@ -44,6 +44,29 @@ class DuckSqlEngineServiceTest {
     }
 
     @Test
+    void shimBinderFailuresUseTheGoogleSqlFunctionName() {
+        assertEquals("No matching signature for function BYTE_LENGTH Argument types: NUMERIC",
+                DuckSqlEngine.queryErrorMessage("Binder Error: No function matches the given name and argument "
+                        + "types 'floci_byte_length(DECIMAL(38,9))'. You might need to add explicit type casts.\n"
+                        + "Candidate functions:\n  floci_byte_length(VARCHAR) -> BIGINT"));
+        assertEquals("No matching signature for function LENGTH Argument types: INT64",
+                DuckSqlEngine.queryErrorMessage("Binder Error: No function matches the given name and argument "
+                        + "types 'floci_length(INTEGER_LITERAL)'."));
+        assertEquals("No matching signature for function NET.IP_TRUNC Argument types: STRING, INT64",
+                DuckSqlEngine.queryErrorMessage("Binder Error: No function matches the given name and argument "
+                        + "types 'ip_trunc(VARCHAR, BIGINT)'."));
+        assertEquals("No matching signature for function FARM_FINGERPRINT Argument types: ARRAY<INT64>",
+                DuckSqlEngine.queryErrorMessage("Binder Error: No function matches the given name and argument "
+                        + "types 'farm_fingerprint(LIST(BIGINT))'."));
+    }
+
+    @Test
+    void binderFailuresOutsideTheShimsKeepDuckDbWording() {
+        String message = "Binder Error: No function matches the given name and argument types 'sum(VARCHAR)'";
+        assertEquals(message, DuckSqlEngine.queryErrorMessage(message));
+    }
+
+    @Test
     void callerSqlRunsAfterExternalAccessIsLocked() {
         String setup = setupForAViewQuery(false);
         int staging = setup.indexOf("read_json(");

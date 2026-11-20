@@ -349,18 +349,24 @@ Queries are translated to DuckDB SQL and executed on the sidecar, so most of Goo
   matching. Recursive `STRUCT`/`ARRAY` search and the optional JSON scope argument are not
   emulated.
 - `HLL_COUNT.INIT`, `HLL_COUNT.EXTRACT`, `HLL_COUNT.MERGE` and `HLL_COUNT.MERGE_PARTIAL`
-  compose through BigQuery-compatible HLL++ ZetaSketch `BYTES`. Initialization supports `INT64`,
-  `STRING` and `BYTES`, including BigQuery's precision range and null behavior. `NUMERIC` and
-  `BIGNUMERIC` initialization are not supported.
+  exchange BigQuery's HLL++ ZetaSketch `BYTES`: `INIT` and `MERGE_PARTIAL` return a sketch, `EXTRACT`
+  and `MERGE` return the estimate. Initialization supports `INT64`, `STRING` and `BYTES`, BigQuery's
+  whole precision range of 10 to 24, and its null behavior, and produces the sketch bytes BigQuery
+  produces for the same input. `NUMERIC` and `BIGNUMERIC` initialization are not supported.
 - `LENGTH` counts Unicode characters for `STRING` and bytes for `BYTES`. `BYTE_LENGTH` returns
   the UTF-8 byte length of `STRING` and the byte length of `BYTES`.
 - `FARM_FINGERPRINT` accepts `STRING` and `BYTES` and returns the BigQuery-compatible signed
   `INT64` FarmHash Fingerprint64 value.
 - `TO_JSON_STRING` preserves typed values recursively. Temporal values use BigQuery's canonical
-  forms, UUID and `HUGEINT` values serialize as strings, and ordinary `STRING` values are not
-  reinterpreted based on their contents. The optional `pretty_print` argument is supported.
+  forms, `NUMERIC` and `BIGNUMERIC` render as BigQuery renders them (a JSON string when the value has
+  a fractional part, a JSON number when it is integral, without trailing zeros), UUID and `HUGEINT`
+  values serialize as strings, and ordinary `STRING` values are not reinterpreted based on their
+  contents. The optional `pretty_print` argument is supported.
 - `NET.IP_FROM_STRING` and `NET.SAFE_IP_FROM_STRING` parse IPv4 and IPv6 into `BYTES`.
   `NET.IP_TRUNC` applies a prefix length and `NET.IP_TO_STRING` formats the bytes canonically.
+  A rejected address, prefix or `HLL_COUNT.INIT` precision quotes BigQuery's message
+  (`NET.IP_FROM_STRING() encountered an unparseable IP-address: nope`), behind the SQL engine's
+  `Invalid Input Error: ` class prefix.
 - `BYTES` expressions support byte-oriented `BIT_COUNT`, `REPEAT`, `CONCAT`, left shift and
   bitwise AND, including inside temporary SQL functions.
 - `RAND` returns a uniformly distributed value in the half-open interval `[0, 1)`.
@@ -734,6 +740,9 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
   statement runs, such as a `NOT NULL` temporary column receiving a NULL, which answers
   `Constraint Error: NOT NULL constraint failed: t.id` where BigQuery answers
   `Required field id cannot be null`.
+- A function whose overload does not match the argument types names the GoogleSQL function, as
+  BigQuery does (`No matching signature for function BYTE_LENGTH Argument types: NUMERIC`), without
+  BigQuery's signature list and `at [1:col]` position.
 - Values a script needs at validation time are what a dry run cannot supply: a script dry run stops
   at the first variable or control-flow statement and after the first DDL statement, where BigQuery
   validates every statement of the script. A dry run whose script declares a temporary table reports

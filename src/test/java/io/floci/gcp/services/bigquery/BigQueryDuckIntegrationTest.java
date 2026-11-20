@@ -4097,6 +4097,24 @@ class BigQueryDuckIntegrationTest {
                 """, "useLegacySql", false))
                 .then().statusCode(200)
                 .body("rows[0].f.v", equalTo(List.of("1", "3")));
+
+        // Precisions 21-24 are inside BigQuery's range, and each precision returns the sketch
+        // bytes live BigQuery produces for the same input.
+        query(Map.of("query", """
+                SELECT TO_BASE64(HLL_COUNT.INIT(x, 24)) AS sketch,
+                  TO_BASE64(HLL_COUNT.INIT(x, 21)) AS narrow,
+                  HLL_COUNT.EXTRACT(HLL_COUNT.INIT(x, 22)) AS estimated
+                FROM UNNEST([1, 2, 3]) AS x
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("CHAQAxgCIAiCBxUQAxgYIBkyDYOLnwjO2qkDsJ6/tQY="))
+                .body("rows[0].f[1].v", equalTo("CHAQAxgCIAiCBxQQAxgVIBkyDIOLnwjO2qkD8JrIXA=="))
+                .body("rows[0].f[2].v", equalTo("3"));
+
+        query(Map.of("query", "SELECT HLL_COUNT.INIT(x, 9) FROM UNNEST([1]) AS x", "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message",
+                        containsString("Argument 2 to HLL_COUNT.INIT must be between 10 and 24"));
     }
 
     @Test
@@ -4140,6 +4158,23 @@ class BigQueryDuckIntegrationTest {
                 .body("rows[0].f[2].v", nullValue())
                 .body("rows[0].f[3].v", equalTo("123.123.123.123"))
                 .body("rows[0].f[4].v", equalTo("1111:1111:1111:1111::"));
+
+        query(Map.of("query", "SELECT NET.IP_FROM_STRING('nope')", "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", containsString(
+                        "NET.IP_FROM_STRING() encountered an unparseable IP-address: nope"));
+
+        query(Map.of("query", "SELECT NET.IP_TO_STRING(b'\\x01\\x02\\x03')", "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", containsString("NET.IP_TO_STRING() encountered an invalid IP "
+                        + "address. Expected 4 (for IPv4) or 16 (for IPv6) bytes but got 3"));
+
+        query(Map.of("query", """
+                SELECT NET.IP_TO_STRING(NET.IP_TRUNC(NET.IP_FROM_STRING('10.0.0.1'), 33))
+                """, "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", containsString("The second argument of NET.IP_TRUNC() must be "
+                        + "between 0 and 8 * LENGTH(first argument); got 33"));
     }
 
     @Test
@@ -4178,6 +4213,20 @@ class BigQueryDuckIntegrationTest {
                         "{\n  \"id\": 1,\n  \"coordinates\": [\n    10,\n    20\n  ]\n}"))
                 .body("rows[0].f[2].v", nullValue())
                 .body("rows[0].f[3].v", equalTo("\"9223372036854775808\""));
+
+        // A NUMERIC/BIGNUMERIC is a JSON string when it has a fractional part and a JSON number
+        // when it is integral, with the trailing zeros of the scale dropped.
+        query(Map.of("query", """
+                SELECT TO_JSON_STRING(NUMERIC '1.50') AS fractional,
+                  TO_JSON_STRING(NUMERIC '1.0') AS integral,
+                  TO_JSON_STRING(BIGNUMERIC '-0.500') AS negative,
+                  TO_JSON_STRING(STRUCT(NUMERIC '7.0' AS n)) AS nested
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("\"1.5\""))
+                .body("rows[0].f[1].v", equalTo("1"))
+                .body("rows[0].f[2].v", equalTo("\"-0.5\""))
+                .body("rows[0].f[3].v", equalTo("{\"n\":7}"));
     }
 
     @Test

@@ -4119,6 +4119,36 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(5)
+    void groupedHllCountSurvivesTheStructStarRewrite() {
+        // Live BigQuery answers one row per b with the struct star expanded and the sketch beside it;
+        // the grouped rewrite has to see HLL_COUNT.INIT as an aggregate for that to hold.
+        query(Map.of("query", """
+                CREATE TEMP TABLE t AS
+                  SELECT STRUCT(1 AS a, 2 AS b) AS s, 10 AS id
+                  UNION ALL SELECT STRUCT(3 AS a, 4 AS b), 20;
+                SELECT t.s.* EXCEPT(a), HLL_COUNT.INIT(t.id) AS sketch
+                FROM t
+                GROUP BY ALL
+                ORDER BY b
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(2))
+                .body("rows[0].f[0].v", equalTo("2"))
+                .body("rows[0].f[1].v", notNullValue())
+                .body("rows[1].f[0].v", equalTo("4"))
+                .body("rows[1].f[1].v", notNullValue());
+
+        query(Map.of("query", """
+                CREATE TEMP TABLE id_rows AS
+                  SELECT 10 AS id UNION ALL SELECT 20;
+                SELECT HLL_COUNT.EXTRACT(HLL_COUNT.INIT(t.id)) AS distinct_ids FROM id_rows t
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("2"));
+    }
+
+    @Test
+    @Order(5)
     void lengthAndFarmFingerprintMatchBigQuery() {
         query(Map.of("query", """
                 SELECT LENGTH('hé') AS string_length,

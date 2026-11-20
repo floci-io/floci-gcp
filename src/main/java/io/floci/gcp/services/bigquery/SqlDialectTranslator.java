@@ -62,7 +62,16 @@ final class SqlDialectTranslator {
      * An {@code alias.field} in ORDER BY naming a field the STRUCT select alias does not have, as written, and
      * whether it belongs to the outermost query, whose aliases are the result's columns.
      */
-    record MissingStructField(String alias, String field, boolean outermost, Set<List<String>> anonymousFields) {}
+    /**
+     * A field missing from a STRUCT select alias in ORDER BY; {@code parents} names the fields from the alias down to
+     * the struct that lacks it, empty when the alias itself does.
+     */
+    record MissingStructField(String alias, String field, boolean outermost, Set<List<String>> anonymousFields,
+                              List<String> parents) {
+        MissingStructField(String alias, String field, boolean outermost, Set<List<String>> anonymousFields) {
+            this(alias, field, outermost, anonymousFields, List.of());
+        }
+    }
 
     /**
      * The dotted paths, such as {@code s.zz}, left in the outermost query's ORDER BY once the translator has
@@ -12251,6 +12260,30 @@ final class SqlDialectTranslator {
                 String message = "Field name " + tokens.get(field).identifierText() + " does not exist in STRUCT";
                 expression = List.of(Token.raw("error('" + message.replace("'", "''") + "')"));
             }
+            if (expression != null && orderBy && !anonymousFields.isEmpty()) {
+                List<String> path = new ArrayList<>(List.of(fieldKey));
+                int last = field;
+                int nextDot = nextSignificant(last + 1, end);
+                int next = nextDot < 0 ? -1 : nextSignificant(nextDot + 1, end);
+                while (next >= 0 && tokens.get(nextDot).isPunct(".")
+                        && (tokens.get(next).kind == Kind.IDENT || tokens.get(next).kind == Kind.QIDENT)) {
+                    List<String> parents = List.copyOf(path);
+                    path.add(tokens.get(next).identifierText().toLowerCase(Locale.ROOT));
+                    if (anonymousFields.contains(path)) {
+                        // An anonymous field one level down is no more reachable by its position than at the top.
+                        String name = tokens.get(next).identifierText();
+                        missingStructFields.add(new MissingStructField(alias.identifierText(), name,
+                                parenthesisDepth(start) == 0, Set.copyOf(anonymousFields), parents));
+                        String message = "Field name " + name + " does not exist in STRUCT";
+                        expression = List.of(Token.raw("error('" + message.replace("'", "''") + "')"));
+                        field = next;
+                        break;
+                    }
+                    last = next;
+                    nextDot = nextSignificant(last + 1, end);
+                    next = nextDot < 0 ? -1 : nextSignificant(nextDot + 1, end);
+                }
+            }
             if (expression == null) {
                 continue;
             }
@@ -12260,6 +12293,8 @@ final class SqlDialectTranslator {
             replacement.add(Token.raw(orderBy ? "], 1)" : ")"));
             tokens.subList(i, field + 1).clear();
             tokens.addAll(i, replacement);
+            // A nested path is longer than its replacement, so the clause's end moves with it.
+            end += replacement.size() - (field + 1 - i);
         }
     }
 

@@ -3359,11 +3359,21 @@ class BigQueryDuckIntegrationTest {
                         "STRUCT<m STRUCT<_field_1 INT64>>"},
                 {"SELECT STRUCT(STRUCT(x + 1) AS m, x AS `m._field_1`) AS s FROM UNNEST([2, 1]) x ORDER BY s.zz", "zz",
                         "STRUCT<m STRUCT<INT64>, `m._field_1` INT64>"},
+                {"SELECT STRUCT(STRUCT(x + 1) AS m) AS s FROM UNNEST([2, 1]) x ORDER BY s.m._field_1", "_field_1",
+                        "STRUCT<INT64>"},
+                {"SELECT STRUCT(STRUCT(x + 1, x AS k) AS m, x AS n) AS s FROM UNNEST([2, 1]) x ORDER BY s.m._field_1",
+                        "_field_1", "STRUCT<INT64, k INT64>"},
+                {"SELECT STRUCT(STRUCT(STRUCT(x + 1) AS d) AS m) AS s FROM UNNEST([2, 1]) x ORDER BY s.m.d._field_1",
+                        "_field_1", "STRUCT<INT64>"},
         }) {
             query(Map.of("query", c[0], "useLegacySql", false))
                     .then().statusCode(400)
                     .body("error.message", equalTo("Field name " + c[1] + " does not exist in " + c[2]));
         }
+        query(Map.of("query", "SELECT STRUCT(STRUCT(x + 1, x AS k) AS m) AS s FROM UNNEST([2, 1]) x ORDER BY s.m.k",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.collect { it.f[0].v.f[0].v.f[1].v }", equalTo(List.of("1", "2")));
         query(Map.of("query", "SELECT STRUCT(t.n, t.m) AS s FROM (SELECT 2 AS n, 'a' AS m UNION ALL SELECT 1, 'b') t"
                 + " ORDER BY s.n", "useLegacySql", false))
                 .then().statusCode(200)

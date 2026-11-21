@@ -112,9 +112,10 @@ jobs:
 
       # surefire.timeout bounds the test fork at 15 minutes, including deadlocks or blocking
       # I/O that ignore JUnit's interrupt; the job ceiling also covers setup and compile.
+      # jacoco:prepare-agent sets the argLine surefire forks with, as `mvn test` does.
       - name: Run tests
         run: >
-          mvn surefire:test -B
+          mvn jacoco:prepare-agent surefire:test jacoco:report -B
           -Dsurefire.includesFile="$GITHUB_WORKSPACE/shard.txt"
           -Dsurefire.failIfNoTests=true
           -Dsurefire.timeout=900
@@ -152,12 +153,6 @@ jobs:
     needs: test
     if: always()
     steps:
-      - name: Fail if any shard failed
-        if: needs.test.result != 'success'
-        run: |
-          echo "shard matrix concluded: ${{ needs.test.result }}"
-          exit 1
-
       - uses: actions/download-artifact@v8
         with:
           pattern: shard-*
@@ -179,7 +174,15 @@ jobs:
             || { echo "::error::shard union differs from the full class list:"; diff union.txt "$ref/all-classes.txt" | head -50; exit 1; }
           echo "partition verified: $(wc -l < union.txt) classes across $(ls -d shards/shard-* | wc -l) shards"
 
+      # Runs after a failed shard too, which is when the summary matters most.
       - name: Test summary
+        if: always()
         uses: test-summary/action@37b508cfee6d4d080eedd00b5bb240a6a784a6a5 # v2
         with:
           paths: 'shards/shard-*/target/surefire-reports/TEST-*.xml'
+
+      - name: Fail if any shard failed
+        if: always() && needs.test.result != 'success'
+        run: |
+          echo "shard matrix concluded: ${{ needs.test.result }}"
+          exit 1

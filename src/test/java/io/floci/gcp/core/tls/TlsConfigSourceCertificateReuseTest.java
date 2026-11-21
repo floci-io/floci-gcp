@@ -56,9 +56,10 @@ class TlsConfigSourceCertificateReuseTest {
         new TlsConfigSource();
 
         Path certFile = tempDir.resolve("tls/floci-gcp-selfsigned.crt");
+        // Back-date the modification time so a rewrite is detectable without waiting for the clock to move
+        Files.setLastModifiedTime(certFile,
+                FileTime.from(Files.getLastModifiedTime(certFile).toInstant().minusSeconds(10)));
         Instant firstGenTime = Files.getLastModifiedTime(certFile).toInstant();
-
-        Thread.sleep(50);
 
         System.setProperty("floci-gcp.hostname", "floci-gcp");
         new TlsConfigSource();
@@ -77,8 +78,9 @@ class TlsConfigSourceCertificateReuseTest {
 
         // Delete metadata to simulate a migration from an older version
         Files.delete(metadataFile);
+        Files.setLastModifiedTime(certFile,
+                FileTime.from(Files.getLastModifiedTime(certFile).toInstant().minusSeconds(10)));
         Instant beforeTime = Files.getLastModifiedTime(certFile).toInstant();
-        Thread.sleep(50);
 
         new TlsConfigSource();
 

@@ -25,9 +25,11 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Flow;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
@@ -45,6 +47,8 @@ class UptimeCheckServiceTest {
     private volatile int status = 200;
     private volatile String body = "service is healthy";
     private volatile long delayMs = 0;
+    /** When set, each request waits here until every expected request has arrived, and fails if they never do. */
+    private volatile CountDownLatch arrivals;
 
     @BeforeEach
     void setUp() throws Exception {
@@ -54,13 +58,21 @@ class UptimeCheckServiceTest {
         prober = new UptimeCheckProber(checks, monitoring, true, 1);
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/", exchange -> {
+            int answer = status;
             try {
                 Thread.sleep(delayMs);
+                CountDownLatch gate = arrivals;
+                if (gate != null) {
+                    gate.countDown();
+                    if (!gate.await(5, TimeUnit.SECONDS)) {
+                        answer = 500;
+                    }
+                }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
             byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
-            exchange.sendResponseHeaders(status, bytes.length);
+            exchange.sendResponseHeaders(answer, bytes.length);
             exchange.getResponseBody().write(bytes);
             exchange.close();
         });
@@ -233,15 +245,14 @@ class UptimeCheckServiceTest {
 
     @Test
     void slowTargetsAreProbedInParallel() {
-        delayMs = 1500;
+        // Each target answers only once all four requests have arrived, so the checks pass only if they run together.
+        arrivals = new CountDownLatch(4);
         for (int i = 0; i < 4; i++) {
             checks.create(PROJECT, http("Slow " + i, "/").setTimeout(Duration.newBuilder().setSeconds(10)).build());
         }
 
-        long started = System.nanoTime();
         prober.tick(NOW).join();
 
-        assertTrue(System.nanoTime() - started < 4_500_000_000L, "four 1.5 s probes ran in parallel");
         assertEquals(4, passedByCheck().values().stream().filter(Boolean::booleanValue).count());
         prober.tick(NOW.plusSeconds(1)).join();
         assertEquals(4, all("check_passed").size(), "a check is not started again before its period");

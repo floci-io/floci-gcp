@@ -77,7 +77,7 @@ class ComputeIntegrationTest extends ComputeTestSupport {
         String op = created.jsonPath().getString("selfLink").replaceFirst("https://www.googleapis.com", "");
         given().delete(op).then().statusCode(200);
         given().get(op).then().statusCode(404);
-        Thread.sleep(100);
+        Thread.sleep(50); // past the deleted operation's readyAt (operation-delay-ms: 10)
         assertEquals("READY", given().get(root + "/zones/us-central1-a/disks/retained").jsonPath().getString("status"));
     }
     @Test void networksOperationsAndIsolation() throws Exception {

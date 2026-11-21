@@ -12,6 +12,7 @@ import com.google.protobuf.ByteString;
 import com.google.protobuf.Timestamp;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.services.firestore.model.StoredDocument;
+import io.floci.gcp.testing.ThreadStates;
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import org.junit.jupiter.api.BeforeEach;
@@ -20,6 +21,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -334,7 +336,7 @@ class FirestoreListenStreamTest {
 
         Thread writer = new Thread(() -> put("col/racer", 1));
         writer.start();
-        awaitBlocked(writer);
+        ThreadStates.awaitState(writer, EnumSet.of(Thread.State.BLOCKED), Duration.ofSeconds(10), "the writer");
         release.countDown();
         writer.join(10_000);
         listener.join(10_000);
@@ -380,7 +382,7 @@ class FirestoreListenStreamTest {
         assertTrue(atChange.await(10, TimeUnit.SECONDS));
         Thread closer = new Thread(requests::onCompleted);
         closer.start();
-        awaitBlocked(closer);
+        ThreadStates.awaitState(closer, EnumSet.of(Thread.State.BLOCKED), Duration.ofSeconds(10), "the closer");
         assertEquals(0, recorder.completions);
         release.countDown();
         writer.join(10_000);
@@ -466,16 +468,6 @@ class FirestoreListenStreamTest {
             }
         }
         return -1;
-    }
-
-    /** Waits until the thread is parked on a monitor, here the service's write lock. */
-    private static void awaitBlocked(Thread thread) {
-        Instant deadline = Instant.now().plus(Duration.ofSeconds(10));
-        while (thread.getState() != Thread.State.BLOCKED) {
-            assertTrue(Instant.now().isBefore(deadline), "thread never blocked, state " + thread.getState());
-            assertTrue(thread.isAlive(), "thread finished without blocking");
-            Thread.onSpinWait();
-        }
     }
 
     private static final class Recorder implements StreamObserver<ListenResponse> {

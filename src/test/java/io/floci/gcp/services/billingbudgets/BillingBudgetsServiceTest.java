@@ -3,10 +3,10 @@ package io.floci.gcp.services.billingbudgets;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.services.billingbudgets.model.BudgetRecord;
+import io.floci.gcp.testing.ThreadStates;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
-import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -44,7 +44,12 @@ class BillingBudgetsServiceTest {
             Thread thread = new Thread(() -> service.deleteBudget(ACCOUNT, budgetId));
             deleter.set(thread);
             thread.start();
-            awaitBlockedOrDone(thread);
+            try {
+                ThreadStates.awaitBlockedOrDone(thread);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new AssertionError(e);
+            }
         });
 
         service.updateBudget(ACCOUNT, budgetId, "displayName", Map.of("displayName", "after"));
@@ -74,15 +79,5 @@ class BillingBudgetsServiceTest {
         assertEquals(Map.of("year", 2026, "month", 6, "day", 1), period.get("startDate"));
         assertEquals(List.of("projects/p"), filter.get("projects"));
         assertEquals(null, filter.get("customPeriod.startDate"));
-    }
-
-    private static void awaitBlockedOrDone(Thread thread) {
-        Instant deadline = Instant.now().plusSeconds(10);
-        while (thread.getState() != Thread.State.BLOCKED && thread.getState() != Thread.State.TERMINATED) {
-            if (Instant.now().isAfter(deadline)) {
-                throw new AssertionError("delete thread neither blocked nor finished: " + thread.getState());
-            }
-            Thread.onSpinWait();
-        }
     }
 }

@@ -13,6 +13,7 @@ import io.floci.gcp.services.iam.authorization.IamAuthorizationService;
 import io.floci.gcp.services.iam.authorization.IamPermissionCheck;
 import io.floci.gcp.services.iam.authorization.IamRequestIdentity;
 import io.floci.gcp.services.iam.model.StoredPolicy;
+import io.floci.gcp.testing.ThreadStates;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.Test;
 
@@ -26,9 +27,9 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicReference;
 
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -114,13 +115,13 @@ class IamBucketPolicyServiceTest {
                     () -> policyService.setPolicy(bucket, authorization, restoringPolicy));
             assertTrue(authorizationCompleted.await(5, TimeUnit.SECONDS));
 
-            CountDownLatch revokerStarted = new CountDownLatch(1);
+            AtomicReference<Thread> revokerThread = new AtomicReference<>();
             Future<?> revoker = executor.submit(() -> {
-                revokerStarted.countDown();
+                revokerThread.set(Thread.currentThread());
                 iamService.setPolicy(grantingResource, revokedPolicy);
             });
-            assertTrue(revokerStarted.await(5, TimeUnit.SECONDS));
-            assertThrows(TimeoutException.class, () -> revoker.get(100, TimeUnit.MILLISECONDS));
+            ThreadStates.awaitBlockedOrDone(revokerThread, revoker);
+            assertFalse(revoker.isDone());
 
             allowPolicyWrite.countDown();
             writer.get(5, TimeUnit.SECONDS);

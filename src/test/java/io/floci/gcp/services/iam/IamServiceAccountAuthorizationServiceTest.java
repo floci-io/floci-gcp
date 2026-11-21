@@ -9,6 +9,7 @@ import io.floci.gcp.services.iam.authorization.IamPermissionCheck;
 import io.floci.gcp.services.iam.model.StoredPolicy;
 import io.floci.gcp.services.iam.model.StoredServiceAccount;
 import io.floci.gcp.services.iamcredentials.IamCredentialsController;
+import io.floci.gcp.testing.ThreadStates;
 import jakarta.enterprise.inject.Instance;
 import jakarta.ws.rs.HttpMethod;
 import org.junit.jupiter.api.BeforeEach;
@@ -25,7 +26,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -225,17 +226,17 @@ class IamServiceAccountAuthorizationServiceTest {
                     }
                 });
                 assertTrue(reached.await(5, TimeUnit.SECONDS));
-                CountDownLatch started = new CountDownLatch(1);
+                AtomicReference<Thread> competitor = new AtomicReference<>();
                 Future<?> competing = executor.submit(() -> {
-                    started.countDown();
+                    competitor.set(Thread.currentThread());
                     if (updateFirst) {
                         service.deleteServiceAccount("p", "target");
                     } else {
                         service.updateServiceAccount("p", "target", "resurrected", null);
                     }
                 });
-                assertTrue(started.await(5, TimeUnit.SECONDS));
-                assertThrows(TimeoutException.class, () -> competing.get(100, TimeUnit.MILLISECONDS));
+                ThreadStates.awaitBlockedOrDone(competitor, competing);
+                assertFalse(competing.isDone());
                 release.countDown();
                 first.get(5, TimeUnit.SECONDS);
                 if (updateFirst) {
@@ -282,13 +283,13 @@ class IamServiceAccountAuthorizationServiceTest {
                 Future<?> writer = executor.submit(() -> service.setPolicy(
                         policyResource, new StoredPolicy()));
                 assertTrue(reached.await(5, TimeUnit.SECONDS));
-                CountDownLatch started = new CountDownLatch(1);
+                AtomicReference<Thread> deleter = new AtomicReference<>();
                 Future<?> deletion = executor.submit(() -> {
-                    started.countDown();
+                    deleter.set(Thread.currentThread());
                     service.deleteServiceAccount("p", "target");
                 });
-                assertTrue(started.await(5, TimeUnit.SECONDS));
-                assertThrows(TimeoutException.class, () -> deletion.get(100, TimeUnit.MILLISECONDS));
+                ThreadStates.awaitBlockedOrDone(deleter, deletion);
+                assertFalse(deletion.isDone());
                 release.countDown();
                 writer.get(5, TimeUnit.SECONDS);
                 deletion.get(5, TimeUnit.SECONDS);
@@ -336,17 +337,17 @@ class IamServiceAccountAuthorizationServiceTest {
                     }
                 });
                 assertTrue(reached.await(5, TimeUnit.SECONDS));
-                CountDownLatch started = new CountDownLatch(1);
+                AtomicReference<Thread> competitor = new AtomicReference<>();
                 Future<?> competing = executor.submit(() -> {
-                    started.countDown();
+                    competitor.set(Thread.currentThread());
                     if (migrationFirst) {
                         service.deleteServiceAccount("p", "target");
                     } else {
                         service.serviceAccountResource("p", "target");
                     }
                 });
-                assertTrue(started.await(5, TimeUnit.SECONDS));
-                assertThrows(TimeoutException.class, () -> competing.get(100, TimeUnit.MILLISECONDS));
+                ThreadStates.awaitBlockedOrDone(competitor, competing);
+                assertFalse(competing.isDone());
                 release.countDown();
                 first.get(5, TimeUnit.SECONDS);
                 if (migrationFirst) {

@@ -9,6 +9,7 @@ import java.time.ZoneId;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -213,10 +214,17 @@ final class SqlDialectTranslator {
      * BigQuery, and the missing-field message writes it by type alone.
      */
     private final Map<Map<String, List<Token>>, Set<List<String>>> anonymousStructFields = new IdentityHashMap<>();
+
+    /** Decimal literals BigQuery types FLOAT64 here, rendered as DOUBLE; see {@link #typeDecimalLiterals}. */
+    private final Set<Token> floatLiterals = Collections.newSetFromMap(new IdentityHashMap<>());
     private boolean queryResult;
     private boolean scalarUdfBody;
     private boolean scalarUdfNamedTableSource;
     private Map<String, String> scalarUdfParameterAliases = Map.of();
+    /** Lowercase names of the temporary function's NUMERIC or BIGNUMERIC parameters, for decimal literal typing. */
+    private Set<String> numericUdfParameters = Set.of();
+    /** For each temporary function of the script, by lowercase name, whether each parameter is NUMERIC. */
+    private Map<String, List<Boolean>> numericFunctionParameters = Map.of();
 
     private List<Token> tokens;
     /** The {@code UNNEST} token of an unaliased MERGE source, rendered with {@link #mergeUnnestName} as its name. */
@@ -337,9 +345,20 @@ final class SqlDialectTranslator {
                                                             Set<String> temporaryTables,
                                                             Function<TableRef, Set<String>> columnsOf,
                                                             Function<TableRef, List<TableFieldSchema>> fieldsOf) {
+        return translateWithTemporaryTables(sql, projectId, jobProjectId, defaultDatasetId, parameters, temporaryTables,
+                columnsOf, fieldsOf, Map.of());
+    }
+
+    private static Translation translateWithTemporaryTables(String sql, String projectId, String jobProjectId,
+                                                            String defaultDatasetId, QueryParameters parameters,
+                                                            Set<String> temporaryTables,
+                                                            Function<TableRef, Set<String>> columnsOf,
+                                                            Function<TableRef, List<TableFieldSchema>> fieldsOf,
+                                                            Map<String, List<Boolean>> numericFunctionParameters) {
         SqlDialectTranslator translator = new SqlDialectTranslator(projectId, jobProjectId, defaultDatasetId,
                 parameters, temporaryTables);
         translator.columnsOf = columnsOf;
+        translator.numericFunctionParameters = numericFunctionParameters;
         translator.fieldsOf = fieldsOf;
         return translator.run(sql);
     }
@@ -364,9 +383,20 @@ final class SqlDialectTranslator {
                                                                Set<String> temporaryTables,
                                                                Function<TableRef, Set<String>> columnsOf,
                                                                Function<TableRef, List<TableFieldSchema>> fieldsOf) {
+        return translateDmlWithTemporaryTables(sql, projectId, jobProjectId, defaultDatasetId, parameters,
+                temporaryTables, columnsOf, fieldsOf, Map.of());
+    }
+
+    private static Translation translateDmlWithTemporaryTables(String sql, String projectId, String jobProjectId,
+                                                               String defaultDatasetId, QueryParameters parameters,
+                                                               Set<String> temporaryTables,
+                                                               Function<TableRef, Set<String>> columnsOf,
+                                                               Function<TableRef, List<TableFieldSchema>> fieldsOf,
+                                                               Map<String, List<Boolean>> numericFunctionParameters) {
         SqlDialectTranslator translator = new SqlDialectTranslator(projectId, jobProjectId, defaultDatasetId,
                 parameters, temporaryTables);
         translator.columnsOf = columnsOf;
+        translator.numericFunctionParameters = numericFunctionParameters;
         translator.fieldsOf = fieldsOf;
         return translator.runDml(sql);
     }
@@ -420,6 +450,7 @@ final class SqlDialectTranslator {
         Set<InformationSchema.Ref> informationSchema = new LinkedHashSet<>();
         Set<String> temporaryTables = new LinkedHashSet<>();
         Set<String> temporaryFunctions = new LinkedHashSet<>();
+        Map<String, List<Boolean>> numericFunctionParameters = new HashMap<>();
         StringBuilder setup = new StringBuilder();
         boolean needsUnicodeCaseFold = false;
         for (int i = 0; i < statements.size(); i++) {
@@ -435,6 +466,8 @@ final class SqlDialectTranslator {
                     throw invalidQuery("SQL functions with the same name but different signatures are "
                             + "currently unsupported; found " + definition.name());
                 }
+                numericFunctionParameters.put(definition.name().toLowerCase(Locale.ROOT),
+                        numericParameterPositions(statement));
                 Translation macro = translateTemporaryFunction(statement, projectId, jobProjectId, defaultDatasetId,
                         parameters, temporaryTables, temporaryFunctions);
                 setup.append(macro.sql()).append(";\n");
@@ -470,7 +503,8 @@ final class SqlDialectTranslator {
                 String temporaryTarget = temporaryDmlTarget(statement, temporaryTables);
                 if (temporaryTarget != null) {
                     Translation mutation = translateDmlWithTemporaryTables(statement, projectId, jobProjectId,
-                            defaultDatasetId, parameters, temporaryTables, columnsOf, fieldsOf);
+                            defaultDatasetId, parameters, temporaryTables, columnsOf, fieldsOf,
+                            numericFunctionParameters);
                     setup.append(mutation.sql()).append(";\n");
                     tables.addAll(mutation.tables());
                     informationSchema.addAll(mutation.informationSchema());
@@ -484,7 +518,7 @@ final class SqlDialectTranslator {
                             + "and DDL are not supported by the floci BigQuery emulator yet.");
                 }
                 Translation query = translateWithTemporaryTables(statement, projectId, jobProjectId,
-                        defaultDatasetId, parameters, temporaryTables, columnsOf, fieldsOf);
+                        defaultDatasetId, parameters, temporaryTables, columnsOf, fieldsOf, numericFunctionParameters);
                 setup.append(query.sql()).append(";\n");
                 tables.addAll(query.tables());
                 informationSchema.addAll(query.informationSchema());
@@ -496,9 +530,9 @@ final class SqlDialectTranslator {
                     temporaryTarget != null ? "_floci_temporary" : defaultDatasetId, temporaryTables);
             Translation query = finalStatement.isDml()
                     ? translateDmlWithTemporaryTables(statement, projectId, jobProjectId, defaultDatasetId, parameters,
-                            temporaryTables, columnsOf, fieldsOf)
+                            temporaryTables, columnsOf, fieldsOf, numericFunctionParameters)
                     : translateWithTemporaryTables(statement, projectId, jobProjectId, defaultDatasetId, parameters,
-                            temporaryTables, columnsOf, fieldsOf);
+                            temporaryTables, columnsOf, fieldsOf, numericFunctionParameters);
             return new ScriptTranslation(query.sql(), setup.toString(), tablesWith(tables, query.tables()),
                     informationSchemaWith(informationSchema, query.informationSchema()),
                     needsUnicodeCaseFold || query.needsUnicodeCaseFold(), query.duplicateOutputNames(),
@@ -1367,6 +1401,7 @@ final class SqlDialectTranslator {
                 .append(declaration.ifNotExists() ? "IF NOT EXISTS " : "")
                 .append(DuckTypes.quoteIdentifier(function.identifierText())).append('(');
         Map<String, String> parameterReferences = new HashMap<>();
+        Set<String> numericParameters = new HashSet<>();
         List<String> parameterValues = new ArrayList<>();
         List<String> parameterNames = new ArrayList<>();
         for (int i = 0; i < arguments.size(); i++) {
@@ -1389,10 +1424,14 @@ final class SqlDialectTranslator {
             String reference = anyType ? quotedParameterAlias : "CAST(" + quotedParameterAlias + " AS "
                     + translateType(argument.subList(1, argument.size())) + ")";
             parameterReferences.put(argument.getFirst().identifierText().toLowerCase(Locale.ROOT), reference);
+            if (numericParameter(reference)) {
+                numericParameters.add(argument.getFirst().identifierText().toLowerCase(Locale.ROOT));
+            }
             parameterValues.add(reference);
             parameterNames.add(DuckTypes.quoteIdentifier(argument.getFirst().identifierText()));
         }
         translator.scalarUdfParameterAliases = Map.copyOf(parameterReferences);
+        translator.numericUdfParameters = Set.copyOf(numericParameters);
         Translation expression = translator.translateExpression(body);
         boolean relationBinding = translator.scalarUdfNamedTableSource
                 || referencesTemporaryFunctionWithConcat(body, temporaryFunctions);
@@ -1400,6 +1439,7 @@ final class SqlDialectTranslator {
             // Bind scalar parameters in one-row relation scope. This keeps nested expressions composable and lets
             // DuckDB apply BigQuery's column-over-argument precedence when a named source exposes the same name.
             translator = new SqlDialectTranslator(projectId, defaultDatasetId, parameters, temporaryTables);
+            translator.numericUdfParameters = Set.copyOf(numericParameters);
             expression = translator.translateExpression(body);
         }
         String typedExpression = returnType == null ? expression.sql()
@@ -1466,6 +1506,7 @@ final class SqlDialectTranslator {
         tokens = new Lexer(expression).tokenize();
         rejectScripts();
         collectCteNames();
+        typeDecimalLiterals();
         rewriteTypedArrayLiterals();
         rewriteArraySubscripts();
         rewriteSelectAsStruct();
@@ -1593,6 +1634,40 @@ final class SqlDialectTranslator {
             statements.add(current.toString().trim());
         }
         return statements;
+    }
+
+    /** Whether each parameter of a CREATE TEMP FUNCTION statement is declared NUMERIC or BIGNUMERIC. */
+    private static List<Boolean> numericParameterPositions(String sql) {
+        List<Token> tokens = new Lexer(sql).tokenize();
+        int function = -1;
+        for (int i = 0; i < tokens.size() && function < 0; i++) {
+            if (tokens.get(i).isKeyword("FUNCTION")) {
+                function = i;
+            }
+        }
+        int open = -1;
+        for (int i = function + 1; function >= 0 && i < tokens.size() && open < 0; i++) {
+            if (tokens.get(i).isPunct("(")) {
+                open = i;
+            }
+        }
+        int close = -1;
+        int depth = 0;
+        for (int i = open; open >= 0 && i < tokens.size() && close < 0; i++) {
+            if (tokens.get(i).isPunct("(")) {
+                depth++;
+            } else if (tokens.get(i).isPunct(")") && --depth == 0) {
+                close = i;
+            }
+        }
+        if (close < 0) {
+            return List.of();
+        }
+        List<Boolean> numeric = new ArrayList<>();
+        for (List<Token> argument : splitArguments(tokens, open + 1, close)) {
+            numeric.add(argument.size() >= 2 && NUMERIC_TYPE_NAMES.contains(argument.get(1).upper()));
+        }
+        return numeric;
     }
 
     static List<List<Token>> splitArguments(List<Token> tokens, int from, int to) {
@@ -2992,6 +3067,7 @@ final class SqlDialectTranslator {
         bindPositionalParameters();
         collectCteNames();
         coerceLowercaseTemporalParameters();
+        typeDecimalLiterals();
         rewriteTypedArrayLiterals();
         rewriteTypedStructConstructors();
         rewriteArraySubscripts();
@@ -4024,6 +4100,7 @@ final class SqlDialectTranslator {
         queryResult = true;
         collectCteNames();
         coerceLowercaseTemporalParameters();
+        typeDecimalLiterals();
         topLevelOutputNames = topLevelOutputNames();
         duplicateOutputNames = duplicateNames(topLevelOutputNames);
         validateSelectNameAmbiguity();
@@ -10598,6 +10675,729 @@ final class SqlDialectTranslator {
             "DATETIME_ADD", "DATETIME_SUB", "DATETIME_TRUNC", "DATE_ADD", "DATE_SUB", "DATE_TRUNC", "PARSE_TIMESTAMP",
             "PARSE_DATETIME", "PARSE_DATE", "TIMESTAMP_SECONDS", "TIMESTAMP_MILLIS", "TIMESTAMP_MICROS");
 
+    private static final Set<String> NUMERIC_TYPE_NAMES = Set.of("NUMERIC", "BIGNUMERIC", "DECIMAL", "BIGDECIMAL");
+    private static final Set<String> NUMERIC_KEEPING_FUNCTIONS = Set.of("SUM", "AVG", "MIN", "MAX", "ANY_VALUE", "ABS",
+            "ROUND", "TRUNC", "CEIL", "CEILING", "FLOOR");
+    private static final Set<String> COMMON_TYPE_FUNCTIONS = Set.of("COALESCE", "IFNULL", "IF", "GREATEST", "LEAST",
+            "NULLIF");
+    private static final Set<String> MULTIPLICATIVE = Set.of("*", "/");
+    private static final Set<String> ADDITIVE = Set.of("+", "-");
+
+    /**
+     * BigQuery types a decimal literal ({@code 0.5}, {@code 1.5e2}) FLOAT64, where DuckDB reads it as a DECIMAL,
+     * but it coerces such a literal to NUMERIC where it meets a NUMERIC value: {@code CAST(1 AS NUMERIC) + 0.5} and
+     * {@code COALESCE(n, 0.5)} are NUMERIC, {@code 2 * 0.5} and {@code STRUCT(x + 0.5)} are FLOAT64. Each chain is
+     * evaluated as BigQuery evaluates it, products before sums and each left to right, so a literal is NUMERIC only
+     * where the value it meets at that point is: {@code 0.1 + 0.2 + n} is FLOAT64, {@code 0.5 + n + 0.25} NUMERIC. A
+     * literal alone on its side takes NUMERIC from the other side of a comparison, an {@code IN} list or
+     * {@code BETWEEN}, or another value of a {@code COALESCE}-like call, an array literal or {@code CASE} results;
+     * parentheses that only group it are looked through. Visibly NUMERIC means a NUMERIC or BIGNUMERIC column, cast,
+     * typed literal, query or temporary function parameter, or SUM, AVG, MIN, MAX, ABS, ROUND, TRUNC, CEIL or FLOOR of
+     * one. A bare value of INSERT ... VALUES or of an UPDATE or MERGE SET keeps its DECIMAL, so DuckDB casts it to the
+     * column exactly, as does a {@code TABLESAMPLE} percentage.
+     */
+    private void typeDecimalLiterals() {
+        for (int i = 0; i < tokens.size(); i++) {
+            Token token = tokens.get(i);
+            String text = token.kind == Kind.NUMBER ? token.text.toLowerCase(Locale.ROOT) : "";
+            if ((text.contains(".") || text.contains("e")) && !keepsDecimal(i)) {
+                floatLiterals.add(token);
+            }
+        }
+    }
+
+    private boolean keepsDecimal(int literal) {
+        int next = nextSignificant(literal + 1, tokens.size());
+        if (next >= 0 && tokens.get(next).isKeyword("PERCENT") || assignedValue(signedStart(literal), literal)) {
+            return true;
+        }
+        int[] group = literalGroup(literal);
+        if (group[0] != literal && assignedValue(group[0], group[1])) {
+            return true;
+        }
+        List<int[]> operands = new ArrayList<>();
+        List<String> operators = new ArrayList<>();
+        operandChain(group[0], group[1], operands, operators);
+        Map<Integer, Boolean> decisions = new HashMap<>();
+        List<Typed> sides = chainSides(operands, operators, decisions);
+        if (sides.size() > 1) {
+            for (int s = 0; s < sides.size(); s++) {
+                if (sides.get(s).type() == DecimalType.LITERAL) {
+                    boolean numeric = false;
+                    for (int o = 0; o < sides.size(); o++) {
+                        numeric |= o != s && sides.get(o).type() == DecimalType.NUMERIC;
+                    }
+                    decisions.put(sides.get(s).literal(), numeric);
+                }
+            }
+        } else if (sides.getFirst().type() == DecimalType.LITERAL) {
+            decisions.put(sides.getFirst().literal(), siblingNumeric(group[0], group[1])
+                    || comparedNumeric(group[0], group[1]) || numericTarget(group[0], group[1]));
+        }
+        return decisions.getOrDefault(literal, false);
+    }
+
+    /** What an operand or a partial result is to a decimal literal: NUMERIC, FLOAT64, anything else, or a literal. */
+    private enum DecimalType { NUMERIC, FLOAT, OTHER, LITERAL }
+
+    /** A {@link DecimalType}, with the token of the decimal literal when it is one whose type is still open. */
+    private record Typed(DecimalType type, int literal) {
+        static final Typed NUMERIC = new Typed(DecimalType.NUMERIC, -1);
+        static final Typed FLOAT = new Typed(DecimalType.FLOAT, -1);
+        static final Typed OTHER = new Typed(DecimalType.OTHER, -1);
+    }
+
+    /** The decimal literal at {@code literal}, widened over a sign and the parentheses that only group it. */
+    private int[] literalGroup(int literal) {
+        int start = signedStart(literal);
+        int end = literal;
+        while (true) {
+            int open = significantBefore(start);
+            int close = nextSignificant(end + 1, tokens.size());
+            int name = open < 0 ? -1 : significantBefore(open);
+            if (open < 0 || close < 0 || !tokens.get(open).isPunct("(") || matchingParen(open) != close
+                    || !groupingParenthesis(open) || name >= 0 && (tokens.get(name).isKeyword("IN")
+                    || tokens.get(name).isKeyword("VALUES")) || typeAngleOpen(name) >= 0) {
+                return new int[] {start, end};
+            }
+            start = signedStart(open);
+            end = close;
+        }
+    }
+
+    /**
+     * Types the chain's comparison sides, each a sum of products evaluated left to right as BigQuery does, and
+     * records in {@code decisions} which decimal literals meet a NUMERIC value on the way.
+     */
+    private List<Typed> chainSides(List<int[]> operands, List<String> operators, Map<Integer, Boolean> decisions) {
+        List<Typed> sides = new ArrayList<>();
+        int from = 0;
+        for (int k = 0; k <= operators.size(); k++) {
+            if (k == operators.size() || COMPARISON_OPERATORS.contains(operators.get(k))) {
+                List<Typed> terms = new ArrayList<>();
+                int termStart = from;
+                for (int f = from; f <= k; f++) {
+                    if (f == k || ADDITIVE.contains(operators.get(f))) {
+                        List<Typed> factors = new ArrayList<>();
+                        for (int g = termStart; g <= f; g++) {
+                            factors.add(operandType(operands.get(g)[0], operands.get(g)[1]));
+                        }
+                        terms.add(sequenceType(factors, decisions));
+                        termStart = f + 1;
+                    }
+                }
+                sides.add(sequenceType(terms, decisions));
+                from = k + 1;
+            }
+        }
+        return sides;
+    }
+
+    /**
+     * Folds operands joined by operators of one precedence, left to right: a decimal literal is NUMERIC only where the
+     * value it meets so far is, so {@code 0.1 + 0.2 + n} is FLOAT64 and {@code 0.5 + n + 0.25} NUMERIC.
+     */
+    private static Typed sequenceType(List<Typed> items, Map<Integer, Boolean> decisions) {
+        Typed result = items.getFirst();
+        for (int k = 1; k < items.size(); k++) {
+            Typed next = items.get(k);
+            boolean nextLiteral = next.type() == DecimalType.LITERAL;
+            result = switch (result.type()) {
+                case LITERAL -> {
+                    boolean numeric = next.type() == DecimalType.NUMERIC;
+                    decisions.put(result.literal(), numeric);
+                    if (nextLiteral) {
+                        decisions.put(next.literal(), false);
+                    }
+                    yield numeric ? Typed.NUMERIC : Typed.FLOAT;
+                }
+                case NUMERIC -> {
+                    if (nextLiteral) {
+                        decisions.put(next.literal(), true);
+                    }
+                    yield next.type() == DecimalType.FLOAT ? Typed.FLOAT : Typed.NUMERIC;
+                }
+                case FLOAT -> {
+                    if (nextLiteral) {
+                        decisions.put(next.literal(), false);
+                    }
+                    yield Typed.FLOAT;
+                }
+                case OTHER -> {
+                    if (nextLiteral) {
+                        decisions.put(next.literal(), false);
+                    }
+                    yield nextLiteral ? Typed.FLOAT : next.type() == DecimalType.OTHER ? Typed.OTHER
+                            : next.type() == DecimalType.NUMERIC ? Typed.NUMERIC : Typed.FLOAT;
+                }
+            };
+        }
+        return result;
+    }
+
+    /** The type of one operand: a decimal literal (signed or grouped), NUMERIC, FLOAT64 from a group, or other. */
+    private Typed operandType(int start, int end) {
+        int first = start;
+        if (tokens.get(first).isPunct("-") || tokens.get(first).isPunct("+")) {
+            first = nextSignificant(first + 1, end + 1);
+            if (first < 0) {
+                return Typed.OTHER;
+            }
+        }
+        Token token = tokens.get(first);
+        if (first == end && token.kind == Kind.NUMBER) {
+            String text = token.text.toLowerCase(Locale.ROOT);
+            return text.contains(".") || text.contains("e") ? new Typed(DecimalType.LITERAL, first) : Typed.OTHER;
+        }
+        if (token.isPunct("(") && matchingParen(first) == end && groupingParenthesis(first)) {
+            return valueType(first + 1, end);
+        }
+        return visiblyNumeric(start, end) ? Typed.NUMERIC : Typed.OTHER;
+    }
+
+    /**
+     * Collects the operands and operators of the arithmetic or comparison chain around the operand from
+     * {@code start} to {@code end}, left to right. A unary sign belongs to its operand.
+     */
+    private void operandChain(int start, int end, List<int[]> operands, List<String> operators) {
+        operands.add(new int[] {start, end});
+        while (true) {
+            int op = significantBefore(operands.getFirst()[0]);
+            if (op < 0 || !chainOperator(op)) {
+                break;
+            }
+            int last = significantBefore(op);
+            if (last < 0 || !endsOperand(last)) {
+                break;
+            }
+            int begin = operandStart(last);
+            if (begin < 0) {
+                break;
+            }
+            operands.addFirst(new int[] {signedStart(begin), last});
+            operators.addFirst(tokens.get(op).text);
+        }
+        while (true) {
+            int op = nextSignificant(operands.getLast()[1] + 1, tokens.size());
+            if (op < 0 || !chainOperator(op)) {
+                break;
+            }
+            int begin = nextSignificant(op + 1, tokens.size());
+            int sign = begin;
+            if (begin >= 0 && (tokens.get(begin).isPunct("-") || tokens.get(begin).isPunct("+"))) {
+                begin = nextSignificant(begin + 1, tokens.size());
+            }
+            if (begin < 0) {
+                break;
+            }
+            int last = tokens.get(begin).isPunct("(") ? matchingParen(begin) : operandEnd(begin);
+            if (last < begin) {
+                break;
+            }
+            operands.add(new int[] {sign, last});
+            operators.add(tokens.get(op).text);
+        }
+    }
+
+    /**
+     * Whether the value an {@code IN} list or a {@code BETWEEN} bound is compared with is NUMERIC, for a literal that
+     * is a whole list element or bound, or whether a list element or bound is, for a literal that is the value.
+     */
+    private boolean comparedNumeric(int start, int end) {
+        int left = significantBefore(start);
+        int right = nextSignificant(end + 1, tokens.size());
+        if (left >= 0 && (tokens.get(left).isPunct("(") || tokens.get(left).isPunct(","))) {
+            int open = tokens.get(left).isPunct("(") ? left : openerBefore(left);
+            int in = open < 0 ? -1 : significantBefore(open);
+            if (in >= 0 && tokens.get(in).isKeyword("IN")) {
+                return comparedValueNumeric(in);
+            }
+        }
+        if (left >= 0 && tokens.get(left).isKeyword("BETWEEN")) {
+            int and = betweenAnd(left);
+            return comparedValueNumeric(left) || and >= 0 && boundNumeric(and);
+        }
+        if (left >= 0 && tokens.get(left).isKeyword("AND")) {
+            int between = andBetween(left);
+            if (between >= 0) {
+                return comparedValueNumeric(between) || valueNumeric(between + 1, left);
+            }
+        }
+        if (right >= 0 && tokens.get(right).isKeyword("NOT")) {
+            right = nextSignificant(right + 1, tokens.size());
+        }
+        if (right >= 0 && tokens.get(right).isKeyword("IN")) {
+            int open = nextSignificant(right + 1, tokens.size());
+            if (open < 0 || !tokens.get(open).isPunct("(") || isQuery(open + 1, matchingParen(open))) {
+                return false;
+            }
+            for (int[] value : argumentRanges(open, matchingParen(open))) {
+                if (valueNumeric(value[0], value[1])) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if (right >= 0 && tokens.get(right).isKeyword("BETWEEN")) {
+            int and = betweenAnd(right);
+            return and >= 0 && (valueNumeric(right + 1, and) || boundNumeric(and));
+        }
+        return false;
+    }
+
+    /**
+     * The {@code <} of the {@code STRUCT<...>} or {@code ARRAY<...>} type whose closing {@code >} is at {@code close},
+     * or -1 when that token closes no such type (a comparison, for one).
+     */
+    private int typeAngleOpen(int close) {
+        if (close < 0 || !tokens.get(close).isPunct(">")) {
+            return -1;
+        }
+        int nesting = 0;
+        for (int i = close - 1; i >= 0; i--) {
+            if (tokens.get(i).isPunct(">")) {
+                nesting++;
+            } else if (tokens.get(i).isPunct("<")) {
+                if (nesting == 0) {
+                    int keyword = significantBefore(i);
+                    return keyword >= 0 && (tokens.get(keyword).isKeyword("STRUCT")
+                            || tokens.get(keyword).isKeyword("ARRAY")) ? i : -1;
+                }
+                nesting--;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * Whether the operand is the whole value of a NUMERIC or BIGNUMERIC target, which BigQuery coerces a literal to
+     * directly: {@code CAST(... AS NUMERIC)}, an element of {@code ARRAY<NUMERIC>[...]} or a field of
+     * {@code STRUCT<n NUMERIC>(...)}.
+     */
+    private boolean numericTarget(int start, int end) {
+        int left = significantBefore(start);
+        int right = nextSignificant(end + 1, tokens.size());
+        if (left < 0 || right < 0) {
+            return false;
+        }
+        if (tokens.get(left).isPunct("(") && tokens.get(right).isKeyword("AS")) {
+            int name = significantBefore(left);
+            int type = nextSignificant(right + 1, tokens.size());
+            return name >= 0 && (tokens.get(name).isKeyword("CAST") || tokens.get(name).isKeyword("SAFE_CAST"))
+                    && type >= 0 && NUMERIC_TYPE_NAMES.contains(tokens.get(type).upper());
+        }
+        Token l = tokens.get(left);
+        Token r = tokens.get(right);
+        boolean element = (l.isPunct("(") || l.isPunct(",") || l.isPunct("["))
+                && (r.isPunct(")") || r.isPunct(",") || r.isPunct("]"));
+        if (!element) {
+            return false;
+        }
+        int open = l.isPunct(",") ? openerBefore(left) : left;
+        int function = open < 0 || !tokens.get(open).isPunct("(") ? -1 : significantBefore(open);
+        List<Boolean> numericArguments = function < 0 || tokens.get(function).kind != Kind.IDENT ? null
+                : numericFunctionParameters.get(tokens.get(function).identifierText().toLowerCase(Locale.ROOT));
+        if (numericArguments != null) {
+            List<int[]> args = argumentRanges(open, matchingParen(open));
+            for (int k = 0; k < args.size() && k < numericArguments.size(); k++) {
+                if (args.get(k)[0] <= start && start < args.get(k)[1]) {
+                    return numericArguments.get(k);
+                }
+            }
+            return false;
+        }
+        int typeClose = open < 0 ? -1 : significantBefore(open);
+        int typeOpen = typeAngleOpen(typeClose);
+        if (typeOpen < 0) {
+            return false;
+        }
+        int keyword = significantBefore(typeOpen);
+        List<List<Integer>> fields = new ArrayList<>(List.of(new ArrayList<>()));
+        int nesting = 0;
+        for (int i = typeOpen + 1; i < typeClose; i++) {
+            Token token = tokens.get(i);
+            if (token.isPunct("<") || token.isPunct("(")) {
+                nesting++;
+            } else if (token.isPunct(">") || token.isPunct(")")) {
+                nesting--;
+            } else if (nesting == 0 && token.isPunct(",")) {
+                fields.add(new ArrayList<>());
+            } else if (nesting == 0 && token.kind == Kind.IDENT) {
+                fields.getLast().add(i);
+            }
+        }
+        int field;
+        if (tokens.get(keyword).isKeyword("ARRAY") && tokens.get(open).isPunct("[")) {
+            field = 0;
+        } else if (tokens.get(keyword).isKeyword("STRUCT") && tokens.get(open).isPunct("(")) {
+            List<int[]> args = argumentRanges(open, matchingParen(open));
+            field = -1;
+            for (int k = 0; k < args.size(); k++) {
+                if (args.get(k)[0] <= start && start < args.get(k)[1]) {
+                    field = k;
+                }
+            }
+        } else {
+            return false;
+        }
+        return field >= 0 && field < fields.size() && !fields.get(field).isEmpty()
+                && NUMERIC_TYPE_NAMES.contains(tokens.get(fields.get(field).getLast()).upper());
+    }
+
+    /** Whether the operand before the {@code IN} or {@code BETWEEN} at {@code keyword}, past a NOT, is NUMERIC. */
+    private boolean comparedValueNumeric(int keyword) {
+        int last = significantBefore(keyword);
+        if (last >= 0 && tokens.get(last).isKeyword("NOT")) {
+            last = significantBefore(last);
+        }
+        int first = last < 0 ? -1 : operandStart(last);
+        return first >= 0 && visiblyNumeric(signedStart(first), last);
+    }
+
+    /** Whether the upper bound after the {@code AND} of a {@code BETWEEN} is NUMERIC. */
+    private boolean boundNumeric(int and) {
+        int first = nextSignificant(and + 1, tokens.size());
+        int value = first >= 0 && (tokens.get(first).isPunct("-") || tokens.get(first).isPunct("+"))
+                ? nextSignificant(first + 1, tokens.size()) : first;
+        int last = value < 0 ? -1 : tokens.get(value).isPunct("(") ? matchingParen(value) : operandEnd(value);
+        return last >= 0 && valueNumeric(first, last + 1);
+    }
+
+    /** The {@code AND} that closes the {@code BETWEEN} at {@code between}, or -1. */
+    private int betweenAnd(int between) {
+        int depth = parenthesisDepth(between);
+        for (int i = between + 1; i < tokens.size(); i++) {
+            if (parenthesisDepth(i) < depth) {
+                return -1;
+            }
+            if (parenthesisDepth(i) == depth && tokens.get(i).isKeyword("AND")) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /** The {@code BETWEEN} the {@code AND} at {@code and} closes, or -1 when it is a logical AND. */
+    private int andBetween(int and) {
+        int depth = parenthesisDepth(and);
+        for (int i = and - 1; i >= 0; i--) {
+            if (parenthesisDepth(i) != depth) {
+                if (parenthesisDepth(i) < depth) {
+                    return -1;
+                }
+                continue;
+            }
+            Token token = tokens.get(i);
+            if (token.isKeyword("BETWEEN")) {
+                return i;
+            }
+            if (token.isPunct(",") || token.isKeyword("AND") || token.isKeyword("OR") || token.isKeyword("WHERE")
+                    || token.isKeyword("ON") || token.isKeyword("WHEN") || token.isKeyword("THEN")
+                    || token.isKeyword("SELECT") || token.isKeyword("HAVING")) {
+                return -1;
+            }
+        }
+        return -1;
+    }
+
+    private boolean chainOperator(int index) {
+        Token token = tokens.get(index);
+        return token.kind == Kind.PUNCT && (MULTIPLICATIVE.contains(token.text) || ADDITIVE.contains(token.text)
+                || COMPARISON_OPERATORS.contains(token.text));
+    }
+
+    /** Whether the token at {@code end} can close an operand, so that a sign after it is binary. */
+    private boolean endsOperand(int end) {
+        Token token = tokens.get(end);
+        return token.kind == Kind.NUMBER || token.kind == Kind.STRING || token.kind == Kind.NAMED_PARAM
+                || token.kind == Kind.POSITIONAL_PARAM || token.kind == Kind.QIDENT || token.isPunct(")")
+                || token.isPunct("]") || token.kind == Kind.IDENT && !NON_ALIAS_KEYWORDS.contains(token.upper());
+    }
+
+    /** The start of the operand at {@code start}, taking in a unary sign before it. */
+    private int signedStart(int start) {
+        int sign = significantBefore(start);
+        if (sign >= 0 && (tokens.get(sign).isPunct("-") || tokens.get(sign).isPunct("+"))) {
+            int before = significantBefore(sign);
+            if (before < 0 || !endsOperand(before)) {
+                return sign;
+            }
+        }
+        return start;
+    }
+
+    /** Whether another argument of the call, array literal or CASE around the operand is NUMERIC. */
+    private boolean siblingNumeric(int start, int end) {
+        int left = significantBefore(start);
+        int right = nextSignificant(end + 1, tokens.size());
+        if (left < 0 || right < 0) {
+            return false;
+        }
+        Token l = tokens.get(left);
+        if (l.isKeyword("THEN") || l.isKeyword("ELSE")) {
+            return caseResultNumeric(left);
+        }
+        Token r = tokens.get(right);
+        if (!(l.isPunct("(") || l.isPunct(",") || l.isPunct("["))
+                || !(r.isPunct(")") || r.isPunct(",") || r.isPunct("]"))) {
+            return false;
+        }
+        int open = l.isPunct(",") ? openerBefore(left) : left;
+        if (open < 0) {
+            return false;
+        }
+        boolean array = tokens.get(open).isPunct("[");
+        int name = significantBefore(open);
+        if (!array && (name < 0 || !COMMON_TYPE_FUNCTIONS.contains(tokens.get(name).upper()))) {
+            return false;
+        }
+        int close = array ? matchingBracket(open) : matchingParen(open);
+        List<int[]> args = argumentRanges(open, close);
+        boolean conditional = !array && tokens.get(name).isKeyword("IF");
+        for (int k = conditional ? 1 : 0; k < args.size(); k++) {
+            int[] arg = args.get(k);
+            if ((arg[1] <= start || arg[0] > end) && valueNumeric(arg[0], arg[1])) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** The unmatched ( or [ before {@code index}. */
+    private int openerBefore(int index) {
+        int depth = 0;
+        for (int i = index - 1; i >= 0; i--) {
+            Token token = tokens.get(i);
+            if (token.isPunct(")") || token.isPunct("]")) {
+                depth++;
+            } else if (token.isPunct("(") || token.isPunct("[")) {
+                if (depth == 0) {
+                    return i;
+                }
+                depth--;
+            }
+        }
+        return -1;
+    }
+
+    /** Whether a THEN or ELSE result of the CASE around {@code keyword}, other than the one after it, is NUMERIC. */
+    private boolean caseResultNumeric(int keyword) {
+        int depth = parenthesisDepth(keyword);
+        int caseStart = -1;
+        int nesting = 0;
+        for (int i = keyword - 1; i >= 0; i--) {
+            if (parenthesisDepth(i) != depth) {
+                continue;
+            }
+            if (tokens.get(i).isKeyword("END")) {
+                nesting++;
+            } else if (tokens.get(i).isKeyword("CASE")) {
+                if (nesting == 0) {
+                    caseStart = i;
+                    break;
+                }
+                nesting--;
+            }
+        }
+        if (caseStart < 0) {
+            return false;
+        }
+        int own = nextSignificant(keyword + 1, tokens.size());
+        nesting = 0;
+        int resultStart = -1;
+        for (int i = caseStart + 1; i < tokens.size(); i++) {
+            if (parenthesisDepth(i) != depth) {
+                continue;
+            }
+            Token token = tokens.get(i);
+            if (nesting == 0 && resultStart >= 0
+                    && (token.isKeyword("WHEN") || token.isKeyword("ELSE") || token.isKeyword("END"))) {
+                if (resultStart != own && valueNumeric(resultStart, i)) {
+                    return true;
+                }
+                resultStart = -1;
+            }
+            if (nesting == 0 && (token.isKeyword("THEN") || token.isKeyword("ELSE"))) {
+                resultStart = nextSignificant(i + 1, tokens.size());
+            }
+            if (token.isKeyword("CASE")) {
+                nesting++;
+            } else if (token.isKeyword("END")) {
+                if (nesting == 0) {
+                    break;
+                }
+                nesting--;
+            }
+        }
+        return false;
+    }
+
+    /** Whether the value from {@code start} to before {@code end} is NUMERIC, evaluated as BigQuery does. */
+    private boolean valueNumeric(int start, int end) {
+        return valueType(start, end).type() == DecimalType.NUMERIC;
+    }
+
+    /** The type of the value from {@code start} to before {@code end}; a comparison or anything unparsed is other. */
+    private Typed valueType(int start, int end) {
+        List<int[]> operands = new ArrayList<>();
+        List<String> operators = new ArrayList<>();
+        int at = nextSignificant(start, end);
+        while (at >= 0 && at < end) {
+            int operandFirst = at;
+            if (tokens.get(at).isPunct("-") || tokens.get(at).isPunct("+")) {
+                at = nextSignificant(at + 1, end);
+                if (at < 0) {
+                    return Typed.OTHER;
+                }
+            }
+            int operandLast = tokens.get(at).isPunct("(") ? matchingParen(at) : operandEnd(at);
+            if (operandLast < at || operandLast >= end) {
+                return Typed.OTHER;
+            }
+            operands.add(new int[] {operandFirst, operandLast});
+            int op = nextSignificant(operandLast + 1, end);
+            if (op < 0) {
+                break;
+            }
+            if (!chainOperator(op)) {
+                return Typed.OTHER;
+            }
+            operators.add(tokens.get(op).text);
+            at = nextSignificant(op + 1, end);
+        }
+        if (operands.isEmpty() || operators.size() >= operands.size()) {
+            return Typed.OTHER;
+        }
+        List<Typed> sides = chainSides(operands, operators, new HashMap<>());
+        return sides.size() == 1 ? sides.getFirst() : Typed.OTHER;
+    }
+
+    /** Whether the operand from {@code start} to {@code end} is visibly NUMERIC or BIGNUMERIC. */
+    private boolean visiblyNumeric(int start, int end) {
+        if (tokens.get(start).isPunct("-") || tokens.get(start).isPunct("+")) {
+            start = nextSignificant(start + 1, end + 1);
+            if (start < 0) {
+                return false;
+            }
+        }
+        Token first = tokens.get(start);
+        if (first.isPunct("(") && matchingParen(start) == end) {
+            return valueNumeric(start + 1, end);
+        }
+        if (first.kind == Kind.NAMED_PARAM) {
+            return start == end && numericParameter(parameters.named(first.value));
+        }
+        if (first.kind == Kind.POSITIONAL_PARAM) {
+            return start == end && numericParameter(first.value);
+        }
+        if (first.kind == Kind.IDENT && NUMERIC_TYPE_NAMES.contains(first.upper())
+                && tokens.get(end).kind == Kind.STRING) {
+            return true;
+        }
+        if (first.kind == Kind.STRING && start == end) {
+            // The value of a typed literal (NUMERIC '1'), when the chain took the string alone.
+            int type = significantBefore(start);
+            return type >= 0 && tokens.get(type).kind == Kind.IDENT
+                    && NUMERIC_TYPE_NAMES.contains(tokens.get(type).upper());
+        }
+        if (tokens.get(end).isPunct(")") && first.kind == Kind.IDENT) {
+            int open = nextSignificant(start + 1, end);
+            if (open < 0 || !tokens.get(open).isPunct("(")) {
+                return false;
+            }
+            if (first.isKeyword("CAST") || first.isKeyword("SAFE_CAST")) {
+                int depth = parenthesisDepth(open) + 1;
+                for (int i = open + 1; i < end; i++) {
+                    if (parenthesisDepth(i) == depth && tokens.get(i).isKeyword("AS")) {
+                        int type = nextSignificant(i + 1, end);
+                        return type >= 0 && NUMERIC_TYPE_NAMES.contains(tokens.get(type).upper());
+                    }
+                }
+                return false;
+            }
+            if (NUMERIC_KEEPING_FUNCTIONS.contains(first.upper())) {
+                List<int[]> args = argumentRanges(open, end);
+                return !args.isEmpty() && valueNumeric(args.getFirst()[0], args.getFirst()[1]);
+            }
+            return false;
+        }
+        List<String> path = new ArrayList<>();
+        for (int i = start; i <= end; i++) {
+            Token token = tokens.get(i);
+            if (token.kind == Kind.IDENT || token.kind == Kind.QIDENT) {
+                path.add(token.identifierText());
+            } else if (!token.isPunct(".") && token.kind != Kind.SPACE) {
+                return false;
+            }
+        }
+        if (path.isEmpty()) {
+            return false;
+        }
+        int select = containingSelect(start);
+        TableFieldSchema field = select < 0 ? dmlColumnField(path) : sourceColumnField(select, path);
+        if (field == null && path.size() == 1
+                && numericUdfParameters.contains(path.getFirst().toLowerCase(Locale.ROOT))) {
+            // A source column of the same name takes precedence over the parameter, as it does when bound.
+            return true;
+        }
+        return field != null && !"REPEATED".equals(field.getMode()) && field.getType() != null
+                && Set.of("NUMERIC", "BIGNUMERIC").contains(field.getType());
+    }
+
+    private static boolean numericParameter(String rendered) {
+        return rendered != null && (rendered.contains(" AS DECIMAL") || rendered.contains(" AS NUMERIC"));
+    }
+
+    /**
+     * Whether the literal from {@code start} to {@code end}, with its sign and any grouping parentheses, is a whole
+     * value of INSERT ... VALUES or of an UPDATE or MERGE SET, which DuckDB casts to the target column.
+     */
+    private boolean assignedValue(int start, int end) {
+        int verb = nextSignificant(0, tokens.size());
+        if (verb < 0 || !(tokens.get(verb).isKeyword("INSERT") || tokens.get(verb).isKeyword("UPDATE")
+                || tokens.get(verb).isKeyword("MERGE"))) {
+            return false;
+        }
+        int left = significantBefore(start);
+        int right = nextSignificant(end + 1, tokens.size());
+        if (left < 0) {
+            return false;
+        }
+        boolean closes = right < 0 || tokens.get(right).isPunct(",") || tokens.get(right).isPunct(")")
+                || tokens.get(right).isKeyword("WHERE") || tokens.get(right).isKeyword("WHEN")
+                || tokens.get(right).isKeyword("FROM");
+        if (!closes) {
+            return false;
+        }
+        if (tokens.get(left).isPunct("=")) {
+            int column = significantBefore(left);
+            int before = column < 0 ? -1 : significantBefore(operandStart(column));
+            return before >= 0 && (tokens.get(before).isKeyword("SET") || tokens.get(before).isPunct(","));
+        }
+        if (!tokens.get(left).isPunct("(") && !tokens.get(left).isPunct(",")) {
+            return false;
+        }
+        int open = tokens.get(left).isPunct("(") ? left : openerBefore(left);
+        while (open >= 0) {
+            int before = significantBefore(open);
+            if (before < 0) {
+                return false;
+            }
+            if (tokens.get(before).isKeyword("VALUES")) {
+                return true;
+            }
+            if (!tokens.get(before).isPunct(",")) {
+                return false;
+            }
+            int previous = significantBefore(before);
+            if (previous < 0 || !tokens.get(previous).isPunct(")")) {
+                return false;
+            }
+            open = openingFor(previous, "(", ")");
+        }
+        return false;
+    }
+
     /**
      * The type of an operand that is temporal as written but whose type cannot be told from the text:
      * {@code DATE_TRUNC} returns a DATE, DATETIME or TIMESTAMP, the type of its argument.
@@ -13336,7 +14136,7 @@ final class SqlDialectTranslator {
             }
 
             if (t.kind == Kind.NUMBER) {
-                out.append(t.text);
+                out.append(floatLiterals.contains(t) ? "CAST(" + t.text + " AS DOUBLE)" : t.text);
                 i++;
                 continue;
             }
@@ -15806,8 +16606,10 @@ final class SqlDialectTranslator {
                 if ("VARCHAR".equals(type)) {
                     if (isFloatLiteral(expression)) {
                         // BigQuery types a decimal or exponent literal as FLOAT64; DuckDB types it as DECIMAL,
-                        // where zero renders as "0.0" and negative zero loses its sign.
-                        return renderStringCast(function, "CAST(" + expr + " AS DOUBLE)");
+                        // where zero renders as "0.0" and negative zero loses its sign. A literal typeDecimalLiterals
+                        // already renders as DOUBLE needs no second cast.
+                        boolean typed = expression.stream().anyMatch(floatLiterals::contains);
+                        return renderStringCast(function, typed ? expr : "CAST(" + expr + " AS DOUBLE)");
                     }
                     if (!isDefinitelyNonFloatExpression(expression)) {
                         return renderStringCast(function, expr);

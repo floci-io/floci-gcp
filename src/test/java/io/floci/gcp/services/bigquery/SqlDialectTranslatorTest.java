@@ -1290,8 +1290,26 @@ class SqlDialectTranslatorTest {
         String translated = sql("SELECT CAST(0.0 AS STRING) AS a, CAST(-0.0 AS STRING) AS b, "
                 + "CAST(0.5 AS STRING) AS c");
         assertTrue(translated.contains("[CAST(0.0 AS DOUBLE)]"), translated);
-        assertTrue(translated.contains("[CAST(-0.0 AS DOUBLE)]"), translated);
+        assertTrue(translated.contains("[-CAST(0.0 AS DOUBLE)]"), translated);
         assertTrue(translated.contains("[CAST(0.5 AS DOUBLE)]"), translated);
+    }
+
+    @Test
+    void aDecimalLiteralRendersAsDoubleUnlessItMeetsANumeric() {
+        String bare = sql("SELECT 0.5 AS a, x * 1.5e2 AS b, -0.25 AS c FROM ds.t");
+        assertTrue(bare.contains("CAST(0.5 AS DOUBLE) AS a"), bare);
+        assertTrue(bare.contains("x * CAST(1.5e2 AS DOUBLE)"), bare);
+        assertTrue(bare.contains("-CAST(0.25 AS DOUBLE)"), bare);
+        String numeric = sql("SELECT CAST(x AS NUMERIC) + 0.5 AS a, COALESCE(CAST(x AS NUMERIC), 0.25) AS b,"
+                + " NUMERIC '1' * 0.75 AS c FROM ds.t");
+        assertFalse(numeric.contains("AS DOUBLE"), numeric);
+        String precedence = sql("SELECT CAST(x AS NUMERIC) + 0.5 * 2 AS a FROM ds.t");
+        assertTrue(precedence.contains("CAST(0.5 AS DOUBLE) * 2"), precedence);
+        assertFalse(sql("SELECT * FROM ds.t TABLESAMPLE SYSTEM (10.5 PERCENT)").contains("AS DOUBLE"));
+        String typed = sql("SELECT ARRAY<NUMERIC>[9007199254740993.0] AS a, STRUCT<n NUMERIC>(9007199254740993.0) AS s,"
+                + " CAST(9007199254740993.0 AS NUMERIC) AS c FROM ds.t");
+        assertFalse(typed.contains("AS DOUBLE"), typed);
+        assertTrue(sql("SELECT 1 AS a FROM ds.t").contains("SELECT 1 AS a"));
     }
 
     @Test

@@ -434,10 +434,17 @@ class ComputeGuestScriptsTest {
         Files.writeString(fake, "#!/bin/sh\necho \"[$*]\"\n[ \"$1\" = status ] && exit 2\nexit 0\n");
         fake.toFile().setExecutable(true);
         Path stage = stage(dir, "a", "#cloud-config\n");
+        Path polled = dir.resolve("polled");
+        Path sleep = bin.resolve("sleep");
+        Files.writeString(sleep, "#!/bin/sh\ntouch '" + polled + "'\nexec /bin/sleep \"$@\"\n");
+        sleep.toFile().setExecutable(true);
         Thread done = new Thread(() -> {
             try {
                 // Lands during the script's first one-second poll, so the script still waits at least once.
-                Thread.sleep(200);
+                long deadline = System.nanoTime() + 10_000_000_000L;
+                while (!Files.exists(polled) && System.nanoTime() < deadline) {
+                    Thread.sleep(10);
+                }
                 Files.writeString(stage.resolve("early.done"), "");
             } catch (Exception e) {
                 throw new IllegalStateException(e);

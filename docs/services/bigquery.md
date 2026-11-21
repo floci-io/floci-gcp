@@ -330,7 +330,8 @@ Queries are translated to DuckDB SQL and executed on the sidecar, so most of Goo
   `COUNTIF`, `CONCAT`, `LOGICAL_AND`/`LOGICAL_OR`, `ARRAY_LENGTH`, `ARRAY_REVERSE`, `ARRAY_SLICE`,
   `ARRAY_CONCAT_AGG`,
   `GENERATE_ARRAY`, `GENERATE_DATE_ARRAY`, `GENERATE_TIMESTAMP_ARRAY`, `GENERATE_UUID`,
-  `APPROX_COUNT_DISTINCT`, `APPROX_QUANTILES`, `SPLIT`, `FORMAT`, `TO_HEX`, `MD5`, `SHA1`, `SHA256`, `TO_JSON_STRING`,
+  `APPROX_COUNT_DISTINCT`, `APPROX_QUANTILES`, `SPLIT`, `FORMAT`, `LENGTH`, `BYTE_LENGTH`,
+  `FARM_FINGERPRINT`, `TO_HEX`, `MD5`, `SHA1`, `SHA256`, `TO_JSON_STRING`,
   `JSON_VALUE`/`JSON_EXTRACT_SCALAR`,
   `JSON_QUERY`/`JSON_EXTRACT`, `REGEXP_CONTAINS`, `REGEXP_EXTRACT`, `REGEXP_EXTRACT_ALL`, `REGEXP_REPLACE`,
   `CURRENT_TIMESTAMP`/`CURRENT_DATE`/`CURRENT_DATETIME`, `UNIX_SECONDS`/`UNIX_MILLIS`/`UNIX_MICROS`/`UNIX_DATE`,
@@ -347,6 +348,30 @@ Queries are translated to DuckDB SQL and executed on the sidecar, so most of Goo
 - `CONTAINS_SUBSTR` supports scalar `STRING` inputs with NFKC-normalized, case-folded substring
   matching. Recursive `STRUCT`/`ARRAY` search and the optional JSON scope argument are not
   emulated.
+- `HLL_COUNT.INIT`, `HLL_COUNT.EXTRACT`, `HLL_COUNT.MERGE` and `HLL_COUNT.MERGE_PARTIAL`
+  exchange BigQuery's HLL++ ZetaSketch `BYTES`: `INIT` and `MERGE_PARTIAL` return a sketch, `EXTRACT`
+  and `MERGE` return the estimate. Initialization supports `INT64`, `STRING` and `BYTES`, BigQuery's
+  whole precision range of 10 to 24, and its null behavior, and produces the sketch bytes BigQuery
+  produces for the same input. `NUMERIC` and `BIGNUMERIC` initialization are not supported. The
+  three aggregating forms update the sketch as rows arrive, so the memory a query needs stays at the
+  size of the sketch instead of growing with the group.
+- `LENGTH` counts Unicode characters for `STRING` and bytes for `BYTES`. `BYTE_LENGTH` returns
+  the UTF-8 byte length of `STRING` and the byte length of `BYTES`.
+- `FARM_FINGERPRINT` accepts `STRING` and `BYTES` and returns the BigQuery-compatible signed
+  `INT64` FarmHash Fingerprint64 value.
+- `TO_JSON_STRING` preserves typed values recursively. Temporal values use BigQuery's canonical
+  forms, `NUMERIC` and `BIGNUMERIC` render as BigQuery renders them (a JSON string when the value has
+  a fractional part, a JSON number when it is integral, without trailing zeros), UUID and `HUGEINT`
+  values serialize as strings, and ordinary `STRING` values are not reinterpreted based on their
+  contents. A `NULL` value serializes as the JSON text `null`, and a `NULL` `pretty_print` makes the
+  call `NULL`; the optional `pretty_print` argument is supported.
+- `NET.IP_FROM_STRING` and `NET.SAFE_IP_FROM_STRING` parse IPv4 and IPv6 into `BYTES`.
+  `NET.IP_TRUNC` applies a prefix length and `NET.IP_TO_STRING` formats the bytes canonically.
+  A rejected address, prefix or `HLL_COUNT.INIT` precision quotes BigQuery's message
+  (`NET.IP_FROM_STRING() encountered an unparseable IP-address: nope`), behind the SQL engine's
+  `Invalid Input Error: ` class prefix.
+- `BYTES` expressions support byte-oriented `BIT_COUNT`, `REPEAT`, `CONCAT`, left shift and
+  bitwise AND, including inside temporary SQL functions.
 - `RAND` returns a uniformly distributed value in the half-open interval `[0, 1)`.
 - `ARRAY_AGG(value IGNORE NULLS ORDER BY ... LIMIT n)` preserves BigQuery's null filtering,
   aggregate ordering, and inline result limit. As in BigQuery, these aggregate modifiers are rejected
@@ -718,6 +743,9 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
   statement runs, such as a `NOT NULL` temporary column receiving a NULL, which answers
   `Constraint Error: NOT NULL constraint failed: t.id` where BigQuery answers
   `Required field id cannot be null`.
+- A function whose overload does not match the argument types names the GoogleSQL function, as
+  BigQuery does (`No matching signature for function BYTE_LENGTH Argument types: NUMERIC`), without
+  BigQuery's signature list and `at [1:col]` position.
 - Values a script needs at validation time are what a dry run cannot supply: a script dry run stops
   at the first variable or control-flow statement and after the first DDL statement, where BigQuery
   validates every statement of the script. A dry run whose script declares a temporary table reports
@@ -751,7 +779,7 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
   `FOR SYSTEM_TIME AS OF`, `GEOGRAPHY` functions, BigQuery ML, and remote functions are not
   emulated.
 - Most `SAFE.`-prefixed functions are not emulated. `SAFE_CAST`, `SAFE.FROM_HEX`, `SAFE.PARSE_DATE`,
-  and `SAFE.PARSE_TIMESTAMP` are supported explicitly.
+  `SAFE.PARSE_TIMESTAMP`, and `NET.SAFE_IP_FROM_STRING` are supported explicitly.
 - `FORMAT_TIMESTAMP` formats in UTC and ignores its time zone argument, so `%z` and `%Ez` print
   `+0000` and `+00:00`. `PARSE_DATE`, `PARSE_DATETIME` and `PARSE_TIMESTAMP` need a constant
   format (a literal or a query parameter): DuckDB's `strptime` takes no format read from a column.

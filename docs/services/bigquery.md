@@ -309,7 +309,12 @@ Queries are translated to DuckDB SQL and executed on the sidecar, so most of Goo
   wherever BigQuery resolves it (the select list, `WHERE`, `ON`, `GROUP BY` expressions, `ORDER BY`,
   `HAVING`, `QUALIFY` and a window in the select list), and a suffix generated for a duplicate is
   unrecognized unless a source column carries that name. A bare `GROUP BY` name resolves a unique
-  output alias first, while a qualified item such as `GROUP BY t.b` still names its source alias. A
+  output alias first, also when the alias renames another expression (`SELECT MOD(id, 2) AS id ...
+  GROUP BY id` groups by `MOD(id, 2)`), while a qualified item such as `GROUP BY t.b` still names its
+  source alias. Such a name still groups by the source column in a select list that also has a star,
+  in a `SELECT AS STRUCT` or `SELECT AS VALUE` query, and inside `ROLLUP`, `CUBE` or `GROUPING SETS`.
+  A `QUALIFY` window that orders by that name still reads the source column, which DuckDB refuses with
+  a `Binder Error` once the grouping is positional, where BigQuery reads the alias. A
   window in the select list reads input columns rather than sibling aliases, and a window in `ORDER BY`,
   `HAVING` or `QUALIFY` resolves a unique output alias first, as the rest of that clause does. A star's
   `EXCEPT` list drops every output written with the name across the query's sources, including columns

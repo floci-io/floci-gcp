@@ -138,11 +138,33 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
             TableFieldSchema field = column.field();
             if (column.name().equalsIgnoreCase(missing.alias()) && "RECORD".equals(field.getType())
                     && !"REPEATED".equals(field.getMode())) {
-                type = structType(field, missing.anonymousFields(), List.of());
+                field = nestedField(field, missing.parents());
+                if (field != null) {
+                    type = structType(field, missing.anonymousFields(), missing.parents());
+                }
                 break;
             }
         }
         throw SqlDialectTranslator.invalidQuery("Field name " + missing.field() + " does not exist in " + type);
+    }
+
+    /** The non-repeated STRUCT field reached from {@code field} by the field names {@code path}, or null. */
+    private static TableFieldSchema nestedField(TableFieldSchema field, List<String> path) {
+        for (String name : path) {
+            TableFieldSchema child = null;
+            List<TableFieldSchema> children = field.getFields() != null ? field.getFields() : List.of();
+            for (TableFieldSchema candidate : children) {
+                if (candidate.getName().equalsIgnoreCase(name)) {
+                    child = candidate;
+                    break;
+                }
+            }
+            if (child == null || !"RECORD".equals(child.getType()) || "REPEATED".equals(child.getMode())) {
+                return null;
+            }
+            field = child;
+        }
+        return field;
     }
 
     /**

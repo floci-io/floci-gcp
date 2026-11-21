@@ -53,6 +53,9 @@ class PubSubServiceTest {
     private IamService iamService;
     private InMemoryStorage<String, StoredSubscription> subStore;
     private MutableClock clock;
+    /** Short so retry tests run fast; the "no retry" tests wait five of these for a retry that must not come. */
+    private static final Duration PUSH_RETRY_DELAY = Duration.ofMillis(50);
+    private static final long NO_RETRY_WAIT_MS = 5 * PUSH_RETRY_DELAY.toMillis();
 
     @BeforeEach
     void setUp() {
@@ -64,7 +67,8 @@ class PubSubServiceTest {
                 subStore,
                 new InMemoryStorage<>(),
                 iamService,
-                clock);
+                clock,
+                PUSH_RETRY_DELAY);
     }
 
     @AfterEach
@@ -1358,7 +1362,7 @@ class PubSubServiceTest {
 
             service.deleteSubscription(subscription);
 
-            Thread.sleep(1500);
+            Thread.sleep(NO_RETRY_WAIT_MS);
 
             assertEquals(1, attempts.get(),
                     "Deleted subscription must not receive a scheduled retry");
@@ -1417,7 +1421,7 @@ class PubSubServiceTest {
 
             service.detachSubscription(subscription);
 
-            Thread.sleep(1500);
+            Thread.sleep(NO_RETRY_WAIT_MS);
 
             assertEquals(1, attempts.get(),
                     "Detached subscription must not receive a scheduled retry");
@@ -1546,7 +1550,10 @@ class PubSubServiceTest {
                     firstAttempt.await(5, TimeUnit.SECONDS),
                     "Timed out waiting for initial push delivery");
 
-            Thread.sleep(1500);
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (attempts.get() < 2 && System.nanoTime() < deadline) {
+                Thread.sleep(10);
+            }
 
             assertTrue(
                     attempts.get() >= 2,
@@ -1647,7 +1654,7 @@ class PubSubServiceTest {
                     false,
                     false);
 
-            Thread.sleep(1500);
+            Thread.sleep(NO_RETRY_WAIT_MS);
 
             assertEquals(1, oldAttempts.get(),
                     "Original subscription should only receive the initial attempt");

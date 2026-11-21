@@ -307,7 +307,7 @@ class PubSubSubscriberControllerTest {
                 .putAttributes("event_type", "nomatch")
                 .build()));
 
-        assertFalse(responseObserver.awaitValue(),
+        assertTrue(responseObserver.staysBelow(1),
                 "streaming pull should not deliver a message the filter excludes");
 
         service.publish(topic, List.of(PubsubMessage.newBuilder()
@@ -553,7 +553,7 @@ class PubSubSubscriberControllerTest {
                 .addModifyDeadlineSeconds(60)
                 .build());
 
-        assertFalse(responseObserver.awaitValues(2), "a lease extension must not redeliver the message");
+        assertTrue(responseObserver.staysBelow(2), "a lease extension must not redeliver the message");
         assertNull(responseObserver.error.get());
         assertTrue(service.pull(subscription, 10).isEmpty());
 
@@ -592,7 +592,7 @@ class PubSubSubscriberControllerTest {
         assertTrue(deadLetters.awaitValue(), "the dead letter should reach the dead-letter stream");
         assertEquals("5", deadLetters.values.get(0).getReceivedMessages(0).getMessage()
                 .getAttributesMap().get("CloudPubSubDeadLetterSourceDeliveryCount"));
-        assertFalse(responses.awaitValues(6), "a dead-lettered message must not come back on the source stream");
+        assertTrue(responses.staysBelow(6), "a dead-lettered message must not come back on the source stream");
         assertNull(responses.error.get());
         stream.onCompleted();
         deadLetterStream.onCompleted();
@@ -668,7 +668,7 @@ class PubSubSubscriberControllerTest {
 
         clock.advance(Duration.ofSeconds(9));
         service.expireLeases();
-        assertFalse(responseObserver.awaitValues(2), "the message must stay leased until the stream deadline");
+        assertTrue(responseObserver.staysBelow(2), "the message must stay leased until the stream deadline");
 
         clock.advance(Duration.ofSeconds(1));
         service.expireLeases();
@@ -1038,6 +1038,16 @@ class PubSubSubscriberControllerTest {
 
         private boolean awaitValue() throws InterruptedException {
             return awaitValues(1);
+        }
+
+        /**
+         * True when fewer than {@code count} responses arrived. Stream delivery runs on the thread that publishes,
+         * nacks or expires leases, so anything due has already arrived; the short window only guards against a
+         * delivery that turned asynchronous.
+         */
+        private boolean staysBelow(int count) throws InterruptedException {
+            Thread.sleep(100);
+            return values.size() < count;
         }
 
         private boolean awaitValues(int count) throws InterruptedException {

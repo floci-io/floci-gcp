@@ -20,7 +20,7 @@ floci-gcp:
   services:
     compute:
       enabled: true
-      operation-delay-ms: 50
+      operation-delay-ms: 10
       mock: true
     iam:
       enabled: true

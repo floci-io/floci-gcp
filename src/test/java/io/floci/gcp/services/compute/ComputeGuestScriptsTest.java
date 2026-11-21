@@ -436,7 +436,8 @@ class ComputeGuestScriptsTest {
         Path stage = stage(dir, "a", "#cloud-config\n");
         Thread done = new Thread(() -> {
             try {
-                Thread.sleep(1500);
+                // Lands during the script's first one-second poll, so the script still waits at least once.
+                Thread.sleep(200);
                 Files.writeString(stage.resolve("early.done"), "");
             } catch (Exception e) {
                 throw new IllegalStateException(e);

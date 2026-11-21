@@ -107,6 +107,7 @@ public class PubSubService {
     // topic's lock, so a message is either captured by them or added after them, never both and never neither.
     // It is taken before a subscription's lease lock, never inside it.
     private final ConcurrentHashMap<String, Object> topicLocks = new ConcurrentHashMap<>();
+    private static final Duration PUSH_RETRY_DELAY = Duration.ofSeconds(1);
     private final AtomicLong messageIdCounter = new AtomicLong(0);
 
     private final ServiceRegistry serviceRegistry;
@@ -118,6 +119,7 @@ public class PubSubService {
     private final ScheduledExecutorService pushRetryExecutor;
     private final ScheduledExecutorService leaseExpiryExecutor;
     private final Clock clock;
+    private final Duration pushRetryDelay;
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     @Inject
@@ -137,6 +139,7 @@ public class PubSubService {
         this.pushRetryExecutor = Executors.newScheduledThreadPool(1);
         this.leaseExpiryExecutor = Executors.newSingleThreadScheduledExecutor();
         this.clock = Clock.systemUTC();
+        this.pushRetryDelay = PUSH_RETRY_DELAY;
         this.topicStore = storageFactory.createGlobal("pubsub-topics", "pubsub-topics.json",
                 new TypeReference<Map<String, StoredTopic>>() {});
         this.subStore = storageFactory.createGlobal("pubsub-subs", "pubsub-subs.json",
@@ -157,6 +160,15 @@ public class PubSubService {
             StorageBackend<String, StoredSnapshot> snapshotStore,
             IamService iamService,
             Clock clock) {
+        this(topicStore, subStore, snapshotStore, iamService, clock, PUSH_RETRY_DELAY);
+    }
+
+    PubSubService(StorageBackend<String, StoredTopic> topicStore,
+            StorageBackend<String, StoredSubscription> subStore,
+            StorageBackend<String, StoredSnapshot> snapshotStore,
+            IamService iamService,
+            Clock clock,
+            Duration pushRetryDelay) {
         this.topicStore = topicStore;
         this.subStore = subStore;
         this.snapshotStore = snapshotStore;
@@ -168,6 +180,7 @@ public class PubSubService {
         this.pushRetryExecutor = Executors.newScheduledThreadPool(1);
         this.leaseExpiryExecutor = Executors.newSingleThreadScheduledExecutor();
         this.clock = clock;
+        this.pushRetryDelay = pushRetryDelay;
         this.serviceRegistry = null;
         this.config = null;
         this.grpcServerManager = null;
@@ -650,7 +663,7 @@ public class PubSubService {
 
             pushDeliveryExecutor.submit(
                     () -> deliverPushMessage(current.get(), message));
-        }, 1, TimeUnit.SECONDS);
+        }, pushRetryDelay.toMillis(), TimeUnit.MILLISECONDS);
     }
 
     // A mask makes "filter" itself the trigger, as in GCP. Without a mask GCP rejects the request

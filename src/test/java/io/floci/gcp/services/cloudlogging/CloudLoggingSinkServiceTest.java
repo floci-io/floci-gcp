@@ -12,6 +12,7 @@ import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.core.storage.StorageFactory;
 import io.floci.gcp.services.cloudlogging.model.StoredLogSink;
+import io.floci.gcp.testing.ThreadStates;
 import io.grpc.Status;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -25,7 +26,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
@@ -370,9 +371,9 @@ class CloudLoggingSinkServiceTest {
         try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
             Future<?> delivery = executor.submit(() -> service.exportEntries(List.of()));
             assertTrue(delivering.await(5, TimeUnit.SECONDS));
-            CountDownLatch started = new CountDownLatch(1);
+            AtomicReference<Thread> changer = new AtomicReference<>();
             Future<?> change = executor.submit(() -> {
-                started.countDown();
+                changer.set(Thread.currentThread());
                 switch (mutation) {
                     case "delete" -> service.deleteSink(NAME);
                     case "disable" -> service.updateSink(NAME, request.toBuilder().setDisabled(true).build(), mask("disabled"), true);
@@ -383,8 +384,8 @@ class CloudLoggingSinkServiceTest {
                 }
             });
             try {
-                assertTrue(started.await(5, TimeUnit.SECONDS));
-                assertThrows(TimeoutException.class, () -> change.get(100, TimeUnit.MILLISECONDS));
+                ThreadStates.awaitBlockedOrDone(changer, change);
+                assertFalse(change.isDone());
             } finally {
                 release.countDown();
             }

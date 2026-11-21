@@ -7,6 +7,7 @@ import io.floci.gcp.core.storage.PersistentStorage;
 import io.floci.gcp.services.gcs.model.GcsBucket;
 import io.floci.gcp.services.gcs.model.GcsMultipartUpload;
 import io.floci.gcp.services.gcs.model.GcsObjectMeta;
+import io.floci.gcp.testing.ThreadStates;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -18,7 +19,7 @@ import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -127,11 +128,11 @@ class GcsMultipartPersistenceTest {
         try (var executor = Executors.newFixedThreadPool(2)) {
             var initiate = executor.submit(() -> multipart.initiate("racing-bucket", "file", "text/plain", Map.of()));
             assertTrue(putting.await(5, TimeUnit.SECONDS));
-            CountDownLatch deleting = new CountDownLatch(1);
-            var deletion = executor.submit(() -> { deleting.countDown(); gcs.deleteBucket("racing-bucket"); });
+            AtomicReference<Thread> deleter = new AtomicReference<>();
+            var deletion = executor.submit(() -> { deleter.set(Thread.currentThread()); gcs.deleteBucket("racing-bucket"); });
             try {
-                assertTrue(deleting.await(5, TimeUnit.SECONDS));
-                assertThrows(TimeoutException.class, () -> deletion.get(100, TimeUnit.MILLISECONDS));
+                ThreadStates.awaitBlockedOrDone(deleter, deletion);
+                assertFalse(deletion.isDone());
             } finally { release.countDown(); }
             String id = initiate.get(5, TimeUnit.SECONDS).id;
             deletion.get(5, TimeUnit.SECONDS);

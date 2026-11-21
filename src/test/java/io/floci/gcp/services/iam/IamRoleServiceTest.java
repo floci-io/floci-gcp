@@ -8,6 +8,7 @@ import io.floci.gcp.core.common.ProjectRegistry;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.core.storage.PersistentStorage;
 import io.floci.gcp.services.iam.model.StoredRole;
+import io.floci.gcp.testing.ThreadStates;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -360,7 +361,7 @@ class IamRoleServiceTest {
                     competitor.set(Thread.currentThread());
                     return race.second().apply(racing);
                 });
-                awaitBlockedOnMonitor(competitor);
+                ThreadStates.awaitBlockedOrDone(competitor, second);
                 assertFalse(second.isDone(), race.label());
                 release.countDown();
                 first.get(5, TimeUnit.SECONDS);
@@ -385,14 +386,6 @@ class IamRoleServiceTest {
 
     private static String etag(IamRoleService service) {
         return service.get(ROLE).getEtag();
-    }
-
-    private static void awaitBlockedOnMonitor(AtomicReference<Thread> thread) throws InterruptedException {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-        while (thread.get() == null || thread.get().getState() != Thread.State.BLOCKED) {
-            assertTrue(System.nanoTime() < deadline, "competing mutation never blocked on the role monitor");
-            Thread.sleep(5);
-        }
     }
 
     private static Map<String, Object> role(String title, String permission) {

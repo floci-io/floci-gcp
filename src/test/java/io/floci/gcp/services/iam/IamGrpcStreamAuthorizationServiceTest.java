@@ -12,6 +12,7 @@ import io.floci.gcp.services.iam.authorization.IamOperation;
 import io.floci.gcp.services.iam.model.StoredPolicy;
 import io.floci.gcp.services.pubsub.PubSubIamAuthorizationAdapter;
 import io.floci.gcp.services.pubsub.PubSubService;
+import io.floci.gcp.testing.ThreadStates;
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
 import io.grpc.ServerCall;
@@ -29,12 +30,12 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -65,13 +66,12 @@ class IamGrpcStreamAuthorizationServiceTest {
             }));
             assertTrue(delivering.await(5, TimeUnit.SECONDS));
 
-            CountDownLatch revocationStarted = new CountDownLatch(1);
+            AtomicReference<Thread> revoker = new AtomicReference<>();
             Future<?> revocation = executor.submit(() -> {
-                revocationStarted.countDown();
+                revoker.set(Thread.currentThread());
                 fixture.policies().setPolicy(fixture.policyResource(), new StoredPolicy());
             });
-            assertTrue(revocationStarted.await(5, TimeUnit.SECONDS));
-            assertBlocked(revocation);
+            assertBlocked(revoker, revocation);
 
             finishDelivery.countDown();
             delivery.get(5, TimeUnit.SECONDS);
@@ -102,13 +102,12 @@ class IamGrpcStreamAuthorizationServiceTest {
                     }));
             assertTrue(revoking.await(5, TimeUnit.SECONDS));
 
-            CountDownLatch deliveryStarted = new CountDownLatch(1);
+            AtomicReference<Thread> deliverer = new AtomicReference<>();
             Future<?> delivery = executor.submit(() -> {
-                deliveryStarted.countDown();
+                deliverer.set(Thread.currentThread());
                 fixture.delivery().run(SUBSCRIPTION, pulled::incrementAndGet);
             });
-            assertTrue(deliveryStarted.await(5, TimeUnit.SECONDS));
-            assertBlocked(delivery);
+            assertBlocked(deliverer, delivery);
 
             finishRevocation.countDown();
             revocation.get(5, TimeUnit.SECONDS);
@@ -172,8 +171,9 @@ class IamGrpcStreamAuthorizationServiceTest {
         return new Fixture(policies, policyResource, delivery.get());
     }
 
-    private static void assertBlocked(Future<?> future) {
-        assertThrows(TimeoutException.class, () -> future.get(100, TimeUnit.MILLISECONDS));
+    private static void assertBlocked(AtomicReference<Thread> thread, Future<?> future) throws InterruptedException {
+        ThreadStates.awaitBlockedOrDone(thread, future);
+        assertFalse(future.isDone());
     }
 
     private static void await(CountDownLatch latch) {

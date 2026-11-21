@@ -33,6 +33,7 @@ import com.google.storage.v2.WriteObjectSpec;
 import io.floci.gcp.core.common.ProjectNumbers;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.services.gcs.model.GcsObjectMeta;
+import io.floci.gcp.testing.ThreadStates;
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import org.junit.jupiter.api.BeforeEach;
@@ -47,8 +48,8 @@ import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 import java.util.zip.CRC32C;
 
@@ -58,7 +59,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class GcsGrpcControllerTest {
@@ -780,11 +780,15 @@ class GcsGrpcControllerTest {
             assertTrue(metadataWriteStarted.await(5, TimeUnit.SECONDS));
 
             RecordingObserver<Empty> response = new RecordingObserver<>();
-            var deletion = executor.submit(() -> controller.deleteBucket(DeleteBucketRequest.newBuilder()
-                    .setName("projects/_/buckets/concurrent-delete-bucket")
-                    .build(), response));
-            assertThrows(TimeoutException.class,
-                    () -> deletion.get(100, TimeUnit.MILLISECONDS));
+            AtomicReference<Thread> deleter = new AtomicReference<>();
+            var deletion = executor.submit(() -> {
+                deleter.set(Thread.currentThread());
+                controller.deleteBucket(DeleteBucketRequest.newBuilder()
+                        .setName("projects/_/buckets/concurrent-delete-bucket")
+                        .build(), response);
+            });
+            ThreadStates.awaitBlockedOrDone(deleter, deletion);
+            assertFalse(deletion.isDone());
 
             allowMetadataWrite.countDown();
             upload.get(5, TimeUnit.SECONDS);

@@ -21,6 +21,7 @@ import io.floci.gcp.services.gcs.model.StoredAcl;
 import io.floci.gcp.services.iam.IamBucketLifecycleService;
 import io.floci.gcp.services.iam.IamBucketPolicyBootstrapService;
 import io.floci.gcp.services.iam.IamService;
+import io.floci.gcp.testing.ThreadStates;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -45,7 +46,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
@@ -156,9 +156,9 @@ class GcsServiceTest {
                     "checkpoint-race-bucket", "test-project", BASE_URL, Map.of()));
             assertTrue(checkpointStarted.await(5, TimeUnit.SECONDS));
 
-            CountDownLatch uploadStarted = new CountDownLatch(1);
+            AtomicReference<Thread> uploader = new AtomicReference<>();
             Future<GcsObjectMeta> upload = executor.submit(() -> {
-                uploadStarted.countDown();
+                uploader.set(Thread.currentThread());
                 return coordinatedService.putObject(
                         "checkpoint-race-bucket",
                         "object.txt",
@@ -167,8 +167,8 @@ class GcsServiceTest {
                         GcsCustomerEncryption.none(),
                         BASE_URL);
             });
-            assertTrue(uploadStarted.await(5, TimeUnit.SECONDS));
-            assertThrows(TimeoutException.class, () -> upload.get(100, TimeUnit.MILLISECONDS));
+            ThreadStates.awaitBlockedOrDone(uploader, upload);
+            assertFalse(upload.isDone());
 
             allowCheckpointFailure.countDown();
             ExecutionException creationFailure = assertThrows(
@@ -1418,8 +1418,13 @@ class GcsServiceTest {
                     new byte[]{2}, GcsCustomerEncryption.none(), BASE_URL));
             assertTrue(softDeleteWriteStarted.await(5, TimeUnit.SECONDS));
 
-            var deletion = executor.submit(() -> service.deleteBucket("bucket"));
-            assertThrows(TimeoutException.class, () -> deletion.get(100, TimeUnit.MILLISECONDS));
+            AtomicReference<Thread> deleter = new AtomicReference<>();
+            var deletion = executor.submit(() -> {
+                deleter.set(Thread.currentThread());
+                service.deleteBucket("bucket");
+            });
+            ThreadStates.awaitBlockedOrDone(deleter, deletion);
+            assertFalse(deletion.isDone());
 
             allowSoftDeleteWrite.countDown();
             overwrite.get(5, TimeUnit.SECONDS);
@@ -1560,9 +1565,13 @@ class GcsServiceTest {
             });
             assertTrue(softDeleteWriteStarted.await(5, TimeUnit.SECONDS));
 
-            var bucketDeletion = executor.submit(() -> service.deleteBucket("bucket"));
-            assertThrows(TimeoutException.class,
-                    () -> bucketDeletion.get(100, TimeUnit.MILLISECONDS));
+            AtomicReference<Thread> deleter = new AtomicReference<>();
+            var bucketDeletion = executor.submit(() -> {
+                deleter.set(Thread.currentThread());
+                service.deleteBucket("bucket");
+            });
+            ThreadStates.awaitBlockedOrDone(deleter, bucketDeletion);
+            assertFalse(bucketDeletion.isDone());
 
             allowSoftDeleteWrite.countDown();
             objectDeletion.get(5, TimeUnit.SECONDS);
@@ -1594,8 +1603,13 @@ class GcsServiceTest {
                     new byte[]{1}, GcsCustomerEncryption.none(), BASE_URL));
             assertTrue(metadataWriteStarted.await(5, TimeUnit.SECONDS));
 
-            var deletion = executor.submit(() -> service.deleteBucket("bucket"));
-            assertThrows(TimeoutException.class, () -> deletion.get(100, TimeUnit.MILLISECONDS));
+            AtomicReference<Thread> deleter = new AtomicReference<>();
+            var deletion = executor.submit(() -> {
+                deleter.set(Thread.currentThread());
+                service.deleteBucket("bucket");
+            });
+            ThreadStates.awaitBlockedOrDone(deleter, deletion);
+            assertFalse(deletion.isDone());
 
             allowMetadataWrite.countDown();
             upload.get(5, TimeUnit.SECONDS);
@@ -1632,8 +1646,13 @@ class GcsServiceTest {
                     "source-bucket", "source.txt", "destination-bucket", "copy.txt", BASE_URL));
             assertTrue(metadataWriteStarted.await(5, TimeUnit.SECONDS));
 
-            var deletion = executor.submit(() -> service.deleteBucket("destination-bucket"));
-            assertThrows(TimeoutException.class, () -> deletion.get(100, TimeUnit.MILLISECONDS));
+            AtomicReference<Thread> deleter = new AtomicReference<>();
+            var deletion = executor.submit(() -> {
+                deleter.set(Thread.currentThread());
+                service.deleteBucket("destination-bucket");
+            });
+            ThreadStates.awaitBlockedOrDone(deleter, deletion);
+            assertFalse(deletion.isDone());
 
             allowMetadataWrite.countDown();
             copy.get(5, TimeUnit.SECONDS);
@@ -1670,18 +1689,17 @@ class GcsServiceTest {
             assertTrue(metadataWriteStarted.await(5, TimeUnit.SECONDS));
             assertFalse(composition.isDone());
 
-            CountDownLatch deletionStarted = new CountDownLatch(1);
             var deletionThread = new AtomicReference<Thread>();
             var deletion = executor.submit(() -> {
                 deletionThread.set(Thread.currentThread());
-                deletionStarted.countDown();
                 service.deleteObject("bucket", "part1.txt");
                 service.deleteObject("bucket", "part2.txt");
                 service.deleteObject("bucket", "composed.txt");
                 service.deleteBucket("bucket");
             });
-            assertTrue(deletionStarted.await(5, TimeUnit.SECONDS));
-            assertThreadBlocked(deletionThread.get(), deletion, composition);
+            ThreadStates.awaitBlockedOrDone(deletionThread, deletion);
+            assertFalse(deletion.isDone(), "operation completed before reaching the contended lock");
+            assertFalse(composition.isDone(), "lock holder completed before contention was observed");
 
             allowMetadataWrite.countDown();
             composition.get(5, TimeUnit.SECONDS);
@@ -1695,17 +1713,6 @@ class GcsServiceTest {
             allowMetadataWrite.countDown();
             executor.shutdownNow();
         }
-    }
-
-    private static void assertThreadBlocked(Thread thread, Future<?> blockedOperation,
-            Future<?> lockHolder) throws InterruptedException {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-        while (thread.getState() != Thread.State.BLOCKED && System.nanoTime() < deadline) {
-            assertFalse(blockedOperation.isDone(), "operation completed before reaching the contended lock");
-            assertFalse(lockHolder.isDone(), "lock holder completed before contention was observed");
-            Thread.sleep(1);
-        }
-        assertEquals(Thread.State.BLOCKED, thread.getState(), "operation did not block on the expected lock");
     }
 
     @Test
@@ -1728,8 +1735,13 @@ class GcsServiceTest {
                     GcsObjectPreconditions.NONE, GcsObjectPreconditions.NONE, BASE_URL));
             assertTrue(metadataWriteStarted.await(5, TimeUnit.SECONDS));
 
-            var deletion = executor.submit(() -> service.deleteBucket("bucket"));
-            assertThrows(TimeoutException.class, () -> deletion.get(100, TimeUnit.MILLISECONDS));
+            AtomicReference<Thread> deleter = new AtomicReference<>();
+            var deletion = executor.submit(() -> {
+                deleter.set(Thread.currentThread());
+                service.deleteBucket("bucket");
+            });
+            ThreadStates.awaitBlockedOrDone(deleter, deletion);
+            assertFalse(deletion.isDone());
 
             allowMetadataWrite.countDown();
             move.get(5, TimeUnit.SECONDS);
@@ -1766,8 +1778,13 @@ class GcsServiceTest {
                     "bucket", "object.txt", object.getGeneration()));
             assertTrue(metadataWriteStarted.await(5, TimeUnit.SECONDS));
 
-            var deletion = executor.submit(() -> service.deleteBucket("bucket"));
-            assertThrows(TimeoutException.class, () -> deletion.get(100, TimeUnit.MILLISECONDS));
+            AtomicReference<Thread> deleter = new AtomicReference<>();
+            var deletion = executor.submit(() -> {
+                deleter.set(Thread.currentThread());
+                service.deleteBucket("bucket");
+            });
+            ThreadStates.awaitBlockedOrDone(deleter, deletion);
+            assertFalse(deletion.isDone());
 
             allowMetadataWrite.countDown();
             restore.get(5, TimeUnit.SECONDS);
@@ -1802,8 +1819,13 @@ class GcsServiceTest {
                     uploadId, null, new byte[]{1}, BASE_URL));
             assertTrue(metadataWriteStarted.await(5, TimeUnit.SECONDS));
 
-            var deletion = executor.submit(() -> service.deleteBucket("bucket"));
-            assertThrows(TimeoutException.class, () -> deletion.get(100, TimeUnit.MILLISECONDS));
+            AtomicReference<Thread> deleter = new AtomicReference<>();
+            var deletion = executor.submit(() -> {
+                deleter.set(Thread.currentThread());
+                service.deleteBucket("bucket");
+            });
+            ThreadStates.awaitBlockedOrDone(deleter, deletion);
+            assertFalse(deletion.isDone());
 
             allowMetadataWrite.countDown();
             finalization.get(5, TimeUnit.SECONDS);
@@ -1842,8 +1864,13 @@ class GcsServiceTest {
             var finalization = executor.submit(() -> service.finalizeStreamingUpload(uploadId, BASE_URL));
             assertTrue(metadataWriteStarted.await(5, TimeUnit.SECONDS));
 
-            var deletion = executor.submit(() -> service.deleteBucket("bucket"));
-            assertThrows(TimeoutException.class, () -> deletion.get(100, TimeUnit.MILLISECONDS));
+            AtomicReference<Thread> deleter = new AtomicReference<>();
+            var deletion = executor.submit(() -> {
+                deleter.set(Thread.currentThread());
+                service.deleteBucket("bucket");
+            });
+            ThreadStates.awaitBlockedOrDone(deleter, deletion);
+            assertFalse(deletion.isDone());
 
             allowMetadataWrite.countDown();
             finalization.get(5, TimeUnit.SECONDS);

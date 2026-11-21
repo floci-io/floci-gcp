@@ -11,6 +11,7 @@ import io.floci.gcp.services.iam.model.StoredPolicy;
 import io.floci.gcp.services.iam.model.StoredServiceAccount;
 import io.floci.gcp.services.iam.model.StoredServiceAccountKey;
 import io.floci.gcp.services.iam.model.StoredSigningKey;
+import io.floci.gcp.testing.ThreadStates;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -35,11 +36,12 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Predicate;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -124,9 +126,13 @@ class IamServiceTest {
         try {
             Future<IamService.SignedBytes> signing = executor.submit(() -> iam.sign("p1", email, new byte[] {1}));
             await(signerInStore);
-            Future<?> deleting = executor.submit(() -> iam.deleteServiceAccount("p1", email));
-            assertThrows(TimeoutException.class, () -> deleting.get(200, TimeUnit.MILLISECONDS),
-                    "deletion must wait while the signing call holds the key lock");
+            AtomicReference<Thread> deleter = new AtomicReference<>();
+            Future<?> deleting = executor.submit(() -> {
+                deleter.set(Thread.currentThread());
+                iam.deleteServiceAccount("p1", email);
+            });
+            ThreadStates.awaitBlockedOrDone(deleter, deleting);
+            assertFalse(deleting.isDone(), "deletion must wait while the signing call holds the key lock");
 
             releaseSigner.countDown();
             signing.get(5, TimeUnit.SECONDS);
@@ -630,9 +636,13 @@ class IamServiceTest {
         try {
             Future<StoredServiceAccountKey> creating = executor.submit(() -> iam.createKey("p1", email));
             assertTrue(keyPublishing.await(5, TimeUnit.SECONDS));
-            Future<?> deleting = executor.submit(() -> iam.deleteServiceAccount("p1", email));
-            assertThrows(TimeoutException.class, () -> deleting.get(200, TimeUnit.MILLISECONDS),
-                    "deletion must wait while the key is being published");
+            AtomicReference<Thread> deleter = new AtomicReference<>();
+            Future<?> deleting = executor.submit(() -> {
+                deleter.set(Thread.currentThread());
+                iam.deleteServiceAccount("p1", email);
+            });
+            ThreadStates.awaitBlockedOrDone(deleter, deleting);
+            assertFalse(deleting.isDone(), "deletion must wait while the key is being published");
 
             releaseKey.countDown();
             creating.get(5, TimeUnit.SECONDS);
@@ -899,8 +909,13 @@ class IamServiceTest {
             StoredPolicy concurrent = new StoredPolicy();
             concurrent.setBindings(List.of(Map.of(
                     "role", "roles/storage.objectViewer", "members", List.of("allUsers"))));
-            Future<?> writer = executor.submit(() -> service.setPolicy(resource, concurrent));
-            assertThrows(TimeoutException.class, () -> writer.get(100, TimeUnit.MILLISECONDS));
+            AtomicReference<Thread> writerThread = new AtomicReference<>();
+            Future<?> writer = executor.submit(() -> {
+                writerThread.set(Thread.currentThread());
+                service.setPolicy(resource, concurrent);
+            });
+            ThreadStates.awaitBlockedOrDone(writerThread, writer);
+            assertFalse(writer.isDone());
 
             allowDeleteToFinish.countDown();
             deletion.get(5, TimeUnit.SECONDS);

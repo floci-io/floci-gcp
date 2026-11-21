@@ -14,6 +14,7 @@ import io.floci.gcp.services.bigquery.model.TableReference;
 import io.floci.gcp.services.bigquery.model.TableRow;
 import io.floci.gcp.services.bigquery.model.TableSchema;
 import io.floci.gcp.services.bigquery.model.UpdateMode;
+import io.floci.gcp.testing.ThreadStates;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -2216,8 +2217,6 @@ class BigQueryServiceTest {
     void appendToSelfReferencedCreateReplaceWaitsForTablePublication() throws Exception {
         CountDownLatch queryStarted = new CountDownLatch(1);
         CountDownLatch finishQuery = new CountDownLatch(1);
-        CountDownLatch appendStarted = new CountDownLatch(1);
-        CountDownLatch appendFinished = new CountDownLatch(1);
         BigQuerySqlEngine blockingEngine = mock(BigQuerySqlEngine.class);
         when(blockingEngine.execute(any(), any())).thenAnswer(invocation -> {
             queryStarted.countDown();
@@ -2237,14 +2236,14 @@ class BigQueryServiceTest {
             Future<StoredJob> query = executor.submit(() -> concurrentService.query(PROJECT, null, null,
                     "CREATE OR REPLACE TABLE ds1.t1 AS SELECT * FROM ds1.t1", null));
             assertTrue(queryStarted.await(5, TimeUnit.SECONDS));
+            AtomicReference<Thread> appender = new AtomicReference<>();
             Future<?> append = executor.submit(() -> {
-                appendStarted.countDown();
+                appender.set(Thread.currentThread());
                 concurrentService.appendRows(PROJECT, DATASET, TABLE, List.of(Map.of("name", "after", "age", 3)));
-                appendFinished.countDown();
             });
-            assertTrue(appendStarted.await(5, TimeUnit.SECONDS));
             try {
-                assertFalse(appendFinished.await(100, TimeUnit.MILLISECONDS),
+                ThreadStates.awaitBlockedOrDone(appender, append);
+                assertFalse(append.isDone(),
                         "self-referencing replacement must serialize with appends to its source table");
             } finally {
                 finishQuery.countDown();
@@ -2287,7 +2286,6 @@ class BigQueryServiceTest {
     void appendToAViewSourceWaitsForTheReplacementThatReadsIt() throws Exception {
         CountDownLatch queryStarted = new CountDownLatch(1);
         CountDownLatch finishQuery = new CountDownLatch(1);
-        CountDownLatch appendFinished = new CountDownLatch(1);
         BigQuerySqlEngine blockingEngine = mock(BigQuerySqlEngine.class);
         // createTable validates a view's query, so the engine answers that one before it starts blocking.
         when(blockingEngine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
@@ -2312,12 +2310,14 @@ class BigQueryServiceTest {
             Future<StoredJob> query = executor.submit(() -> concurrentService.query(PROJECT, null, null,
                     "CREATE OR REPLACE TABLE ds1.t1 AS SELECT * FROM ds1.source_view", null));
             assertTrue(queryStarted.await(5, TimeUnit.SECONDS));
+            AtomicReference<Thread> appender = new AtomicReference<>();
             Future<?> append = executor.submit(() -> {
+                appender.set(Thread.currentThread());
                 concurrentService.appendRows(PROJECT, DATASET, TABLE, List.of(Map.of("name", "after", "age", 3)));
-                appendFinished.countDown();
             });
             try {
-                assertFalse(appendFinished.await(100, TimeUnit.MILLISECONDS),
+                ThreadStates.awaitBlockedOrDone(appender, append);
+                assertFalse(append.isDone(),
                         "a replacement that reads the target through a view must serialize with its appends");
             } finally {
                 finishQuery.countDown();
@@ -2334,7 +2334,6 @@ class BigQueryServiceTest {
     void appendToATargetReadThroughAViewInAnotherDatasetWaitsForTheReplacement() throws Exception {
         CountDownLatch queryStarted = new CountDownLatch(1);
         CountDownLatch finishQuery = new CountDownLatch(1);
-        CountDownLatch appendFinished = new CountDownLatch(1);
         BigQuerySqlEngine blockingEngine = mock(BigQuerySqlEngine.class);
         // createTable validates a view's query, so the engine answers that one before it starts blocking.
         when(blockingEngine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
@@ -2358,12 +2357,14 @@ class BigQueryServiceTest {
             Future<StoredJob> query = executor.submit(() -> concurrentService.query(PROJECT, null, null,
                     "CREATE OR REPLACE TABLE ds1.t1 AS SELECT * FROM ds2.other_view", null));
             assertTrue(queryStarted.await(5, TimeUnit.SECONDS));
+            AtomicReference<Thread> appender = new AtomicReference<>();
             Future<?> append = executor.submit(() -> {
+                appender.set(Thread.currentThread());
                 concurrentService.appendRows(PROJECT, DATASET, TABLE, List.of(Map.of("name", "after", "age", 3)));
-                appendFinished.countDown();
             });
             try {
-                assertFalse(appendFinished.await(100, TimeUnit.MILLISECONDS),
+                ThreadStates.awaitBlockedOrDone(appender, append);
+                assertFalse(append.isDone(),
                         "a view in another dataset that reads the target must serialize with its appends");
             } finally {
                 finishQuery.countDown();
@@ -2466,7 +2467,6 @@ class BigQueryServiceTest {
     void appendToAMatchingWildcardSourceWaitsForTheReplacement() throws Exception {
         CountDownLatch queryStarted = new CountDownLatch(1);
         CountDownLatch finishQuery = new CountDownLatch(1);
-        CountDownLatch appendFinished = new CountDownLatch(1);
         BigQuerySqlEngine blockingEngine = mock(BigQuerySqlEngine.class);
         when(blockingEngine.execute(any(), any())).thenAnswer(invocation -> {
             queryStarted.countDown();
@@ -2486,12 +2486,14 @@ class BigQueryServiceTest {
             Future<StoredJob> query = executor.submit(() -> concurrentService.query(PROJECT, null, null,
                     "CREATE OR REPLACE TABLE ds1.t1 AS SELECT * FROM `ds1.t*`", null));
             assertTrue(queryStarted.await(5, TimeUnit.SECONDS));
+            AtomicReference<Thread> appender = new AtomicReference<>();
             Future<?> append = executor.submit(() -> {
+                appender.set(Thread.currentThread());
                 concurrentService.appendRows(PROJECT, DATASET, TABLE, List.of(Map.of("name", "after", "age", 3)));
-                appendFinished.countDown();
             });
             try {
-                assertFalse(appendFinished.await(100, TimeUnit.MILLISECONDS),
+                ThreadStates.awaitBlockedOrDone(appender, append);
+                assertFalse(append.isDone(),
                         "a replacement through a wildcard that matches the target must serialize with its appends");
             } finally {
                 finishQuery.countDown();
@@ -2508,8 +2510,6 @@ class BigQueryServiceTest {
     void wholeTableDeleteWaitsForAnInFlightAppendAndWins() throws Exception {
         CountDownLatch writeStarted = new CountDownLatch(1);
         CountDownLatch allowWrite = new CountDownLatch(1);
-        CountDownLatch deleteStarted = new CountDownLatch(1);
-        CountDownLatch deleteFinished = new CountDownLatch(1);
         ArmableBlockingPutStorage<String, StoredTableData> blockingData =
                 new ArmableBlockingPutStorage<>(writeStarted, allowWrite);
         BigQueryService concurrentService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
@@ -2522,14 +2522,13 @@ class BigQueryServiceTest {
             Future<?> append = executor.submit(() -> concurrentService.appendRows(PROJECT, DATASET, TABLE,
                     List.of(Map.of("name", "in-flight", "age", 1))));
             assertTrue(writeStarted.await(5, TimeUnit.SECONDS));
+            AtomicReference<Thread> deleter = new AtomicReference<>();
             Future<?> delete = executor.submit(() -> {
-                deleteStarted.countDown();
+                deleter.set(Thread.currentThread());
                 concurrentService.deleteTable(PROJECT, DATASET, TABLE);
-                deleteFinished.countDown();
             });
-            assertTrue(deleteStarted.await(5, TimeUnit.SECONDS));
-            assertFalse(deleteFinished.await(100, TimeUnit.MILLISECONDS),
-                    "delete must wait for the mutation that already holds writeLock");
+            ThreadStates.awaitBlockedOrDone(deleter, delete);
+            assertFalse(delete.isDone(), "delete must wait for the mutation that already holds writeLock");
 
             allowWrite.countDown();
             append.get(5, TimeUnit.SECONDS);
@@ -4275,8 +4274,6 @@ class BigQueryServiceTest {
     void copyWaitsForAnInFlightSourceMutationAndIncludesIt() throws Exception {
         CountDownLatch writeStarted = new CountDownLatch(1);
         CountDownLatch allowWrite = new CountDownLatch(1);
-        CountDownLatch copyStarted = new CountDownLatch(1);
-        CountDownLatch copyFinished = new CountDownLatch(1);
         ArmableBlockingPutStorage<String, StoredTableData> blockingData =
                 new ArmableBlockingPutStorage<>(writeStarted, allowWrite);
         BigQueryService concurrentService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
@@ -4289,15 +4286,13 @@ class BigQueryServiceTest {
             Future<?> append = executor.submit(() -> concurrentService.appendRows(PROJECT, DATASET, TABLE,
                     List.of(Map.of("name", "in-flight", "age", 1))));
             assertTrue(writeStarted.await(5, TimeUnit.SECONDS));
+            AtomicReference<Thread> copier = new AtomicReference<>();
             Future<StoredJob> copy = executor.submit(() -> {
-                copyStarted.countDown();
-                StoredJob job = concurrentService.copy(PROJECT, null, null, copyConfig(TABLE, "copied"));
-                copyFinished.countDown();
-                return job;
+                copier.set(Thread.currentThread());
+                return concurrentService.copy(PROJECT, null, null, copyConfig(TABLE, "copied"));
             });
-            assertTrue(copyStarted.await(5, TimeUnit.SECONDS));
-            assertFalse(copyFinished.await(100, TimeUnit.MILLISECONDS),
-                    "copy must wait for the source mutation that already holds writeLock");
+            ThreadStates.awaitBlockedOrDone(copier, copy);
+            assertFalse(copy.isDone(), "copy must wait for the source mutation that already holds writeLock");
 
             allowWrite.countDown();
             append.get(5, TimeUnit.SECONDS);

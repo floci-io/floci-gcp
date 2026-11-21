@@ -9,6 +9,7 @@ import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.ValidatableResponse;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
@@ -17,6 +18,7 @@ import java.net.URI;
 import java.time.Instant;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
@@ -59,12 +61,20 @@ class UptimeCheckIntegrationTest {
             Instant now = Instant.now();
             prober.tick(now).join();
 
+            // The background prober ticks every second in tests and may have started this check first;
+            // then the tick above skips it and returns before that probe has recorded its point.
             String checkId = name.substring(name.lastIndexOf('/') + 1);
-            given().queryParam("filter", "metric.type=\"monitoring.googleapis.com/uptime_check/check_passed\" AND "
+            Supplier<ValidatableResponse> uptimeSeries = () -> given()
+                    .queryParam("filter", "metric.type=\"monitoring.googleapis.com/uptime_check/check_passed\" AND "
                             + "metric.labels.check_id=\"" + checkId + "\"")
                     .queryParam("interval.startTime", now.minusSeconds(60).toString())
                     .queryParam("interval.endTime", now.plusSeconds(60).toString())
-                    .get("/v3/" + PARENT + "/timeSeries").then().statusCode(200)
+                    .get("/v3/" + PARENT + "/timeSeries").then().statusCode(200);
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+            while (uptimeSeries.get().extract().path("timeSeries") == null && System.nanoTime() < deadline) {
+                Thread.sleep(50);
+            }
+            uptimeSeries.get()
                     .body("timeSeries", hasSize(1))
                     .body("timeSeries[0].points[0].value.boolValue", equalTo(true))
                     .body("timeSeries[0].resource.type", equalTo("uptime_url"));

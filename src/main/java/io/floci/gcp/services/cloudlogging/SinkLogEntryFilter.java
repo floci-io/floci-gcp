@@ -93,9 +93,10 @@ final class SinkLogEntryFilter {
             if (field.equals("severity")) {
                 throw unsupported();
             }
-            if (field.startsWith("jsonPayload.")) {
-                String[] path = jsonPath(field.substring(12));
-                return entry -> hasPath(entry.getJsonPayload(), path, 0);
+            Function<StoredLogEntry, Object> object = objectField(field);
+            if (object != null) {
+                String[] path = jsonPath(field.substring(field.indexOf('.') + 1));
+                return entry -> hasPath(object.apply(entry), path, 0);
             }
             return entry -> accessor.apply(entry) != null;
         }
@@ -137,13 +138,28 @@ final class SinkLogEntryFilter {
                     String key = mapKey(field.substring(16));
                     yield entry -> entry.getResourceLabels() == null ? null : entry.getResourceLabels().get(key);
                 }
-                if (field.startsWith("jsonPayload.")) {
-                    String[] path = jsonPath(field.substring(12));
-                    yield entry -> lookup(entry.getJsonPayload(), path, 0);
+                Function<StoredLogEntry, Object> object = objectField(field);
+                if (object != null) {
+                    String[] path = jsonPath(field.substring(field.indexOf('.') + 1));
+                    yield entry -> lookup(object.apply(entry), path, 0);
                 }
                 throw unsupported();
             }
         };
+    }
+
+    /** The JSON-object LogEntry field a path such as {@code protoPayload.methodName} reads, or null. */
+    private static Function<StoredLogEntry, Object> objectField(String field) {
+        if (field.startsWith("jsonPayload.")) {
+            return StoredLogEntry::getJsonPayload;
+        }
+        if (field.startsWith("protoPayload.")) {
+            return StoredLogEntry::getProtoPayload;
+        }
+        if (field.startsWith("operation.")) {
+            return StoredLogEntry::getOperation;
+        }
+        return null;
     }
 
     private static String mapKey(String key) {

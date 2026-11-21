@@ -133,6 +133,8 @@ public class CloudLoggingHttpController {
         if (m.get("jsonPayload") != null) {
             e.setJsonPayload(m.get("jsonPayload"));
         }
+        e.setProtoPayload(ProtoPayloads.fromJson(m.get("protoPayload")));
+        e.setOperation(ProtoPayloads.operationFromJson(m.get("operation")));
         if (m.get("resource") instanceof Map<?, ?> r) {
             e.setResourceType((String) ((Map<String, Object>) r).get("type"));
             if (((Map<String, Object>) r).get("labels") instanceof Map<?, ?> l) {
@@ -160,6 +162,11 @@ public class CloudLoggingHttpController {
             json.put("textPayload", e.getTextPayload());
         } else if (e.getJsonPayload() != null) {
             json.put("jsonPayload", e.getJsonPayload());
+        } else if (e.getProtoPayload() != null) {
+            json.put("protoPayload", e.getProtoPayload());
+        }
+        if (e.getOperation() != null) {
+            json.put("operation", e.getOperation());
         }
         Map<String, Object> resource = new LinkedHashMap<>();
         resource.put("type", e.getResourceType());

@@ -4,11 +4,13 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.api.serviceusage.v1beta1.ServiceIdentity;
+import com.google.cloud.audit.AuditLog;
 import com.google.cloud.kms.v1.LocationMetadata;
 import com.google.cloud.run.v2.Execution;
 import com.google.cloud.run.v2.Instance;
 import com.google.cloud.run.v2.Job;
 import com.google.cloud.run.v2.WorkerPool;
+import com.google.iam.v1.logging.AuditData;
 import com.google.longrunning.ListOperationsResponse;
 import com.google.longrunning.Operation;
 import com.google.monitoring.v3.CreateTimeSeriesSummary;
@@ -51,6 +53,9 @@ public final class ProtoJson {
             .add(com.google.api.serviceusage.v1.OperationMetadata.getDescriptor())
             .add(ServiceIdentity.getDescriptor())
             .add(CreateTimeSeriesSummary.getDescriptor())
+            // Cloud Logging stores audit log payloads; IAM and Cloud Storage audit entries carry AuditData.
+            .add(AuditLog.getDescriptor())
+            .add(AuditData.getDescriptor())
             .build();
 
     private static final JsonFormat.Printer PRINTER = JsonFormat.printer()

@@ -127,7 +127,7 @@ class CloudLoggingExportIntegrationTest {
                 .setFilter("logName=\"" + log + "\"").build();
         sinks.createSink(parent, request.toBuilder().setName(id + "-missing").setDestination("storage.googleapis.com/missing-" + id).build(), true);
         sinks.createSink(parent, request.toBuilder().setName(id + "-unsafe").addExclusions(LogExclusion.newBuilder()
-                .setName("unsupported").setFilter("protoPayload.methodName:secret")).build(), true);
+                .setName("unsupported").setFilter("httpRequest.status=500")).build(), true);
         sinks.createSink(parent, request, true);
         try {
             write(log);

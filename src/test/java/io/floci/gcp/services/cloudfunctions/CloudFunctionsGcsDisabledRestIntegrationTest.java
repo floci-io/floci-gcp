@@ -1,17 +1,15 @@
 package io.floci.gcp.services.cloudfunctions;
 
+import io.floci.gcp.testing.GcsDisabledProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.Test;
-
-import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 
 @QuarkusTest
-@TestProfile(CloudFunctionsGcsDisabledRestIntegrationTest.DisabledGcsProfile.class)
+@TestProfile(GcsDisabledProfile.class)
 class CloudFunctionsGcsDisabledRestIntegrationTest {
 
     @Test
@@ -25,12 +23,5 @@ class CloudFunctionsGcsDisabledRestIntegrationTest {
                 .statusCode(503)
                 .body("error.status", equalTo("UNAVAILABLE"))
                 .body("error.message", equalTo("Cloud Functions source upload requires Cloud Storage to be enabled."));
-    }
-
-    public static class DisabledGcsProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci-gcp.services.gcs.enabled", "false");
-        }
     }
 }

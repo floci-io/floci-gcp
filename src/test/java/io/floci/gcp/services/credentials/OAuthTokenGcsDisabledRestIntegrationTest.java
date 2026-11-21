@@ -1,17 +1,15 @@
 package io.floci.gcp.services.credentials;
 
+import io.floci.gcp.testing.GcsDisabledProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.Test;
-
-import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 
 @QuarkusTest
-@TestProfile(OAuthTokenGcsDisabledRestIntegrationTest.DisabledGcsProfile.class)
+@TestProfile(GcsDisabledProfile.class)
 class OAuthTokenGcsDisabledRestIntegrationTest {
 
     @Test
@@ -36,12 +34,5 @@ class OAuthTokenGcsDisabledRestIntegrationTest {
                 .then()
                 .statusCode(200)
                 .body("token_type", equalTo("Bearer"));
-    }
-
-    public static class DisabledGcsProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci-gcp.services.gcs.enabled", "false");
-        }
     }
 }

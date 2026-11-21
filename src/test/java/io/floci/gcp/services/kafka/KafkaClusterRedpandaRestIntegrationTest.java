@@ -1,7 +1,7 @@
 package io.floci.gcp.services.kafka;
 
+import io.floci.gcp.testing.RedpandaProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.path.json.JsonPath;
 import org.junit.jupiter.api.Assumptions;
@@ -11,7 +11,6 @@ import org.junit.jupiter.api.Test;
 import java.io.IOException;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
@@ -24,7 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * operations route while a real Redpanda broker starts and stops.
  */
 @QuarkusTest
-@TestProfile(KafkaClusterRedpandaRestIntegrationTest.RedpandaProfile.class)
+@TestProfile(RedpandaProfile.class)
 class KafkaClusterRedpandaRestIntegrationTest {
 
     private static final String PARENT = "/v1/projects/kafka-async/locations/us-central1";
@@ -103,13 +102,6 @@ class KafkaClusterRedpandaRestIntegrationTest {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return false;
-        }
-    }
-
-    public static class RedpandaProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci-gcp.services.kafka.mock", "false");
         }
     }
 }

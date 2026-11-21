@@ -1,8 +1,8 @@
 package io.floci.gcp.services.resourcemanager;
 
 import io.floci.gcp.core.common.ProjectNumbers;
+import io.floci.gcp.testing.StrictProjectsProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.Test;
 
@@ -14,7 +14,7 @@ import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.not;
 
 @QuarkusTest
-@TestProfile(ResourceManagerStrictRestIntegrationTest.StrictProjectsProfile.class)
+@TestProfile(StrictProjectsProfile.class)
 class ResourceManagerStrictRestIntegrationTest {
 
     @Test
@@ -92,12 +92,5 @@ class ResourceManagerStrictRestIntegrationTest {
 
         given().when().get("/v1/projects/strict-phantom")
                 .then().statusCode(403);
-    }
-
-    public static class StrictProjectsProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci-gcp.projects.strict", "true");
-        }
     }
 }

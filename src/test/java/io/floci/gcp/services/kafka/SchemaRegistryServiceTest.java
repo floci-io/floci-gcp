@@ -98,7 +98,7 @@ class SchemaRegistryServiceTest {
         FutureTask<Map<String, Object>> second = new FutureTask<>(() -> service.createRegistry(P, L, "reg"));
         Thread secondThread = new Thread(second);
         secondThread.start();
-        ThreadStates.awaitBlockedOrDone(secondThread);
+        ThreadStates.awaitBlocked(secondThread);
         plane.blockStart.release();
 
         first.get(10, TimeUnit.SECONDS);
@@ -118,7 +118,7 @@ class SchemaRegistryServiceTest {
         FutureTask<Void> delete = new FutureTask<>(() -> service.deleteRegistry(P, L, "reg"), null);
         Thread deleteThread = new Thread(delete);
         deleteThread.start();
-        ThreadStates.awaitBlockedOrDone(deleteThread);
+        ThreadStates.awaitBlocked(deleteThread);
         assertEquals(0, plane.deleted.get(), "the delete must not reach the data plane during the call");
         plane.blockList.release();
 
@@ -142,7 +142,7 @@ class SchemaRegistryServiceTest {
         FutureTask<JsonNode> call = new FutureTask<>(() -> service.listSubjects(REG, null, false));
         Thread callThread = new Thread(call);
         callThread.start();
-        ThreadStates.awaitBlockedOrDone(callThread);
+        ThreadStates.awaitBlocked(callThread);
         plane.blockDelete.release();
 
         delete.get(10, TimeUnit.SECONDS);

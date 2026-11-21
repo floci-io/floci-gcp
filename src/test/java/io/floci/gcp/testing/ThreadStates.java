@@ -31,7 +31,41 @@ public final class ThreadStates {
      */
     public static void awaitBlockedOrDone(AtomicReference<Thread> thread, Future<?> task)
             throws InterruptedException {
-        awaitBlockedOrDone(thread::get, task::isDone, 5);
+        awaitBlockedOrDone(thread, task, Duration.ofSeconds(5));
+    }
+
+    static void awaitBlockedOrDone(AtomicReference<Thread> thread, Future<?> task, Duration timeout)
+            throws InterruptedException {
+        assertTrue(awaitBlockedOrDone(thread::get, task::isDone, timeout),
+                "worker blocked or finished before timeout, state " + stateOf(thread.get()));
+    }
+
+    /**
+     * Returns once {@code thread} is blocked entering a monitor or parked on a lock. Unlike
+     * {@link #awaitBlockedOrDone(Thread)}, a thread that finishes without blocking fails the test, for a
+     * test whose later assertions would also pass if the lock were missing.
+     */
+    public static void awaitBlocked(Thread thread) throws InterruptedException {
+        awaitBlocked(new AtomicReference<>(thread), Duration.ofSeconds(10));
+    }
+
+    /** {@link #awaitBlocked(Thread)} for a worker that publishes its thread once it starts. */
+    public static void awaitBlocked(AtomicReference<Thread> thread) throws InterruptedException {
+        awaitBlocked(thread, Duration.ofSeconds(10));
+    }
+
+    static void awaitBlocked(AtomicReference<Thread> thread, Duration timeout) throws InterruptedException {
+        long deadline = System.nanoTime() + timeout.toNanos();
+        while (!isBlocked(thread.get())) {
+            if (System.nanoTime() - deadline > 0) {
+                fail("worker never blocked, state " + stateOf(thread.get()));
+            }
+            Thread.sleep(5);
+        }
+    }
+
+    private static String stateOf(Thread thread) {
+        return thread == null ? "not started" : thread.getState().toString();
     }
 
     /**
@@ -41,13 +75,13 @@ public final class ThreadStates {
      * way the test needs.
      */
     public static void awaitBlockedOrDone(Thread thread) throws InterruptedException {
-        assertTrue(awaitBlockedOrDone(() -> thread, () -> !thread.isAlive(), 10),
+        assertTrue(awaitBlockedOrDone(() -> thread, () -> !thread.isAlive(), Duration.ofSeconds(10)),
                 "worker blocked or finished before timeout");
     }
 
-    private static boolean awaitBlockedOrDone(Supplier<Thread> thread, BooleanSupplier done, long timeoutSeconds)
+    private static boolean awaitBlockedOrDone(Supplier<Thread> thread, BooleanSupplier done, Duration timeout)
             throws InterruptedException {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds);
+        long deadline = System.nanoTime() + timeout.toNanos();
         while (System.nanoTime() < deadline && !done.getAsBoolean()) {
             if (isBlocked(thread.get())) {
                 return true;

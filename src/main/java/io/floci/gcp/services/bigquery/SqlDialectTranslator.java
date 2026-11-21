@@ -4072,11 +4072,19 @@ final class SqlDialectTranslator {
      * cannot see into, and the engine names the struct's type from the query without its ORDER BY.
      */
     private OrderByFieldPaths orderByFieldPaths(String replacementStarExclusion) {
+        int depth = 0;
+        int first = nextSignificant(0, tokens.size());
+        int closing = previousSignificantBefore(tokens.size());
+        while (first >= 0 && closing > first && tokens.get(first).isPunct("(") && matchingParen(first) == closing) {
+            depth++;
+            first = nextSignificant(first + 1, closing);
+            closing = previousSignificantBefore(closing);
+        }
         int order = -1;
         int by = -1;
         for (int i = tokens.size() - 1; i >= 0 && order < 0; i--) {
             by = nextSignificant(i + 1, tokens.size());
-            if (tokens.get(i).isKeyword("ORDER") && parenthesisDepth(i) == 0 && by >= 0
+            if (tokens.get(i).isKeyword("ORDER") && parenthesisDepth(i) == depth && by >= 0
                     && tokens.get(by).isKeyword("BY")) {
                 order = i;
             }
@@ -4084,9 +4092,14 @@ final class SqlDialectTranslator {
         if (order < 0) {
             return null;
         }
-        int end = clauseEnd(by + 1, 0);
+        int end = clauseEnd(by + 1, depth);
         List<List<String>> paths = new ArrayList<>();
         for (int i = by + 1; i < end; i++) {
+            if (tokens.get(i).isPunct("(") && isQuery(i + 1, matchingParen(i))) {
+                // A subquery reads its own FROM, not the outer result.
+                i = matchingParen(i);
+                continue;
+            }
             int before = previousSignificantBefore(i);
             if (!isIdentifierToken(i) || before > by && tokens.get(before).isPunct(".")) {
                 continue;
@@ -4115,7 +4128,9 @@ final class SqlDialectTranslator {
         if (paths.isEmpty()) {
             return null;
         }
-        String withoutOrderBy = (render(0, order) + render(end, tokens.size())).trim();
+        // A statement wrapped in parentheses is described from inside them.
+        int stop = depth > 0 ? closing + 1 : tokens.size();
+        String withoutOrderBy = (render(depth > 0 ? first : 0, order) + render(end, Math.max(end, stop))).trim();
         if (replacementStarExclusion != null) {
             withoutOrderBy = "SELECT *" + replacementStarExclusion + " FROM (" + withoutOrderBy
                     + ") AS \"_floci_star_replace\"";

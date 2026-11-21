@@ -910,9 +910,48 @@ public class BigQueryService {
             return job;
         }
 
+        SqlDialectTranslator.TableRef truncated = truncatedDestination(options);
+        if (truncated != null) {
+            // The job replaces its destination with what the query read. When the query reads the destination
+            // itself, an append acknowledged between the read and the replacement would be dropped, so
+            // writeLock is held across both, as CREATE OR REPLACE TABLE ... AS SELECT does: such an append
+            // lands either in the read or after the replacement. DML holds it across the sidecar round trip
+            // the same way; the sidecar's staging reads (storedRows) do not take it. Otherwise the query runs
+            // unlocked on the table metadata the check resolved.
+            SourceCheck sources = inProject(projectId, dataProjectId,
+                    () -> queryReadsTarget(dataProjectId, options.sql(), options, truncated));
+            if (sources.readsTarget()) {
+                synchronized (writeLock) {
+                    return runQuery(projectId, dataProjectId, options, job, jobLocation, null);
+                }
+            }
+            return runQuery(projectId, dataProjectId, options, job, jobLocation, sources.pinned());
+        }
+        return runQuery(projectId, dataProjectId, options, job, jobLocation, null);
+    }
+
+    /** The table a non dry run {@code WRITE_TRUNCATE} job replaces, or null for any other job. */
+    private SqlDialectTranslator.TableRef truncatedDestination(QueryOptions options) {
+        TableReference destination = options.destinationTable();
+        if (destination == null || options.dryRun() || !"WRITE_TRUNCATE".equals(options.writeDisposition())
+                || destination.getDatasetId() == null || destination.getDatasetId().isBlank()
+                || destination.getTableId() == null || destination.getTableId().isBlank()
+                || destination.getTableId().contains("$")
+                        && !PARTITION_DECORATOR.matcher(destination.getTableId()).matches()) {
+            // writeRows reports a malformed destination with its own error.
+            return null;
+        }
+        DecoratedDestination decorated = decoratedDestination(destination);
+        return decorated != null ? decorated.target()
+                : new SqlDialectTranslator.TableRef(destination.getDatasetId(), destination.getTableId());
+    }
+
+    /** {@code pinned}, when not null, holds the table metadata a source check resolved for the engine to stage. */
+    private StoredJob runQuery(String projectId, String dataProjectId, QueryOptions options, StoredJob job,
+                               JobLocation jobLocation, Map<String, Optional<Table>> pinned) {
         BigQuerySqlEngine.Result result = inProject(projectId, dataProjectId, () -> engine.execute(
                 request(dataProjectId, projectId, options.sql(), options, options.dryRun()),
-                tables(dataProjectId, jobLocation)));
+                tables(dataProjectId, jobLocation, pinned)));
         admitDestinationDataset(projectId, options, jobLocation);
         job.setLocation(jobLocation.resolved());
         job.setStatementType(result.statementType());

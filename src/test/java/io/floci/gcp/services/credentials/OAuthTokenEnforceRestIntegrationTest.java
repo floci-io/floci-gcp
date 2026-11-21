@@ -5,8 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.gcp.services.iam.IamService;
 import io.floci.gcp.services.iam.model.StoredPolicy;
 import io.floci.gcp.services.iam.model.StoredServiceAccountKey;
+import io.floci.gcp.testing.IamEnforceProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.quarkus.test.junit.mockito.InjectSpy;
 import io.restassured.RestAssured;
@@ -46,7 +46,7 @@ import static org.mockito.Mockito.doAnswer;
  * verified in IAM enforce mode against the account's user-managed keys.
  */
 @QuarkusTest
-@TestProfile(OAuthTokenEnforceRestIntegrationTest.EnforceProfile.class)
+@TestProfile(IamEnforceProfile.class)
 class OAuthTokenEnforceRestIntegrationTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -471,12 +471,5 @@ class OAuthTokenEnforceRestIntegrationTest {
     }
 
     private record KeyFile(String email, String keyId, PrivateKey privateKey) {
-    }
-
-    public static class EnforceProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci-gcp.services.iam.authorization-mode", "enforce");
-        }
     }
 }

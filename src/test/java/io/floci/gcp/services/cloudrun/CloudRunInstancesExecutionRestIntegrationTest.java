@@ -1,7 +1,7 @@
 package io.floci.gcp.services.cloudrun;
 
+import io.floci.gcp.testing.CloudRunExecutionProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.AfterEach;
@@ -26,7 +26,7 @@ import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.startsWith;
 
 @QuarkusTest
-@TestProfile(CloudRunInstancesExecutionRestIntegrationTest.ExecutionProfile.class)
+@TestProfile(CloudRunExecutionProfile.class)
 class CloudRunInstancesExecutionRestIntegrationTest {
 
     private static final String PROJECT = "inst-exec-it";
@@ -243,16 +243,6 @@ class CloudRunInstancesExecutionRestIntegrationTest {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return false;
-        }
-    }
-
-    public static class ExecutionProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of(
-                    "floci-gcp.services.cloudrun.mock", "false",
-                    "floci-gcp.services.cloudrun.execution.startup-timeout", "60s",
-                    "floci-gcp.services.cloudrun.execution.cleanup-timeout", "2s");
         }
     }
 }

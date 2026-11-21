@@ -6,8 +6,8 @@ import io.floci.gcp.core.storage.StorageFactory;
 import io.floci.gcp.services.credentials.CredentialTokenService;
 import io.floci.gcp.services.credentials.StoredCredentialToken;
 import io.floci.gcp.services.iam.model.StoredPolicy;
+import io.floci.gcp.testing.IamEnforceProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeEach;
@@ -30,7 +30,7 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
-@TestProfile(IamServiceAccountEnforcementIntegrationTest.EnforceProfile.class)
+@TestProfile(IamEnforceProfile.class)
 class IamServiceAccountEnforcementIntegrationTest {
 
     private static final String CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform";
@@ -516,12 +516,5 @@ class IamServiceAccountEnforcementIntegrationTest {
                         "condition", Map.of("expression", expression, "title", "test scope"));
         policy.setBindings(List.of(binding));
         iam.setPolicy(resource, policy);
-    }
-
-    public static class EnforceProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci-gcp.services.iam.authorization-mode", "enforce");
-        }
     }
 }

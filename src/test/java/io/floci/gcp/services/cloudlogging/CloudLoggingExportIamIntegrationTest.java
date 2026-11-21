@@ -5,8 +5,8 @@ import io.floci.gcp.services.gcs.GcsService;
 import io.floci.gcp.services.iam.IamService;
 import io.floci.gcp.services.iam.model.StoredPolicy;
 import io.floci.gcp.services.pubsub.PubSubService;
+import io.floci.gcp.testing.IamEnforceProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
@@ -20,7 +20,7 @@ import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.*;
 
 @QuarkusTest
-@TestProfile(CloudLoggingExportIamIntegrationTest.EnforceProfile.class)
+@TestProfile(IamEnforceProfile.class)
 class CloudLoggingExportIamIntegrationTest {
     @Inject
     GcsService storage;
@@ -137,12 +137,5 @@ class CloudLoggingExportIamIntegrationTest {
         StoredPolicy policy = new StoredPolicy();
         policy.setBindings(List.of(Map.of("role", role, "members", List.of(member))));
         return policy;
-    }
-
-    public static class EnforceProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci-gcp.services.iam.authorization-mode", "enforce");
-        }
     }
 }

@@ -1,14 +1,13 @@
 package io.floci.gcp.services.kafka;
 
+import io.floci.gcp.testing.RedpandaProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
-import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.contains;
@@ -25,7 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * level covers, and deleting the registry removes its container.
  */
 @QuarkusTest
-@TestProfile(SchemaRegistryRedpandaRestIntegrationTest.RedpandaProfile.class)
+@TestProfile(RedpandaProfile.class)
 class SchemaRegistryRedpandaRestIntegrationTest {
 
     private static final String PROJECT = "kafka-sr-rp";
@@ -189,13 +188,6 @@ class SchemaRegistryRedpandaRestIntegrationTest {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return false;
-        }
-    }
-
-    public static class RedpandaProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci-gcp.services.kafka.mock", "false");
         }
     }
 }

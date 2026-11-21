@@ -9,6 +9,7 @@ import com.google.iam.v1.TestIamPermissionsRequest;
 import io.floci.gcp.services.credentials.CredentialTokenService;
 import io.floci.gcp.services.iam.IamService;
 import io.floci.gcp.services.iam.model.StoredPolicy;
+import io.floci.gcp.testing.IamEnforceProfile;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import io.grpc.Metadata;
@@ -17,7 +18,6 @@ import io.grpc.StatusRuntimeException;
 import io.grpc.stub.MetadataUtils;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
@@ -36,7 +36,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
-@TestProfile(IamServiceAccountPolicyGrpcIntegrationTest.EnforceProfile.class)
+@TestProfile(IamEnforceProfile.class)
 class IamServiceAccountPolicyGrpcIntegrationTest {
 
     @Inject
@@ -174,12 +174,5 @@ class IamServiceAccountPolicyGrpcIntegrationTest {
                 "condition", Map.of("title", "target account only",
                         "expression", "resource.name == '" + resourceName + "'"))));
         iam.setPolicy("projects/" + project, policy);
-    }
-
-    public static class EnforceProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci-gcp.services.iam.authorization-mode", "enforce");
-        }
     }
 }

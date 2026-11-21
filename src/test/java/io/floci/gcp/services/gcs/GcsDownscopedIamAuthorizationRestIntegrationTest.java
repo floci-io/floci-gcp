@@ -3,8 +3,8 @@ package io.floci.gcp.services.gcs;
 import io.floci.gcp.services.credentials.CredentialTokenService;
 import io.floci.gcp.services.iam.IamService;
 import io.floci.gcp.services.iam.model.StoredPolicy;
+import io.floci.gcp.testing.IamEnforceProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
@@ -21,7 +21,7 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 
 @QuarkusTest
-@TestProfile(GcsDownscopedIamAuthorizationRestIntegrationTest.EnforceAuthorizationProfile.class)
+@TestProfile(IamEnforceProfile.class)
 class GcsDownscopedIamAuthorizationRestIntegrationTest {
 
     private static final String PROJECT = "test-project";
@@ -174,12 +174,5 @@ class GcsDownscopedIamAuthorizationRestIntegrationTest {
 
     private static String bearer(String token) {
         return "Bearer " + token;
-    }
-
-    public static class EnforceAuthorizationProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci-gcp.services.iam.authorization-mode", "enforce");
-        }
     }
 }

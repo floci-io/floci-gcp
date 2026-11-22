@@ -3439,6 +3439,30 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(5)
+    void orderByAStructFieldAfterASetOperationSortsLikeBigQuery() {
+        for (String[] c : new String[][] {
+                {"SELECT STRUCT(2 AS n) AS s UNION ALL SELECT STRUCT(1 AS n) ORDER BY s.n", "1,2"},
+                {"SELECT STRUCT(2 AS n, 'a' AS m) AS s UNION ALL SELECT STRUCT(1 AS n, 'b' AS m) ORDER BY s.m DESC",
+                        "1,2"},
+                {"SELECT STRUCT(3 AS n) AS s, 'x' AS k UNION ALL SELECT STRUCT(1 AS n), 'y'"
+                        + " UNION ALL SELECT STRUCT(2 AS n), 'z' ORDER BY s.n LIMIT 2 OFFSET 1", "2,3"},
+                {"WITH c AS (SELECT STRUCT(2 AS n) AS s) SELECT s FROM c UNION ALL SELECT STRUCT(1 AS n) ORDER BY s.n",
+                        "1,2"},
+                {"SELECT s FROM (SELECT STRUCT(3 AS n) AS s UNION ALL SELECT STRUCT(2 AS n) ORDER BY s.n LIMIT 1) t"
+                        + " UNION ALL SELECT STRUCT(1 AS n) ORDER BY s.n", "1,2"},
+        }) {
+            query(Map.of("query", c[0], "useLegacySql", false))
+                    .then().statusCode(200)
+                    .body("rows.collect { it.f[0].v.f[0].v }.join(',')", equalTo(c[1]));
+        }
+        query(Map.of("query", "SELECT STRUCT('B' AS m) AS s UNION ALL SELECT STRUCT('a' AS m) ORDER BY LOWER(s.m)",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.collect { it.f[0].v.f[0].v }", equalTo(List.of("a", "B")));
+    }
+
+    @Test
+    @Order(5)
     void setOperationStructsTakeTheFirstQuerysFieldNamesLikeBigQuery() {
         for (String[] c : new String[][] {
                 {"SELECT STRUCT(1 AS n) AS s UNION ALL SELECT STRUCT(0)", "n", "1,0"},

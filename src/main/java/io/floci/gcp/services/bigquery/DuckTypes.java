@@ -266,8 +266,13 @@ final class DuckTypes {
                         pos++;
                         break;
                     }
+                    int before = pos;
                     String name = readName();
                     DuckType fieldType = parseType();
+                    if (pos == before) {
+                        // Incomplete input: without this the loop adds empty fields forever.
+                        throw new IllegalArgumentException("Unterminated type: " + s);
+                    }
                     fields.add(new DuckField(name, fieldType));
                     skipSpaces();
                     if (peek() == ',') {

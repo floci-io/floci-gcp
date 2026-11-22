@@ -1191,14 +1191,32 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         return "No matching signature for function " + name + " Argument types: " + String.join(", ", types);
     }
 
-    /** Splits a DuckDB type list, keeping the commas inside {@code DECIMAL(38,9)} and {@code STRUCT(...)}. */
+    /**
+     * Splits a DuckDB type list, keeping the commas inside {@code DECIMAL(38,9)} and {@code STRUCT(...)}
+     * together. A quoted name may itself hold a parenthesis or a comma: DuckDB prints the field
+     * {@code a)} as {@code "a)"}.
+     */
     private static List<String> splitTypes(String arguments) {
         List<String> types = new ArrayList<>();
         int depth = 0;
         int start = 0;
+        char quote = 0;
         for (int i = 0; i < arguments.length(); i++) {
             char c = arguments.charAt(i);
-            if (c == '(' || c == '[') {
+            if (quote != 0) {
+                if (c == quote) {
+                    if (i + 1 < arguments.length() && arguments.charAt(i + 1) == quote) {
+                        // A doubled quote is an escaped quote: the name continues.
+                        i++;
+                    } else {
+                        quote = 0;
+                    }
+                }
+                continue;
+            }
+            if (c == '"' || c == '\'') {
+                quote = c;
+            } else if (c == '(' || c == '[') {
                 depth++;
             } else if (c == ')' || c == ']') {
                 depth--;
@@ -1227,8 +1245,15 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         if (upper.startsWith("STRUCT(") || upper.startsWith("MAP(") || upper.startsWith("UNION(")
                 || type.endsWith("[]")) {
             // Nested types are printed in DuckDB's own spelling, so they are parsed back into their
-            // fields and element types before the GoogleSQL names are applied.
-            return googleSqlTypeName(DuckTypes.parse(type));
+            // fields and element types before the GoogleSQL names are applied. A spelling the parser
+            // cannot finish is reported as the engine wrote it rather than failing the query with a
+            // parser error of our own.
+            try {
+                return googleSqlTypeName(DuckTypes.parse(type));
+            } catch (RuntimeException e) {
+                LOG.debugv("Could not parse the engine's type spelling ''{0}'': {1}", type, e.getMessage());
+                return type;
+            }
         }
         if (upper.startsWith("DECIMAL(") || upper.startsWith("NUMERIC(")) {
             return "NUMERIC";

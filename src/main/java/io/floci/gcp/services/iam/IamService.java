@@ -47,6 +47,8 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Collection;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -61,6 +63,7 @@ import java.util.function.Consumer;
 import java.util.function.BiFunction;
 import java.util.function.Function;
 import java.util.function.Supplier;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
@@ -69,6 +72,10 @@ public class IamService {
     private static final Logger LOG = Logger.getLogger(IamService.class);
     private static final String WILDCARD_PROJECT = "-";
     private static final String SA_EMAIL_DOMAIN = ".iam.gserviceaccount.com";
+    // "You can configure Data Access audit logs for Google Cloud projects, billing accounts, folders, and
+    // organizations." https://docs.cloud.google.com/logging/docs/audit/configure-data-access
+    private static final Pattern AUDIT_CONFIG_RESOURCE =
+            Pattern.compile("(projects|folders|organizations|billingAccounts)/[^/]+");
 
     private final StorageBackend<String, StoredServiceAccount> saStore;
     private final StorageBackend<String, StoredServiceAccountKey> keyStore;
@@ -362,6 +369,18 @@ public class IamService {
     }
 
     public StoredPolicy setPolicy(String resource, StoredPolicy policy) {
+        return setPolicy(resource, policy, null);
+    }
+
+    /**
+     * Sets the policy fields named by {@code updateMask} ({@code version}, {@code bindings}, {@code etag},
+     * {@code auditConfigs}, in proto or JSON spelling); a null or empty mask is the API's default,
+     * {@code bindings, etag}, so an omitted {@code auditConfigs} is kept. Only resource containers
+     * (projects, folders, organizations, billing accounts) keep {@code auditConfigs}, the resources
+     * Data Access audit logs are configured on.
+     */
+    public StoredPolicy setPolicy(String resource, StoredPolicy policy, Collection<String> updateMask) {
+        Set<String> mask = policyMask(updateMask);
         resource = canonicalProjectName(resource);
         String key = policyKey(resource);
         // Serializes existence check + etag read-compare-write per resource, both
@@ -378,6 +397,14 @@ public class IamService {
                 throw GcpException.aborted(
                         "There were concurrent policy changes. Please retry the whole read-modify-write with exponential backoff. "
                                 + "The request's ETag '" + requestEtag + "' did not match the current policy's ETag '" + currentEtag + "'.");
+            }
+            if (!mask.contains("bindings")) {
+                StoredPolicy kept = current.orElseGet(StoredPolicy::new);
+                policy.setBindings(kept.copy().getBindings());
+                policy.setVersion(kept.getVersion());
+            }
+            if (!mask.contains("auditConfigs") || !AUDIT_CONFIG_RESOURCE.matcher(resource).matches()) {
+                policy.setAuditConfigs(current.map(StoredPolicy::copy).map(StoredPolicy::getAuditConfigs).orElse(null));
             }
             if (authorization != null) {
                 authorization.get().validatePolicyWrite(resource, current.orElse(null), policy);
@@ -595,6 +622,28 @@ public class IamService {
 
     private static int policyLockIndex(String key) {
         return Math.floorMod(key.hashCode(), POLICY_LOCKS.length);
+    }
+
+    /**
+     * The canonical names of a setIamPolicy {@code updateMask}. Paths outside the Policy message are refused:
+     * "When writing data, field masks should return an INVALID_ARGUMENT error if an entry points to a value
+     * that can not exist" (https://google.aip.dev/161).
+     */
+    private static Set<String> policyMask(Collection<String> updateMask) {
+        if (updateMask == null || updateMask.isEmpty()) {
+            return Set.of("bindings", "etag");
+        }
+        Set<String> mask = new HashSet<>();
+        for (String path : updateMask) {
+            String trimmed = path.trim();
+            String canonical = switch (trimmed) {
+                case "version", "bindings", "etag" -> trimmed;
+                case "auditConfigs", "audit_configs" -> "auditConfigs";
+                default -> throw GcpException.invalidArgument("Invalid updateMask path for a Policy: " + trimmed);
+            };
+            mask.add(canonical);
+        }
+        return mask;
     }
 
     private static StoredPolicy emptyPolicy() {

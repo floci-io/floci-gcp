@@ -44,7 +44,10 @@ public class ResourceManagerIamController {
     @SuppressWarnings("unchecked")
     public Response setIamPolicy(@PathParam("project") String project, Map<String, Object> body) {
         Map<String, Object> policy = body != null ? (Map<String, Object>) body.get("policy") : null;
-        return Response.ok(iamService.setPolicy(projectName(project), IamPolicyCodec.fromJsonMap(policy))).build();
+        List<String> updateMask = body != null && body.get("updateMask") instanceof String mask && !mask.isBlank()
+                ? List.of(mask.split(",")) : null;
+        return Response.ok(iamService.setPolicy(projectName(project), IamPolicyCodec.fromJsonMap(policy), updateMask))
+                .build();
     }
 
     @GET

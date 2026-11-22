@@ -153,6 +153,9 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
      */
     private static final Pattern PLAIN_IDENTIFIER = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*");
 
+    /** The name the translator gives a STRUCT field written without one. */
+    private static final Pattern ANONYMOUS_STRUCT_FIELD = Pattern.compile("_field_[0-9]+");
+
     private static String structType(TableFieldSchema field, Set<List<String>> anonymousFields, List<String> prefix) {
         List<String> parts = new ArrayList<>();
         for (TableFieldSchema child : field.getFields() != null ? field.getFields() : List.<TableFieldSchema>of()) {
@@ -1221,8 +1224,11 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         if (upper.startsWith("LIST(") && type.endsWith(")")) {
             return "ARRAY<" + googleSqlTypeName(type.substring(5, type.length() - 1)) + ">";
         }
-        if (type.endsWith("[]")) {
-            return "ARRAY<" + googleSqlTypeName(type.substring(0, type.length() - 2)) + ">";
+        if (upper.startsWith("STRUCT(") || upper.startsWith("MAP(") || upper.startsWith("UNION(")
+                || type.endsWith("[]")) {
+            // Nested types are printed in DuckDB's own spelling, so they are parsed back into their
+            // fields and element types before the GoogleSQL names are applied.
+            return googleSqlTypeName(DuckTypes.parse(type));
         }
         if (upper.startsWith("DECIMAL(") || upper.startsWith("NUMERIC(")) {
             return "NUMERIC";
@@ -1243,6 +1249,47 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
             case "JSON" -> "JSON";
             default -> type;
         };
+    }
+
+    /** The GoogleSQL name of a parsed DuckDB type, including its nested fields and elements. */
+    private static String googleSqlTypeName(DuckTypes.DuckType type) {
+        if (type.isList()) {
+            return "ARRAY<" + googleSqlTypeName(type.element()) + ">";
+        }
+        if (type.isStruct()) {
+            StringBuilder rendered = new StringBuilder("STRUCT<");
+            boolean first = true;
+            for (DuckTypes.DuckField field : type.fields()) {
+                if (!first) {
+                    rendered.append(", ");
+                }
+                first = false;
+                if (field.type().base().isEmpty()) {
+                    // DuckDB prints an unnamed struct field as its type alone; the parser reads that
+                    // word as the field's name.
+                    rendered.append(googleSqlTypeName(field.name()));
+                    continue;
+                }
+                if (ANONYMOUS_STRUCT_FIELD.matcher(field.name()).matches()) {
+                    // The translator names an anonymous STRUCT field `_field_<position>`; BigQuery
+                    // prints the field's type without a name.
+                    rendered.append(googleSqlTypeName(field.type()));
+                    continue;
+                }
+                rendered.append(googleSqlIdentifier(field.name())).append(' ')
+                        .append(googleSqlTypeName(field.type()));
+            }
+            return rendered.append('>').toString();
+        }
+        return googleSqlTypeName(type.base());
+    }
+
+    /** A GoogleSQL field name: bare when it is a plain identifier, backticked otherwise. */
+    private static String googleSqlIdentifier(String name) {
+        return PLAIN_IDENTIFIER.matcher(name).matches()
+                && !SqlDialectTranslator.GOOGLESQL_RESERVED.contains(name.toUpperCase(Locale.ROOT))
+                ? name
+                : "`" + name.replace("`", "\\`") + "`";
     }
 
     /**

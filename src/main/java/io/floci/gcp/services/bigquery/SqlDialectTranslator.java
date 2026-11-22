@@ -7438,7 +7438,12 @@ final class SqlDialectTranslator {
             return;
         }
         if (token.upper().equals("HLL_COUNT")) {
-            throw invalidQuery("Dot-star is not supported for type BYTES");
+            // BigQuery names the type the counter returns: MERGE estimates in INT64, the sketch
+            // forms in BYTES.
+            int hllDot = nextSignificant(first + 1, operand[1]);
+            int counter = hllDot < 0 ? -1 : nextSignificant(hllDot + 1, operand[1]);
+            String type = counter >= 0 && tokens.get(counter).upper().equals("MERGE") ? "INT64" : "BYTES";
+            throw invalidQuery("Dot-star is not supported for type " + type);
         }
         int close = matchingParen(open);
         int afterCall = close < 0 ? -1 : nextNonSpace(close + 1, operand[1]);

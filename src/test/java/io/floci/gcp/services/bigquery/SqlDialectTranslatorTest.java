@@ -2053,6 +2053,23 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void groupedHllCounterTakesTheSameStructStarRewriteAsAnUnqualifiedAggregate() {
+        // The rewrite has to see the qualified HLL counter as an aggregate; otherwise the call is
+        // treated as a column reference and the query fails with `Unrecognized name: HLL_COUNT`.
+        String hll = "SELECT t.s.* EXCEPT(a), HLL_COUNT.INIT(t.id) AS sketch FROM ds.t t GROUP BY ALL";
+        assertEquals("SELECT * EXCLUDE (\"a\", \"_floci_source_0\"),"
+                        + " floci_hll_init(\"_floci_source_0\") AS sketch"
+                        + " FROM (SELECT unnest(t.s), \"t\".\"id\" AS \"_floci_source_0\""
+                        + " FROM \"ds\".\"t\" AS \"t\") AS \"_expanded\" GROUP BY ALL",
+                sql(hll));
+        assertEquals("SELECT * EXCLUDE (\"a\", \"_floci_source_0\"),"
+                        + " floci_hll_merge(CAST(\"_floci_source_0\" AS BLOB)) AS sketch"
+                        + " FROM (SELECT unnest(t.s), \"t\".\"id\" AS \"_floci_source_0\""
+                        + " FROM \"ds\".\"t\" AS \"t\") AS \"_expanded\" GROUP BY ALL",
+                sql("SELECT t.s.* EXCEPT(a), HLL_COUNT.MERGE(t.id) AS sketch FROM ds.t t GROUP BY ALL"));
+    }
+
+    @Test
     void aggregateStructStarRejectsAnAggregateThatCannotReturnAStruct() {
         String base = " FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t";
         assertEquals("MAX is not defined for arguments of type STRUCT",
@@ -2067,6 +2084,14 @@ class SqlDialectTranslatorTest {
                 invalid("SELECT ARRAY_AGG(t.s).* EXCEPT(a)" + base).getMessage());
         assertEquals("Dot-star is not supported for the aggregate expression",
                 invalid("SELECT MAX(t.s.a).*" + base).getMessage());
+        // The HLL counters name the type BigQuery names: MERGE estimates in INT64, the sketch
+        // forms in BYTES.
+        assertEquals("Dot-star is not supported for type BYTES",
+                invalid("SELECT HLL_COUNT.INIT(t.b).*" + base).getMessage());
+        assertEquals("Dot-star is not supported for type BYTES",
+                invalid("SELECT HLL_COUNT.MERGE_PARTIAL(t.b).*" + base).getMessage());
+        assertEquals("Dot-star is not supported for type INT64",
+                invalid("SELECT HLL_COUNT.MERGE(t.b).*" + base).getMessage());
         // ANY_VALUE keeps its input type, so it can still expand a STRUCT.
         assertTrue(sql("SELECT ANY_VALUE(t.s).* EXCEPT(a)" + base + " GROUP BY ALL")
                 .contains("ANY_VALUE(t.s) AS \"_floci_star\""));

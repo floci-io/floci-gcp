@@ -58,8 +58,9 @@ public class DatastoreHttpController {
     @Inject
     DatastoreService service;
 
+    /** Every binding in datastore.proto is {@code /v1/projects/{project_id}:<method>}, one path segment. */
     @POST
-    @Path("/{rest:.+}")
+    @Path("/{rest:[^/]+}")
     @Consumes("application/x-protobuf")
     @Produces("application/x-protobuf")
     public Response handle(@PathParam("rest") String rest, byte[] body) {

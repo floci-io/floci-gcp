@@ -954,6 +954,16 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void anUnnamedStructTypeFieldIsNamedByItsPositionLikeBigQuery() {
+        String cast = sql("SELECT CAST(s AS STRUCT<INT64, n STRING, ARRAY<INT64>>) AS s FROM ds.t");
+        assertTrue(cast.contains("STRUCT(\"_field_1\" BIGINT, \"n\" VARCHAR, \"_field_3\" BIGINT[])"), cast);
+        String nested = sql("SELECT CAST(s AS STRUCT<a STRUCT<INT64>, b NUMERIC(10, 2)>) AS s FROM ds.t");
+        assertTrue(nested.contains("STRUCT(\"a\" STRUCT(\"_field_1\" BIGINT), \"b\" DECIMAL(38,9))"), nested);
+        String named = sql("SELECT CAST(s AS STRUCT<int64 INT64>) AS s FROM ds.t");
+        assertTrue(named.contains("STRUCT(\"int64\" BIGINT)"), named);
+    }
+
+    @Test
     void selectDistinctAsStructKeepsItsRowModifier() {
         assertTrue(sql("SELECT ARRAY(SELECT DISTINCT AS STRUCT x FROM UNNEST([1, 1]) x) AS a")
                 .contains("SELECT DISTINCT {'x': x} FROM UNNEST([1, 1])"));

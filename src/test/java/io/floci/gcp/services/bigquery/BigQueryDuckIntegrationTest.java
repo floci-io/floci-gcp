@@ -3110,6 +3110,21 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(5)
+    void anUnnamedStructTypeFieldIsNamedByItsPositionLikeBigQuery() {
+        query(Map.of("query", "SELECT CAST(STRUCT(1, 'x' AS n, [2]) AS STRUCT<INT64, n STRING, ARRAY<INT64>>) AS s",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].fields.name", equalTo(List.of("_field_1", "n", "_field_3")))
+                .body("rows[0].f[0].v.f[0].v", equalTo("1"))
+                .body("rows[0].f[0].v.f[1].v", equalTo("x"));
+        query(Map.of("query", "SELECT STRUCT<a STRUCT<INT64>>(STRUCT(1 AS _field_1)) AS s", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].fields[0].fields.name", equalTo(List.of("_field_1")))
+                .body("rows[0].f[0].v.f[0].v.f[0].v", equalTo("1"));
+    }
+
+    @Test
+    @Order(5)
     void nullsSortFirstAscendingAndLastDescendingLikeBigQuery() {
         String[][] cases = {
                 {"SELECT n FROM UNNEST([1, 3, NULL]) n ORDER BY n", "rows.collect { it.f[0].v }", "NULL,1,3"},

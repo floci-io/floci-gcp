@@ -3277,11 +3277,20 @@ class BigQueryDuckIntegrationTest {
                         "Field name zz does not exist in STRUCT<n INT64>"},
                 {"SELECT STRUCT(1 AS n) AS s FROM UNNEST([1]) UNION ALL SELECT STRUCT(2 AS n) FROM UNNEST([1]) ORDER BY s.zz",
                         "Field name zz does not exist in STRUCT<n INT64>"},
+                {"(SELECT t.s AS s FROM (SELECT STRUCT(1 AS n) AS s) t ORDER BY s.zz)",
+                        "Field name zz does not exist in STRUCT<n INT64>"},
         }) {
             query(Map.of("query", c[0], "useLegacySql", false))
                     .then().statusCode(400)
                     .body("error.message", equalTo(c[1]));
         }
+        // A path inside a subquery reads the subquery's own source, so it is not checked against the outer result;
+        // the unknown name keeps the engine's message, as any unknown ORDER BY column does.
+        query(Map.of("query", "SELECT t.s AS s FROM (SELECT STRUCT(1 AS n) AS s) t"
+                + " ORDER BY (SELECT s.zz FROM (SELECT STRUCT(1 AS zz) AS s)), missing", "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", not(containsString("Field name zz")))
+                .body("error.message", containsString("\"missing\""));
         query(Map.of("query", "SELECT t.s AS s FROM " + source + " ORDER BY s.zz", "useLegacySql", false, "dryRun", true))
                 .then().statusCode(400)
                 .body("error.message", equalTo("Field name zz does not exist in STRUCT<n INT64, m STRUCT<k STRING>>"));

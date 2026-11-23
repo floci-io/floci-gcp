@@ -1,6 +1,13 @@
 package io.floci.gcp.test;
 
+import com.google.api.serviceusage.v1beta1.BatchEnableServicesRequest;
+import com.google.api.serviceusage.v1beta1.DisableServiceRequest;
+import com.google.api.serviceusage.v1beta1.EnableServiceRequest;
 import com.google.api.serviceusage.v1beta1.GenerateServiceIdentityRequest;
+import com.google.api.serviceusage.v1beta1.GetServiceRequest;
+import com.google.api.serviceusage.v1beta1.ListServicesRequest;
+import com.google.api.serviceusage.v1beta1.Service;
+import com.google.api.serviceusage.v1beta1.State;
 import com.google.api.serviceusage.v1beta1.ServiceIdentity;
 import com.google.api.serviceusage.v1beta1.ServiceUsageClient;
 import com.google.cloud.storage.Storage;
@@ -15,7 +22,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * {@code generateServiceIdentity} exists only in Service Usage v1beta1. Terraform's
+ * The v1beta1 {@code services} methods, including {@code generateServiceIdentity}, which exists
+ * only in Service Usage v1beta1. Terraform's
  * {@code google_project_service_identity} and Pulumi's {@code gcp.projects.ServiceIdentity}
  * call it to learn a service agent's address before granting it roles.
  */
@@ -40,6 +48,33 @@ class ServiceUsageBetaTest {
         if (storage instanceof AutoCloseable closeable) {
             closeable.close();
         }
+    }
+
+    @Test
+    void enableGetListDisableAndBatchEnableRoundTrip() throws Exception {
+        String name = PARENT + "/services/storage.googleapis.com";
+
+        client.enableServiceAsync(EnableServiceRequest.newBuilder().setName(name).build())
+                .get(10, TimeUnit.SECONDS);
+        Service enabled = client.getService(GetServiceRequest.newBuilder().setName(name).build());
+        assertThat(enabled.getState()).isEqualTo(State.ENABLED);
+        assertThat(enabled.getParent()).isEqualTo(PARENT);
+        assertThat(client.listServices(ListServicesRequest.newBuilder()
+                        .setParent(PARENT).setFilter("state:ENABLED").build())
+                .iterateAll())
+                .extracting(Service::getName)
+                .contains(name);
+
+        client.disableServiceAsync(DisableServiceRequest.newBuilder().setName(name).build())
+                .get(10, TimeUnit.SECONDS);
+        assertThat(client.getService(GetServiceRequest.newBuilder().setName(name).build()).getState())
+                .isEqualTo(State.DISABLED);
+
+        client.batchEnableServicesAsync(BatchEnableServicesRequest.newBuilder()
+                        .setParent(PARENT).addServiceIds("storage.googleapis.com").build())
+                .get(10, TimeUnit.SECONDS);
+        assertThat(client.getService(GetServiceRequest.newBuilder().setName(name).build()).getState())
+                .isEqualTo(State.ENABLED);
     }
 
     @Test

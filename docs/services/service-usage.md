@@ -32,6 +32,11 @@ enable/disable state matter.
 | `POST` | `/v1/projects/{project}/services:batchEnable` |
 | `GET` | `/v1/projects/{project}/services:batchGet?names=...` |
 | `GET` | `/v1/operations/{operation}`, `/v1/operations` |
+| `POST` | `/v1beta1/projects/{project}/services/{service}:enable` |
+| `POST` | `/v1beta1/projects/{project}/services/{service}:disable` |
+| `GET` | `/v1beta1/projects/{project}/services/{service}` |
+| `GET` | `/v1beta1/projects/{project}/services` (`?filter=state:ENABLED\|state:DISABLED`) |
+| `POST` | `/v1beta1/projects/{project}/services:batchEnable` |
 | `POST` | `/v1beta1/projects/{project}/services/{service}:generateServiceIdentity` |
 | `GET` | `/v1beta1/operations/{operation}` |
 
@@ -39,6 +44,12 @@ enable/disable state matter.
 `google.longrunning.Operation` (`done: true`) whose `response` carries the proto response
 type, so SDK operation futures resolve immediately. Disabling a service that is not
 enabled returns `FAILED_PRECONDITION`, matching real GCP.
+
+The v1beta1 `services` methods share state with v1, so a service enabled under one is enabled
+under the other. They differ as the v1beta1 proto does: `enable`, `disable`, and `batchEnable`
+complete with a `google.protobuf.Empty` response and a v1beta1 `OperationMetadata`. `batchGet`
+exists only in v1, and `generateServiceIdentity` only in v1beta1, so each returns 404 under the
+other version. Only `projects/{project}` parents are served, not folders or organizations.
 
 Every method resolves `{project}` through the [project registry](resource-manager.md). A
 project number that belongs to no known project, such as the `00000000000` the Google

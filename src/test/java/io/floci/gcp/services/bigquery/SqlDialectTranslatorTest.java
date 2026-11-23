@@ -60,6 +60,36 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void bareGroupByNameReadsTheSelectAliasBeforeTheSourceColumn() {
+        // BigQuery: select aliases "override names in the corresponding FROM clause" in GROUP BY.
+        String renamed = sql("WITH t AS (SELECT 1 AS id UNION ALL SELECT 2) SELECT MOD(id, 2) AS id, COUNT(*) AS n"
+                + " FROM t GROUP BY id ORDER BY id");
+        assertTrue(renamed.contains("GROUP BY 1"), renamed);
+        String joined = sql("WITH a AS (SELECT 1 AS uuid, 10 AS b_id), b AS (SELECT 10 AS uuid)"
+                + " SELECT COUNT(*) AS n, a.b_id AS uuid FROM a JOIN b ON a.b_id = b.uuid GROUP BY uuid");
+        assertTrue(joined.contains("GROUP BY 2"), joined);
+        String qualified = sql("WITH a AS (SELECT 1 AS uuid, 10 AS b_id), b AS (SELECT 10 AS uuid)"
+                + " SELECT a.uuid, COUNT(*) AS n FROM a JOIN b ON a.b_id = b.uuid GROUP BY uuid");
+        assertTrue(qualified.contains("GROUP BY 1"), qualified);
+        // The commas of a typed STRUCT or ARRAY constructor do not count as select items.
+        String typedStruct = sql("SELECT STRUCT<a INT64, b INT64>(1, 2) AS s, MOD(id, 2) AS id FROM ds.t GROUP BY id");
+        assertTrue(typedStruct.contains("GROUP BY 2"), typedStruct);
+        String typedArray = sql("SELECT ARRAY<STRUCT<a INT64, b INT64>>[(1, 2)] AS s, MOD(id, 2) AS id FROM ds.t"
+                + " GROUP BY id");
+        assertTrue(typedArray.contains("GROUP BY 2"), typedArray);
+        // Left as written: the column itself, a qualified name, a name no item outputs, an aggregate's alias.
+        assertTrue(sql("SELECT id, COUNT(*) AS n FROM ds.t GROUP BY id").contains("GROUP BY id"));
+        assertTrue(sql("SELECT MOD(id, 2) AS id FROM ds.t GROUP BY t.id").contains("GROUP BY t.id"));
+        assertTrue(sql("SELECT MOD(id, 2) AS m FROM ds.t GROUP BY id").contains("GROUP BY id"));
+        assertTrue(sql("SELECT k, COUNT(*) AS n FROM ds.t GROUP BY k, n").contains("GROUP BY k, n"));
+        // Only an alias or a column path names an output; the trailing name of an unaliased expression does not.
+        String unnamed = sql("SELECT id - id, COUNT(*) AS n FROM ds.t GROUP BY id");
+        assertTrue(unnamed.contains("GROUP BY id"), unnamed);
+        String implicit = sql("SELECT MOD(id, 2) id, COUNT(*) AS n FROM ds.t GROUP BY id");
+        assertTrue(implicit.contains("GROUP BY 1"), implicit);
+    }
+
+    @Test
     void lowercaseTimestampParameterIsUppercasedOnlyWhereComparedWithATemporalValue() {
         SqlDialectTranslator.QueryParameters a = new SqlDialectTranslator.QueryParameters(List.of(Map.of("name", "a",
                 "parameterType", Map.of("type", "STRING"), "parameterValue", Map.of("value", "2014-09-27t12:30:00z"))),

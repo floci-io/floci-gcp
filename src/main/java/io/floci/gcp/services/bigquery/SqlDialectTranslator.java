@@ -2994,6 +2994,8 @@ final class SqlDialectTranslator {
         coerceLowercaseTemporalParameters();
         rewriteTypedArrayLiterals();
         rewriteTypedStructConstructors();
+        // After the typed constructors, whose STRUCT<a INT64, b INT64> commas would split a select item.
+        groupBySelectAliasPositions();
         rewriteArraySubscripts();
         rewriteSelectAsStruct();
         List<Integer> sig = significantIndexes();
@@ -4037,6 +4039,8 @@ final class SqlDialectTranslator {
         nameNestedDuplicateOutputs();
         rewriteTypedArrayLiterals();
         rewriteTypedStructConstructors();
+        // After the typed constructors, whose STRUCT<a INT64, b INT64> commas would split a select item.
+        groupBySelectAliasPositions();
         rewriteArraySubscripts();
         // SELECT AS STRUCT renders its fields to text, so queries nested in them must be rewritten first.
         quoteImplicitSelectAliases();
@@ -8958,6 +8962,95 @@ final class SqlDialectTranslator {
                 validateSourceReferences(select);
             }
         }
+    }
+
+    /**
+     * BigQuery resolves a bare {@code GROUP BY} name to a select alias before a source column: "aliases override
+     * names in the corresponding FROM clause". DuckDB binds the source column first, so {@code SELECT MOD(id, 2)
+     * AS id ... GROUP BY id} groups by {@code t.id}, and a name two joined sources expose is ambiguous. A bare name
+     * that one select item outputs from another expression is therefore replaced by that item's position.
+     */
+    private void groupBySelectAliasPositions() {
+        for (int select = 0; select < tokens.size(); select++) {
+            if (tokens.get(select).isKeyword("SELECT")) {
+                groupBySelectAliasPositions(select);
+            }
+        }
+    }
+
+    private void groupBySelectAliasPositions(int select) {
+        List<int[]> items = selectItems(select);
+        // Positions after a star depend on its expansion, which is not known here.
+        if (items == null || items.stream().anyMatch(this::expandsStar)) {
+            return;
+        }
+        int depth = parenthesisDepth(select);
+        int tailStart = items.getLast()[1];
+        int end = structStarArmEnd(tailStart, structStarQueryEnd(select), depth);
+        end = structStarSetOperationTail(select, tailStart, end, depth);
+        int group = structStarClauseStart(tailStart, end, depth, "GROUP");
+        int by = group < 0 ? -1 : nextSignificant(group + 1, end);
+        if (by < 0 || !tokens.get(by).isKeyword("BY")) {
+            return;
+        }
+        for (int[] groupItem : topLevelRanges(by + 1, Math.min(clauseEnd(by + 1, depth), end), depth)) {
+            int name = nextSignificant(groupItem[0], groupItem[1]);
+            if (name < 0 || significant(groupItem[0], groupItem[1]).size() != 1 || !isName(tokens.get(name))
+                    || tokens.get(name).isKeyword(ALL)) {
+                continue;
+            }
+            int position = selectAliasPosition(items, tokens.get(name).identifierText());
+            if (position > 0) {
+                tokens.set(name, new Token(Kind.NUMBER, String.valueOf(position), null));
+            }
+        }
+    }
+
+    /**
+     * The 1-based position of the one select item that outputs {@code name} from an expression other than the
+     * column of that name, or -1. An item that is that column itself ({@code SELECT id}) resolves the same either
+     * way, a name several items output is ambiguous, and an aggregate or window item cannot be grouped by, so
+     * those keep the name as written. Only an alias or a column path names an output: {@code SELECT id - id}
+     * has no alias, so its trailing {@code id} is not one.
+     */
+    private int selectAliasPosition(List<int[]> items, String name) {
+        int found = -1;
+        for (int index = 0; index < items.size(); index++) {
+            int[] item = items.get(index);
+            if (namesOutput(item) && name.equalsIgnoreCase(outputNameText(item[0], item[1]))) {
+                if (found >= 0) {
+                    return -1;
+                }
+                found = index;
+            }
+        }
+        if (found < 0) {
+            return -1;
+        }
+        int[] item = items.get(found);
+        int as = topLevelAs(item[0], item[1]);
+        int alias = as >= 0 ? as : implicitSelectAlias(item[0], item[1]);
+        int expressionEnd = alias >= 0 ? alias : item[1];
+        List<Token> expression = significant(item[0], expressionEnd);
+        boolean sameColumn = expression.size() == 1 && isName(expression.getFirst())
+                && expression.getFirst().identifierText().equalsIgnoreCase(name);
+        int first = nextSignificant(item[0], expressionEnd);
+        if (sameColumn || first < 0 || structStarAggregates(first, expressionEnd)
+                || hasWindowExpression(item[0], expressionEnd)) {
+            return -1;
+        }
+        return found + 1;
+    }
+
+    /** True when a select item names its column: an explicit or implicit alias, or a column path. */
+    private boolean namesOutput(int[] item) {
+        if (topLevelAs(item[0], item[1]) >= 0 || implicitSelectAlias(item[0], item[1]) >= 0) {
+            return true;
+        }
+        List<Token> significant = significant(item[0], item[1]);
+        // nameAnonymousColumns appends " AS <name>" as a single raw token.
+        return !significant.isEmpty()
+                && (parenthesizedPath(significant) != null || significant.getLast().kind == Kind.RAW);
     }
 
     private void validateSourceReferences(int select) {

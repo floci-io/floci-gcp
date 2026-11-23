@@ -3222,6 +3222,43 @@ class BigQueryDuckIntegrationTest {
     }
 
     @Test
+    void bareGroupByNameGroupsByTheSelectAliasLikeBigQuery() {
+        // Live BigQuery (2026-10-31): a select alias overrides the FROM column of that name in GROUP BY.
+        query(Map.of("query", "WITH t AS (SELECT 1 AS id UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4)"
+                + " SELECT MOD(id, 2) AS id, COUNT(*) AS n FROM t GROUP BY id ORDER BY id", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(2))
+                .body("rows[0].f.v", equalTo(List.of("0", "2")))
+                .body("rows[1].f.v", equalTo(List.of("1", "2")));
+        query(Map.of("query", "WITH a AS (SELECT 1 AS uuid, 10 AS b_id), b AS (SELECT 10 AS uuid)"
+                + " SELECT a.b_id AS uuid, COUNT(*) AS n FROM a JOIN b ON a.b_id = b.uuid GROUP BY uuid",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(1))
+                .body("rows[0].f.v", equalTo(List.of("10", "1")));
+        query(Map.of("query", "WITH a AS (SELECT 1 AS uuid, 10 AS b_id)"
+                + " SELECT a.b_id AS uuid, COUNT(*) AS n FROM a GROUP BY uuid", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(1))
+                .body("rows[0].f.v", equalTo(List.of("10", "1")));
+        // A typed STRUCT or ARRAY item before the alias does not shift its position (live BigQuery, 2026-11-21:
+        // 4, 2 and 2 rows).
+        String ids = "WITH t AS (SELECT 1 AS id UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4) ";
+        for (Object[] c : new Object[][] {
+                {"SELECT STRUCT<a INT64, b INT64>(1, 2).a AS s, id AS k, COUNT(*) AS n FROM t GROUP BY s, k", 4},
+                {"SELECT STRUCT<a INT64, b INT64>(1, 2).a AS s, MOD(id, 2) AS id, COUNT(*) AS n FROM t"
+                        + " GROUP BY s, id", 2},
+                {"SELECT ARRAY<STRUCT<a INT64, b INT64>>[(1, 2)][OFFSET(0)].a AS s, MOD(id, 2) AS id, COUNT(*) AS n"
+                        + " FROM t GROUP BY s, id", 2},
+                // An unaliased expression names no output, so GROUP BY id keeps the source column: one row per id.
+                {"SELECT id - id, COUNT(*) AS n FROM t GROUP BY id", 4}}) {
+            query(Map.of("query", ids + c[0], "useLegacySql", false))
+                    .then().statusCode(200)
+                    .body("rows", hasSize((Integer) c[1]));
+        }
+    }
+
+    @Test
     void stringParameterComparedWithATemporalValueIsRefusedWhereBigQueryCannotCoerceIt() {
         // Live BigQuery (REST jobs.query, named STRING parameter @a, 2026-11-16) refuses each of these, where DuckDB's
         // implicit cast dropped the time part or zone and answered true.

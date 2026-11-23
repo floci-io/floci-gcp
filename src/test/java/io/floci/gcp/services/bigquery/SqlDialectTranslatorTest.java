@@ -986,11 +986,18 @@ class SqlDialectTranslatorTest {
     @Test
     void anUnnamedStructTypeFieldIsNamedByItsPositionLikeBigQuery() {
         String cast = sql("SELECT CAST(s AS STRUCT<INT64, n STRING, ARRAY<INT64>>) AS s FROM ds.t");
-        assertTrue(cast.contains("STRUCT(\"_field_1\" BIGINT, \"n\" VARCHAR, \"_field_3\" BIGINT[])"), cast);
+        assertTrue(cast.contains("struct_pack(\"_field_1\" := CAST(struct_extract_at(\"_floci_struct_cast_0\", 1)"
+                + " AS BIGINT),"
+                + " \"n\" := CAST(struct_extract_at(\"_floci_struct_cast_0\", 2) AS VARCHAR),"
+                + " \"_field_3\" := CAST(struct_extract_at(\"_floci_struct_cast_0\", 3) AS BIGINT[]))"), cast);
         String nested = sql("SELECT CAST(s AS STRUCT<a STRUCT<INT64>, b NUMERIC(10, 2)>) AS s FROM ds.t");
-        assertTrue(nested.contains("STRUCT(\"a\" STRUCT(\"_field_1\" BIGINT), \"b\" DECIMAL(38,9))"), nested);
+        assertTrue(nested.contains("struct_pack(\"_field_1\" := CAST(struct_extract_at(\"_floci_struct_cast_1\", 1)"
+                + " AS BIGINT))"), nested);
+        assertTrue(nested.contains("\"b\" := CAST(struct_extract_at(\"_floci_struct_cast_0\", 2)"
+                + " AS DECIMAL(38,9))"), nested);
         String named = sql("SELECT CAST(s AS STRUCT<int64 INT64>) AS s FROM ds.t");
-        assertTrue(named.contains("STRUCT(\"int64\" BIGINT)"), named);
+        assertTrue(named.contains("struct_pack(\"int64\" := CAST(struct_extract_at(\"_floci_struct_cast_0\", 1)"
+                + " AS BIGINT))"), named);
     }
 
     @Test
@@ -1405,7 +1412,12 @@ class SqlDialectTranslatorTest {
 
     @Test
     void nestedGenericCastTypes() {
-        assertEquals("SELECT CAST(x AS STRUCT(\"a\" BIGINT[])[]) AS c",
+        assertEquals("SELECT list_transform(x, \"_floci_struct_cast_0\" -> list_extract(list_transform("
+                + "[list_extract(list_value(\"_floci_struct_cast_0\", row(NULL)), 1)],"
+                + " \"_floci_struct_cast_1\" -> CASE WHEN"
+                + " \"_floci_struct_cast_1\" IS NULL"
+                + " THEN NULL ELSE struct_pack(\"a\" := CAST(struct_extract_at(\"_floci_struct_cast_1\", 1)"
+                + " AS BIGINT[])) END), 1)) AS c",
                 sql("SELECT CAST(x AS ARRAY<STRUCT<a ARRAY<INT64>>>) AS c"));
     }
 

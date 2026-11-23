@@ -3286,6 +3286,13 @@ class BigQueryDuckIntegrationTest {
                 {"SELECT TIMESTAMP '2014-09-29 00:00:00+00' NOT BETWEEN TIMESTAMP '2014-09-26 00:00:00+00' AND @a AS v",
                         "2014-09-27t12:30:00z", "true"},
                 {"SELECT @a AS v, @a = '2014-09-27t12:30:00' AS same", "2014-09-27t12:30:00", "2014-09-27t12:30:00,true"},
+                {"SELECT TIMESTAMP '2014-09-27 12:30:00+00' IN (@a) AS v", "2014-09-27t12:30:00", "true"},
+                {"SELECT TIMESTAMP '2014-09-27 12:30:00+00' IN (TIMESTAMP '2014-01-01 00:00:00+00', @a) AS v",
+                        "2014-09-27t12:30:00z", "true"},
+                {"SELECT TIMESTAMP '2014-09-27 12:30:00+00' NOT IN (@a) AS v", "2014-09-27t12:30:00", "false"},
+                {"SELECT TIMESTAMP '2014-09-27 12:30:00+00' IS NOT DISTINCT FROM @a AS v", "2014-09-27t12:30:00z",
+                        "true"},
+                {"SELECT @a IS DISTINCT FROM TIMESTAMP '2014-09-27 12:30:00+00' AS v", "2014-09-27t12:30:00", "false"},
         }) {
             query(Map.of("query", c[0], "useLegacySql", false, "parameterMode", "NAMED",
                     "queryParameters", List.of(Map.of("name", "a", "parameterType", Map.of("type", "STRING"),
@@ -3293,6 +3300,20 @@ class BigQueryDuckIntegrationTest {
                     .then().statusCode(200)
                     .body("rows[0].f.v", equalTo(List.of(c[2].split(","))));
         }
+        query(Map.of("query", "CREATE TABLE shop.using_required (ts TIMESTAMP NOT NULL)", "useLegacySql", false))
+                .then().statusCode(200);
+        query(Map.of("query", "INSERT INTO shop.using_required (ts) VALUES (TIMESTAMP '2014-09-27 20:00:00+00')",
+                "useLegacySql", false))
+                .then().statusCode(200);
+        query(Map.of("query", "CREATE TABLE shop.using_nullable AS SELECT TIMESTAMP '2014-09-27 20:00:00+00' AS ts",
+                "useLegacySql", false))
+                .then().statusCode(200);
+        query(Map.of("query", "SELECT COUNT(*) AS n FROM shop.using_required JOIN shop.using_nullable USING (ts)"
+                + " WHERE ts > @a", "useLegacySql", false, "parameterMode", "NAMED",
+                "queryParameters", List.of(Map.of("name", "a", "parameterType", Map.of("type", "STRING"),
+                        "parameterValue", Map.of("value", "2014-09-27t12:30:00")))))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("1"));
         query(Map.of("query", "CREATE TABLE shop.lowercase_quoted AS SELECT '2014-09-27t12:30:00' AS `CURRENT_DATE`",
                 "useLegacySql", false))
                 .then().statusCode(200);

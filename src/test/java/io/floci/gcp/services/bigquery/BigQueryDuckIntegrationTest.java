@@ -3448,6 +3448,23 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(5)
+    void anUnknownNameIsUnrecognizedLikeBigQuery() {
+        for (String[] c : new String[][] {
+                {"SELECT x FROM (SELECT 1 AS x) t ORDER BY missing", "missing"},
+                {"SELECT x FROM (SELECT 1 AS x) t WHERE missing > 0", "missing"},
+                {"SELECT x FROM (SELECT 1 AS x) t ORDER BY x + missing", "missing"},
+                {"SELECT missing", "missing"},
+                {"SELECT 1 + missing AS a", "missing"},
+                {"SELECT t.x FROM (SELECT 1 AS x) t UNION ALL SELECT 2 ORDER BY t.x", "t"},
+        }) {
+            query(Map.of("query", c[0], "useLegacySql", false))
+                    .then().statusCode(400)
+                    .body("error.message", equalTo("Unrecognized name: " + c[1]));
+        }
+    }
+
+    @Test
+    @Order(5)
     void orderByAMissingFieldOfASourceStructNamesTheFieldLikeBigQuery() {
         String source = "(SELECT STRUCT(1 AS n, STRUCT('a' AS k) AS m) AS s) t";
         for (String[] c : new String[][] {
@@ -3467,12 +3484,11 @@ class BigQueryDuckIntegrationTest {
                     .body("error.message", equalTo(c[1]));
         }
         // A path inside a subquery reads the subquery's own source, so it is not checked against the outer result;
-        // the unknown name keeps the engine's message, as any unknown ORDER BY column does.
+        // the unknown name is reported as BigQuery reports it.
         query(Map.of("query", "SELECT t.s AS s FROM (SELECT STRUCT(1 AS n) AS s) t"
                 + " ORDER BY (SELECT s.zz FROM (SELECT STRUCT(1 AS zz) AS s)), missing", "useLegacySql", false))
                 .then().statusCode(400)
-                .body("error.message", not(containsString("Field name zz")))
-                .body("error.message", containsString("\"missing\""));
+                .body("error.message", equalTo("Unrecognized name: missing"));
         query(Map.of("query", "SELECT t.s AS s FROM " + source + " ORDER BY s.zz", "useLegacySql", false, "dryRun", true))
                 .then().statusCode(400)
                 .body("error.message", equalTo("Field name zz does not exist in STRUCT<n INT64, m STRUCT<k STRING>>"));

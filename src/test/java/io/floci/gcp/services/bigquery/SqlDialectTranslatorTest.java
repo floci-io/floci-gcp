@@ -1411,6 +1411,16 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void aNestedSetOperationBranchOrderedByAStructFieldIsNotWrapped() {
+        // Wrapping it would lose the unnamed ROW the outer UNION ALL matches by position (#723).
+        String nested = sql("SELECT STRUCT(1 AS n) AS s UNION ALL (SELECT STRUCT(2 AS q) AS s UNION ALL"
+                + " SELECT STRUCT(3 AS q) AS s ORDER BY s.q DESC LIMIT 1)");
+        assertFalse(nested.contains("_floci_set_operation"), nested);
+        String top = sql("SELECT STRUCT(2 AS n) AS s UNION ALL SELECT STRUCT(1 AS n) ORDER BY s.n");
+        assertTrue(top.contains("_floci_set_operation"), top);
+    }
+
+    @Test
     void nestedGenericCastTypes() {
         assertEquals("SELECT list_transform(x, \"_floci_struct_cast_0\" -> list_extract(list_transform("
                 + "[list_extract(list_value(\"_floci_struct_cast_0\", row(NULL)), 1)],"

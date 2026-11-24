@@ -745,11 +745,9 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
   and so does the expression, where BigQuery types it `NUMERIC`.
 - A reserved keyword used as a loop or block label runs here, where BigQuery refuses it with
   `Reserved keyword 'outer' may not be used as a label name without backticks`.
-- An unknown name reports DuckDB's wording rather than BigQuery's: a query that names no such column
-  answers `Binder Error: Referenced column "x" was not found ...`, where BigQuery answers
-  `Unrecognized name: x at [1:8]`. The same holds for the other errors DuckDB raises while a
-  statement runs, such as a `NOT NULL` temporary column receiving a NULL, which answers
-  `Constraint Error: NOT NULL constraint failed: t.id` where BigQuery answers
+- An unknown name answers `Unrecognized name: x`, as in BigQuery, without its ` at [line:col]`. Most other
+  errors DuckDB raises while a statement runs keep DuckDB's wording: a `NOT NULL` temporary column receiving
+  a NULL answers `Constraint Error: NOT NULL constraint failed: t.id` where BigQuery answers
   `Required field id cannot be null`.
 - A function whose overload does not match the argument types names the GoogleSQL function, as
   BigQuery does (`No matching signature for function BYTE_LENGTH Argument types: NUMERIC`), without

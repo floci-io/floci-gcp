@@ -18,6 +18,7 @@ import org.junit.jupiter.api.Test;
 import java.net.URI;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -324,7 +325,7 @@ class GcsNotificationEventsIntegrationTest {
     }
 
     private String createNotification(String bucket, Map<String, Object> extra) {
-        Map<String, Object> body = new java.util.HashMap<>(extra);
+        Map<String, Object> body = new HashMap<>(extra);
         body.put("topic", "projects/test-project/topics/" + bucket);
         body.putIfAbsent("payload_format", "JSON_API_V1");
         return given().contentType("application/json").body(body)

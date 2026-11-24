@@ -4170,6 +4170,7 @@ final class SqlDialectTranslator {
         orderNanLikeBigQuery();
         wrapDuplicateOutputNames();
         String replacementStarExclusion = replacementStarExclusion();
+        wrapSetOperationsOrderedByField();
         String rendered = render(0, tokens.size()).trim();
         if (replacementStarExclusion != null) {
             rendered = "SELECT *" + replacementStarExclusion + " FROM (" + rendered
@@ -12782,6 +12783,106 @@ final class SqlDialectTranslator {
                 replaceStructAliasFields(qualify + 1, clauseEnd(qualify + 1, depth), aliases, true);
             }
         }
+    }
+
+    /**
+     * DuckDB sorts a set operation only by its result columns, so an ORDER BY that reads a field of one
+     * ({@code ... UNION ALL ... ORDER BY s.n}) fails with "Could not ORDER BY column", where BigQuery sorts by it.
+     * The set operation is wrapped as a derived table, as DuckDB's message suggests, with its ORDER BY, LIMIT and
+     * OFFSET left outside. It runs just before rendering, so no other pass reads the raw wrapper.
+     */
+    private void wrapSetOperationsOrderedByField() {
+        for (int order = tokens.size() - 1; order >= 0; order--) {
+            int by = nextSignificant(order + 1, tokens.size());
+            if (!tokens.get(order).isKeyword("ORDER") || by < 0 || !tokens.get(by).isKeyword("BY")
+                    || order > 0 && tokens.get(order - 1).text.contains("_floci_set_operation")) {
+                continue;
+            }
+            int depth = parenthesisDepth(order);
+            int start = order;
+            boolean setOperation = false;
+            for (int i = order - 1; i >= 0 && parenthesisDepth(i) >= depth; i--) {
+                if (parenthesisDepth(i) != depth) {
+                    continue;
+                }
+                Token token = tokens.get(i);
+                int quantifier = nextSignificant(i + 1, order);
+                setOperation |= (token.isKeyword("UNION") || token.isKeyword("INTERSECT") || token.isKeyword("EXCEPT"))
+                        && quantifier >= 0 && (tokens.get(quantifier).isKeyword("ALL")
+                        || tokens.get(quantifier).isKeyword("DISTINCT"));
+                start = i;
+            }
+            if (!setOperation || !readsField(by + 1, clauseEnd(by + 1, depth))) {
+                continue;
+            }
+            int body = queryBodyStart(start, order, depth);
+            if (body < 0 || setOperationBranch(start)) {
+                continue;
+            }
+            // Positions before this ORDER BY keep their places, so the scan goes on into the wrapped query, whose
+            // own derived tables may sort a set operation too; the guard above keeps this one from a second wrap.
+            tokens.add(order, Token.raw(") AS " + DuckTypes.quoteIdentifier("_floci_set_operation") + " "));
+            tokens.add(body, Token.raw("SELECT * FROM ("));
+        }
+    }
+
+    /**
+     * Whether the parenthesized query whose scope starts at {@code start} is itself a branch of an enclosing set
+     * operation. Its STRUCT fields take the first branch's names by position there, which a {@code SELECT *}
+     * wrapper would lose, so it is left as it is.
+     */
+    private boolean setOperationBranch(int start) {
+        int open = significantBefore(start);
+        if (open < 0 || !tokens.get(open).isPunct("(")) {
+            return false;
+        }
+        int before = significantBefore(open);
+        int after = nextSignificant(matchingParen(open) + 1, tokens.size());
+        return before >= 0 && (tokens.get(before).isKeyword("ALL") || tokens.get(before).isKeyword("DISTINCT"))
+                || after >= 0 && (tokens.get(after).isKeyword("UNION") || tokens.get(after).isKeyword("INTERSECT")
+                || tokens.get(after).isKeyword("EXCEPT"));
+    }
+
+    /** Whether the range holds a dotted path, {@code s.n}, outside a nested query. */
+    private boolean readsField(int start, int end) {
+        for (int i = start; i < end; i++) {
+            if (tokens.get(i).isPunct("(") && isQuery(i + 1, matchingParen(i))) {
+                i = matchingParen(i);
+                continue;
+            }
+            int dot = nextSignificant(i + 1, end);
+            int field = dot < 0 ? -1 : nextSignificant(dot + 1, end);
+            if (isName(tokens.get(i)) && dot >= 0 && tokens.get(dot).isPunct(".") && field >= 0
+                    && (tokens.get(field).kind == Kind.IDENT || tokens.get(field).kind == Kind.QIDENT)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Where the query of the scope starting at {@code start} begins: past a leading WITH list, or -1. */
+    private int queryBodyStart(int start, int end, int depth) {
+        if (!tokens.get(start).isKeyword("WITH")) {
+            return start;
+        }
+        for (int i = start + 1; i < end; i++) {
+            if (parenthesisDepth(i) != depth) {
+                continue;
+            }
+            Token token = tokens.get(i);
+            if (token.isKeyword("SELECT")) {
+                return i;
+            }
+            if (token.isPunct("(")) {
+                int before = significantBefore(i);
+                if (before >= 0 && tokens.get(before).isKeyword("AS")) {
+                    i = matchingParen(i);
+                    continue;
+                }
+                return i;
+            }
+        }
+        return -1;
     }
 
     /**

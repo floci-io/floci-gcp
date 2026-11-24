@@ -432,6 +432,8 @@ Object names containing `/`, spaces, `+`, or percent-encoded sequences round-tri
 **Pub/Sub notifications (REST JSON):**
 
 - `CreateNotification` / `ListNotifications` / `GetNotification` / `DeleteNotification` (`/storage/v1/b/{bucket}/notificationConfigs`), object changes publish to the configured Pub/Sub topic in the local backend
+- Event types: `OBJECT_FINALIZE` (upload, copy, rewrite, compose), `OBJECT_METADATA_UPDATE` (JSON `objects.patch` / `objects.update`, gRPC `UpdateObject`), `OBJECT_DELETE`, and `OBJECT_ARCHIVE` when the bucket has versioning enabled. Replacing an object sends `OBJECT_FINALIZE` with `overwroteGeneration` plus `OBJECT_DELETE` or `OBJECT_ARCHIVE` with `overwrittenByGeneration`
+- Every message carries `notificationConfig` (`projects/_/buckets/{bucket}/notificationConfigs/{id}`), `eventType`, `payloadFormat`, `bucketId`, `objectId`, `objectGeneration`, `eventTime` (RFC 3339) and the config's `custom_attributes`
 
 **Object ACLs (REST JSON):**
 

@@ -44,6 +44,64 @@ class DuckSqlEngineServiceTest {
     }
 
     @Test
+    void shimBinderFailuresUseTheGoogleSqlFunctionName() {
+        assertEquals("No matching signature for function BYTE_LENGTH Argument types: NUMERIC",
+                DuckSqlEngine.queryErrorMessage("Binder Error: No function matches the given name and argument "
+                        + "types 'floci_byte_length(DECIMAL(38,9))'. You might need to add explicit type casts.\n"
+                        + "Candidate functions:\n  floci_byte_length(VARCHAR) -> BIGINT"));
+        assertEquals("No matching signature for function LENGTH Argument types: INT64",
+                DuckSqlEngine.queryErrorMessage("Binder Error: No function matches the given name and argument "
+                        + "types 'floci_length(INTEGER_LITERAL)'."));
+        assertEquals("No matching signature for function NET.IP_TRUNC Argument types: STRING, INT64",
+                DuckSqlEngine.queryErrorMessage("Binder Error: No function matches the given name and argument "
+                        + "types 'ip_trunc(VARCHAR, BIGINT)'."));
+        assertEquals("No matching signature for function FARM_FINGERPRINT Argument types: ARRAY<INT64>",
+                DuckSqlEngine.queryErrorMessage("Binder Error: No function matches the given name and argument "
+                        + "types 'farm_fingerprint(LIST(BIGINT))'."));
+        assertEquals("No matching signature for function HLL_COUNT.INIT Argument types: NUMERIC, INT64",
+                DuckSqlEngine.queryErrorMessage("Binder Error: No function matches the given name and argument "
+                        + "types 'floci_hll_init(DECIMAL(38,9), INTEGER)'."));
+        assertEquals("No matching signature for function LENGTH Argument types: STRUCT<x INT64>",
+                DuckSqlEngine.queryErrorMessage("Binder Error: No function matches the given name and argument "
+                        + "types 'floci_length(STRUCT(x INTEGER))'."));
+        assertEquals("No matching signature for function LENGTH Argument types: STRUCT<x INT64, y STRING>",
+                DuckSqlEngine.queryErrorMessage("Binder Error: No function matches the given name and argument "
+                        + "types 'floci_length(STRUCT(x INTEGER, y VARCHAR))'."));
+        assertEquals("No matching signature for function LENGTH Argument types: ARRAY<STRUCT<x INT64>>",
+                DuckSqlEngine.queryErrorMessage("Binder Error: No function matches the given name and argument "
+                        + "types 'floci_length(STRUCT(x INTEGER)[])'."));
+        assertEquals("No matching signature for function LENGTH Argument types: STRUCT<x STRUCT<y INT64>>",
+                DuckSqlEngine.queryErrorMessage("Binder Error: No function matches the given name and argument "
+                        + "types 'floci_length(STRUCT(x STRUCT(y INTEGER)))'."));
+        assertEquals("No matching signature for function LENGTH Argument types: STRUCT<INT64>",
+                DuckSqlEngine.queryErrorMessage("Binder Error: No function matches the given name and argument "
+                        + "types 'floci_length(STRUCT(INTEGER))'."));
+        assertEquals("No matching signature for function LENGTH Argument types: STRUCT<INT64>",
+                DuckSqlEngine.queryErrorMessage("Binder Error: No function matches the given name and argument "
+                        + "types 'floci_length(STRUCT(_field_1 INTEGER))'."));
+        assertEquals("No matching signature for function LENGTH Argument types: STRUCT<`a b` INT64>",
+                DuckSqlEngine.queryErrorMessage("Binder Error: No function matches the given name and argument "
+                        + "types 'floci_length(STRUCT(\"a b\" INTEGER))'."));
+        // A quoted field name can hold a parenthesis or a comma, which DuckDB prints inside the name.
+        assertEquals("No matching signature for function LENGTH Argument types: STRUCT<`a)` INT64, b INT64>",
+                DuckSqlEngine.queryErrorMessage("Binder Error: No function matches the given name and argument "
+                        + "types 'floci_length(STRUCT(\"a)\" INTEGER, b INTEGER))'."));
+        assertEquals("No matching signature for function LENGTH Argument types: STRUCT<`x,y` INT64, b INT64>",
+                DuckSqlEngine.queryErrorMessage("Binder Error: No function matches the given name and argument "
+                        + "types 'floci_length(STRUCT(\"x,y\" INTEGER, b INTEGER))'."));
+        // A spelling the parser cannot finish is reported as the engine wrote it, and returns.
+        assertEquals("No matching signature for function LENGTH Argument types: STRUCT(\"a)\" INTEGER",
+                DuckSqlEngine.queryErrorMessage("Binder Error: No function matches the given name and argument "
+                        + "types 'floci_length(STRUCT(\"a)\" INTEGER)'."));
+    }
+
+    @Test
+    void binderFailuresOutsideTheShimsKeepDuckDbWording() {
+        String message = "Binder Error: No function matches the given name and argument types 'sum(VARCHAR)'";
+        assertEquals(message, DuckSqlEngine.queryErrorMessage(message));
+    }
+
+    @Test
     void callerSqlRunsAfterExternalAccessIsLocked() {
         String setup = setupForAViewQuery(false);
         int staging = setup.indexOf("read_json(");

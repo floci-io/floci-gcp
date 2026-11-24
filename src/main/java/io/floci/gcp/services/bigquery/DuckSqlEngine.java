@@ -175,6 +175,9 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
      */
     private static final Pattern PLAIN_IDENTIFIER = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*");
 
+    /** The name the translator gives a STRUCT field written without one. */
+    private static final Pattern ANONYMOUS_STRUCT_FIELD = Pattern.compile("_field_[0-9]+");
+
     private static String structType(TableFieldSchema field, Set<List<String>> anonymousFields, List<String> prefix) {
         List<String> parts = new ArrayList<>();
         for (TableFieldSchema child : field.getFields() != null ? field.getFields() : List.<TableFieldSchema>of()) {
@@ -1146,6 +1149,24 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
     private static final Pattern EMPTY_STAR_PROJECTION = Pattern.compile(
             "SELECT list is empty after resolving \\* expressions");
 
+    /** The sidecar shims, and the GoogleSQL function each one stands in for. */
+    private static final Map<String, String> SHIMMED_FUNCTION_NAMES = Map.ofEntries(
+            Map.entry("floci_length", "LENGTH"),
+            Map.entry("floci_byte_length", "BYTE_LENGTH"),
+            Map.entry("floci_to_json_string", "TO_JSON_STRING"),
+            Map.entry("farm_fingerprint", "FARM_FINGERPRINT"),
+            Map.entry("ip_from_string", "NET.IP_FROM_STRING"),
+            Map.entry("safe_ip_from_string", "NET.SAFE_IP_FROM_STRING"),
+            Map.entry("ip_to_string", "NET.IP_TO_STRING"),
+            Map.entry("ip_trunc", "NET.IP_TRUNC"),
+            Map.entry("floci_hll_init", "HLL_COUNT.INIT"),
+            Map.entry("floci_hll_extract", "HLL_COUNT.EXTRACT"),
+            Map.entry("floci_hll_merge", "HLL_COUNT.MERGE"),
+            Map.entry("floci_hll_merge_partial", "HLL_COUNT.MERGE_PARTIAL"));
+
+    private static final Pattern SHIM_BINDER_MISS = Pattern.compile(
+            "No function matches the given name and argument types '(?<call>[^']*)'");
+
     /** DuckDB reports a star-list failure in its own words; BigQuery names the same failure differently. */
     static String queryErrorMessage(String message) {
         Matcher miss = COLUMN_LIST_MISS.matcher(message);
@@ -1161,7 +1182,161 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         if (both.find()) {
             return "Column " + both.group("column") + " cannot occur in both SELECT * EXCEPT and REPLACE";
         }
+        Matcher shim = SHIM_BINDER_MISS.matcher(message);
+        if (shim.find()) {
+            String signature = shimmedSignature(shim.group("call"));
+            if (signature != null) {
+                return signature;
+            }
+        }
         return message;
+    }
+
+    /**
+     * The sidecar shims answer inside a {@code Binder Error: No function matches ... 'floci_byte_length(DECIMAL(38,9))'}
+     * when the caller passes a type the function has no overload for. BigQuery names the function
+     * rather than the shim, with the argument types in its own spelling.
+     */
+    private static String shimmedSignature(String call) {
+        int open = call.indexOf('(');
+        if (open < 0 || !call.endsWith(")")) {
+            return null;
+        }
+        String name = SHIMMED_FUNCTION_NAMES.get(call.substring(0, open));
+        if (name == null) {
+            return null;
+        }
+        List<String> types = new ArrayList<>();
+        for (String argument : splitTypes(call.substring(open + 1, call.length() - 1))) {
+            types.add(googleSqlTypeName(argument));
+        }
+        return "No matching signature for function " + name + " Argument types: " + String.join(", ", types);
+    }
+
+    /**
+     * Splits a DuckDB type list, keeping the commas inside {@code DECIMAL(38,9)} and {@code STRUCT(...)}
+     * together. A quoted name may itself hold a parenthesis or a comma: DuckDB prints the field
+     * {@code a)} as {@code "a)"}.
+     */
+    private static List<String> splitTypes(String arguments) {
+        List<String> types = new ArrayList<>();
+        int depth = 0;
+        int start = 0;
+        char quote = 0;
+        for (int i = 0; i < arguments.length(); i++) {
+            char c = arguments.charAt(i);
+            if (quote != 0) {
+                if (c == quote) {
+                    if (i + 1 < arguments.length() && arguments.charAt(i + 1) == quote) {
+                        // A doubled quote is an escaped quote: the name continues.
+                        i++;
+                    } else {
+                        quote = 0;
+                    }
+                }
+                continue;
+            }
+            if (c == '"' || c == '\'') {
+                quote = c;
+            } else if (c == '(' || c == '[') {
+                depth++;
+            } else if (c == ')' || c == ']') {
+                depth--;
+            } else if (c == ',' && depth == 0) {
+                types.add(arguments.substring(start, i).trim());
+                start = i + 1;
+            }
+        }
+        String last = arguments.substring(start).trim();
+        if (!last.isEmpty()) {
+            types.add(last);
+        }
+        return types;
+    }
+
+    /** The GoogleSQL name of a DuckDB type as the sidecar prints it in a binder error. */
+    static String googleSqlTypeName(String duckType) {
+        String type = duckType.trim();
+        if (type.endsWith("_LITERAL")) {
+            type = type.substring(0, type.length() - "_LITERAL".length());
+        }
+        String upper = type.toUpperCase(Locale.ROOT);
+        if (upper.startsWith("LIST(") && type.endsWith(")")) {
+            return "ARRAY<" + googleSqlTypeName(type.substring(5, type.length() - 1)) + ">";
+        }
+        if (upper.startsWith("STRUCT(") || upper.startsWith("MAP(") || upper.startsWith("UNION(")
+                || type.endsWith("[]")) {
+            // Nested types are printed in DuckDB's own spelling, so they are parsed back into their
+            // fields and element types before the GoogleSQL names are applied. A spelling the parser
+            // cannot finish is reported as the engine wrote it rather than failing the query with a
+            // parser error of our own.
+            try {
+                return googleSqlTypeName(DuckTypes.parse(type));
+            } catch (RuntimeException e) {
+                LOG.debugv("Could not parse the engine's type spelling ''{0}'': {1}", type, e.getMessage());
+                return type;
+            }
+        }
+        if (upper.startsWith("DECIMAL(") || upper.startsWith("NUMERIC(")) {
+            return "NUMERIC";
+        }
+        return switch (upper) {
+            case "TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT", "UHUGEINT", "UTINYINT",
+                 "USMALLINT", "UINTEGER", "UBIGINT", "VARINT", "INT", "INT2", "INT4", "INT8",
+                 "NULL" -> "INT64";
+            case "FLOAT", "REAL", "DOUBLE", "DOUBLE PRECISION", "FLOAT4", "FLOAT8" -> "FLOAT64";
+            case "DECIMAL", "NUMERIC" -> "NUMERIC";
+            case "BOOLEAN", "BOOL" -> "BOOL";
+            case "VARCHAR", "TEXT", "STRING", "CHAR", "BPCHAR", "UUID" -> "STRING";
+            case "BLOB", "BYTEA", "VARBINARY" -> "BYTES";
+            case "TIMESTAMP", "TIMESTAMP_S", "TIMESTAMP_MS", "TIMESTAMP_NS", "DATETIME" -> "DATETIME";
+            case "TIMESTAMPTZ", "TIMESTAMP WITH TIME ZONE" -> "TIMESTAMP";
+            case "TIME", "TIMETZ", "TIME WITH TIME ZONE" -> "TIME";
+            case "DATE" -> "DATE";
+            case "JSON" -> "JSON";
+            default -> type;
+        };
+    }
+
+    /** The GoogleSQL name of a parsed DuckDB type, including its nested fields and elements. */
+    private static String googleSqlTypeName(DuckTypes.DuckType type) {
+        if (type.isList()) {
+            return "ARRAY<" + googleSqlTypeName(type.element()) + ">";
+        }
+        if (type.isStruct()) {
+            StringBuilder rendered = new StringBuilder("STRUCT<");
+            boolean first = true;
+            for (DuckTypes.DuckField field : type.fields()) {
+                if (!first) {
+                    rendered.append(", ");
+                }
+                first = false;
+                if (field.type().base().isEmpty()) {
+                    // DuckDB prints an unnamed struct field as its type alone; the parser reads that
+                    // word as the field's name.
+                    rendered.append(googleSqlTypeName(field.name()));
+                    continue;
+                }
+                if (ANONYMOUS_STRUCT_FIELD.matcher(field.name()).matches()) {
+                    // The translator names an anonymous STRUCT field `_field_<position>`; BigQuery
+                    // prints the field's type without a name.
+                    rendered.append(googleSqlTypeName(field.type()));
+                    continue;
+                }
+                rendered.append(googleSqlIdentifier(field.name())).append(' ')
+                        .append(googleSqlTypeName(field.type()));
+            }
+            return rendered.append('>').toString();
+        }
+        return googleSqlTypeName(type.base());
+    }
+
+    /** A GoogleSQL field name: bare when it is a plain identifier, backticked otherwise. */
+    private static String googleSqlIdentifier(String name) {
+        return PLAIN_IDENTIFIER.matcher(name).matches()
+                && !SqlDialectTranslator.GOOGLESQL_RESERVED.contains(name.toUpperCase(Locale.ROOT))
+                ? name
+                : "`" + name.replace("`", "\\`") + "`";
     }
 
     /**

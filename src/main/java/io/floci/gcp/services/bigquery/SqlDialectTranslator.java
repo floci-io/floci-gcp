@@ -159,8 +159,10 @@ final class SqlDialectTranslator {
     private static final Set<String> SHIMMED_FUNCTIONS = Set.of(
             "CAST", "SAFE_CAST", "EXTRACT", "STRUCT", "SAFE_DIVIDE", "IEEE_DIVIDE", "DIV", "IF", "COUNTIF", "CONCAT",
             "LOGICAL_AND", "LOGICAL_OR", "ARRAY_LENGTH", "ARRAY_REVERSE", "ARRAY_AGG", "ARRAY_CONCAT_AGG", "CONTAINS_SUBSTR",
-            "APPROX_COUNT_DISTINCT", "TO_HEX", "MD5", "SHA1", "SHA256", "RAND", "INITCAP", "ANY_VALUE",
-            "GENERATE_ARRAY", "GENERATE_DATE_ARRAY", "GENERATE_TIMESTAMP_ARRAY", "SPLIT", "FORMAT", "APPROX_QUANTILES",
+            "FARM_FINGERPRINT", "APPROX_COUNT_DISTINCT", "BYTE_LENGTH", "TO_HEX", "MD5", "SHA1", "SHA256",
+            "LENGTH", "RAND", "INITCAP", "ANY_VALUE",
+            "GENERATE_ARRAY", "GENERATE_DATE_ARRAY", "GENERATE_TIMESTAMP_ARRAY", "SPLIT", "FORMAT",
+            "APPROX_QUANTILES",
             "TO_JSON_STRING", "JSON_VALUE", "JSON_EXTRACT_SCALAR", "JSON_QUERY", "JSON_EXTRACT", "JSON_TYPE",
             "REGEXP_CONTAINS", "REGEXP_EXTRACT", "REGEXP_EXTRACT_ALL", "REGEXP_REPLACE", "CURRENT_TIMESTAMP",
             "CURRENT_DATE",
@@ -5195,13 +5197,12 @@ final class SqlDialectTranslator {
                 continue;
             }
             Token token = tokens.get(i);
-            if (token.kind != Kind.IDENT || isPrecededByDot(i)
-                    || !STRUCT_STAR_AGGREGATES.contains(token.upper())) {
+            if (token.kind != Kind.IDENT || isPrecededByDot(i)) {
                 i++;
                 continue;
             }
-            int open = nextSignificant(i + 1, end);
-            if (open < 0 || !tokens.get(open).isPunct("(")) {
+            int open = aggregateCallOpen(i, end);
+            if (open < 0) {
                 i++;
                 continue;
             }
@@ -7260,7 +7261,7 @@ final class SqlDialectTranslator {
             }
             int close = matchingParen(i);
             int after = close < 0 ? -1 : nextSignificant(close + 1, tokens.size());
-            return STRUCT_STAR_AGGREGATES.contains(name)
+            return isAggregateCallName(call)
                     && (after < 0 || !tokens.get(after).isKeyword("OVER"));
         }
         return false;
@@ -7487,6 +7488,57 @@ final class SqlDialectTranslator {
             "APPROX_COUNT_DISTINCT", "APPROX_QUANTILES", "APPROX_TOP_COUNT", "APPROX_TOP_SUM", "STDDEV",
             "STDDEV_POP", "STDDEV_SAMP", "VAR_POP", "VAR_SAMP", "VARIANCE", "CORR", "COVAR_POP", "COVAR_SAMP");
 
+    /** The HLL counters that aggregate; {@code HLL_COUNT.EXTRACT} is a scalar and is not one of them. */
+    private static final Set<String> HLL_COUNT_AGGREGATES = Set.of("INIT", "MERGE", "MERGE_PARTIAL");
+
+    /**
+     * The opening parenthesis of the aggregate call that starts at token {@code start}, or -1. GoogleSQL
+     * spells the HLL counters with a qualifier, so their call starts at {@code HLL_COUNT} rather than at
+     * the function name, which a bare set membership test would miss.
+     */
+    private int aggregateCallOpen(int start, int end) {
+        if (start < 0 || start >= tokens.size() || tokens.get(start).kind != Kind.IDENT) {
+            return -1;
+        }
+        String name = tokens.get(start).upper();
+        int function = start;
+        if (name.equals("HLL_COUNT")) {
+            int dot = nextSignificant(start + 1, end);
+            if (dot < 0 || !tokens.get(dot).isPunct(".")) {
+                return -1;
+            }
+            function = nextSignificant(dot + 1, end);
+            if (function < 0 || function >= tokens.size()
+                    || !HLL_COUNT_AGGREGATES.contains(tokens.get(function).upper())) {
+                return -1;
+            }
+        } else if (!STRUCT_STAR_AGGREGATES.contains(name)) {
+            return -1;
+        }
+        int open = nextSignificant(function + 1, end);
+        return open >= 0 && open < end && tokens.get(open).isPunct("(") ? open : -1;
+    }
+
+    /** True when the call whose function name sits at {@code function} is an aggregate, HLL counters included. */
+    private boolean isAggregateCallName(int function) {
+        if (function < 0 || function >= tokens.size()) {
+            return false;
+        }
+        String name = tokens.get(function).upper();
+        if (STRUCT_STAR_AGGREGATES.contains(name)) {
+            return true;
+        }
+        if (!HLL_COUNT_AGGREGATES.contains(name)) {
+            return false;
+        }
+        int dot = significantBefore(function);
+        if (dot < 0 || !tokens.get(dot).isPunct(".")) {
+            return false;
+        }
+        int qualifier = significantBefore(dot);
+        return qualifier >= 0 && tokens.get(qualifier).upper().equals("HLL_COUNT");
+    }
+
     /**
      * Rejects a star over an aggregate that cannot produce a STRUCT. BigQuery errors before expansion, and
      * letting DuckDB do it would return rows for {@code MAX(t.s).*} instead.
@@ -7507,13 +7559,20 @@ final class SqlDialectTranslator {
             return;
         }
         Token token = tokens.get(first);
-        if (token.kind != Kind.IDENT || !STRUCT_STAR_AGGREGATES.contains(token.upper())
-                || token.isKeyword("ANY_VALUE")) {
+        if (token.kind != Kind.IDENT || token.isKeyword("ANY_VALUE")) {
             return;
         }
-        int open = nextSignificant(first + 1, operand[1]);
-        if (open < 0 || !tokens.get(open).isPunct("(")) {
+        int open = aggregateCallOpen(first, operand[1]);
+        if (open < 0) {
             return;
+        }
+        if (token.upper().equals("HLL_COUNT")) {
+            // BigQuery names the type the counter returns: MERGE estimates in INT64, the sketch
+            // forms in BYTES.
+            int hllDot = nextSignificant(first + 1, operand[1]);
+            int counter = hllDot < 0 ? -1 : nextSignificant(hllDot + 1, operand[1]);
+            String type = counter >= 0 && tokens.get(counter).upper().equals("MERGE") ? "INT64" : "BYTES";
+            throw invalidQuery("Dot-star is not supported for type " + type);
         }
         int close = matchingParen(open);
         int afterCall = close < 0 ? -1 : nextNonSpace(close + 1, operand[1]);
@@ -7586,13 +7645,12 @@ final class SqlDialectTranslator {
     private boolean structStarAggregates(int start, int end) {
         for (int i = start; i < end; i++) {
             Token token = tokens.get(i);
-            if (token.kind != Kind.IDENT || !STRUCT_STAR_AGGREGATES.contains(token.upper())
-                    || insideNestedQuery(i, start)) {
+            if (token.kind != Kind.IDENT || isPrecededByDot(i) || insideNestedQuery(i, start)) {
                 // An aggregate inside a nested query belongs to that query, not to this one.
                 continue;
             }
-            int next = nextSignificant(i + 1, end);
-            if (next >= 0 && tokens.get(next).isPunct("(")) {
+            int next = aggregateCallOpen(i, end);
+            if (next >= 0) {
                 // A call, not an alias: `sum.s.*` reads a source named `sum`, it does not aggregate. A call
                 // followed by OVER is a window function, which computes per row rather than per group.
                 int close = matchingParen(next);
@@ -13580,7 +13638,7 @@ final class SqlDialectTranslator {
                 return -1;
             }
             int next = nextSignificant(i + 1, close);
-            if (token.isKeyword("OVER") || token.kind == Kind.IDENT && STRUCT_STAR_AGGREGATES.contains(token.upper())
+            if (token.isKeyword("OVER") || token.kind == Kind.IDENT && aggregateCallOpen(i, close) >= 0
                     && next >= 0 && tokens.get(next).isPunct("(")) {
                 return -1;
             }
@@ -14532,6 +14590,34 @@ final class SqlDialectTranslator {
                 if (function >= 0 && open >= 0 && tokens.get(open).isPunct("(")) {
                     int close = matchingParen(open);
                     String call = renderSafeCall(tokens.get(function).upper(), open, close);
+                    if (call != null) {
+                        out.append(call);
+                        i = close + 1;
+                        continue;
+                    }
+                }
+            }
+            if (upper.equals("NET") && next >= 0 && tokens.get(next).isPunct(".")) {
+                int function = nextSignificant(next + 1, end);
+                int open = function < 0 ? -1 : nextSignificant(function + 1, end);
+                if (function >= 0 && open >= 0 && tokens.get(open).isPunct("(")) {
+                    int close = matchingParen(open);
+                    String call = renderNet(tokens.get(function).upper(), open, close);
+                    if (call != null) {
+                        out.append(call);
+                        i = close + 1;
+                        continue;
+                    }
+                }
+            }
+            if (upper.equals("HLL_COUNT") && !isPrecededByDot(i)) {
+                int dot = next;
+                int function = dot < 0 ? -1 : nextSignificant(dot + 1, end);
+                int open = function < 0 ? -1 : nextSignificant(function + 1, end);
+                if (dot >= 0 && tokens.get(dot).isPunct(".") && function >= 0
+                        && tokens.get(function).kind == Kind.IDENT && open >= 0 && tokens.get(open).isPunct("(")) {
+                    int close = matchingParen(open);
+                    String call = renderHllCount(tokens.get(function).upper(), open, close);
                     if (call != null) {
                         out.append(call);
                         i = close + 1;
@@ -16047,6 +16133,10 @@ final class SqlDialectTranslator {
                 yield args(a, 2, name, "contains(_floci_nfkc_casefold(" + at(a, 0)
                         + "), _floci_nfkc_casefold(" + at(a, 1) + "))");
             }
+            case "BYTE_LENGTH" -> {
+                exactArgs(a, 1, name);
+                yield "floci_byte_length(" + at(a, 0) + ")";
+            }
             // BigQuery emits lowercase hexadecimal text; DuckDB's hex/to_hex emits uppercase.
             case "TO_HEX" -> args(a, 1, name, "lower(hex(" + at(a, 0) + "))");
             // BigQuery's cryptographic hash functions return raw BYTES. DuckDB returns the
@@ -16054,7 +16144,15 @@ final class SqlDialectTranslator {
             case "MD5" -> args(a, 1, name, "from_hex(md5(" + at(a, 0) + "))");
             case "SHA1" -> args(a, 1, name, "from_hex(sha1(" + at(a, 0) + "))");
             case "SHA256" -> args(a, 1, name, "from_hex(sha256(" + at(a, 0) + "))");
+            case "LENGTH" -> {
+                exactArgs(a, 1, name);
+                yield "floci_length(" + at(a, 0) + ")";
+            }
             case "RAND" -> args(a, 0, name, "random()");
+            case "FARM_FINGERPRINT" -> {
+                exactArgs(a, 1, name);
+                yield "farm_fingerprint(" + at(a, 0) + ")";
+            }
             case "GENERATE_ARRAY" -> "generate_series(" + String.join(", ", a) + ")";
             case "GENERATE_DATE_ARRAY" -> generateDateArray(a);
             case "GENERATE_TIMESTAMP_ARRAY" -> generateTimestampArray(a);
@@ -16062,7 +16160,7 @@ final class SqlDialectTranslator {
                     : "string_split(" + String.join(", ", a) + ")";
             case "FORMAT" -> "printf(" + String.join(", ", a) + ")";
             case "INITCAP" -> initcap(a);
-            case "TO_JSON_STRING" -> "CAST(to_json(" + at(a, 0) + ") AS VARCHAR)";
+            case "TO_JSON_STRING" -> renderToJsonString(a, name);
             case "JSON_VALUE", "JSON_EXTRACT_SCALAR" -> a.size() == 1
                     ? "json_extract_string(" + a.getFirst() + ", '$')"
                     : "json_extract_string(" + String.join(", ", a) + ")";
@@ -16265,6 +16363,16 @@ final class SqlDialectTranslator {
                 + ") END), 1)";
     }
 
+    /**
+     * The sidecar serializer renders a NULL value as the JSON text {@code null} and answers NULL only
+     * when {@code pretty_print} is NULL, so the call stands on its own: rendering {@code pretty_print}
+     * a second time to decide that would evaluate a volatile argument twice.
+     */
+    private static String renderToJsonString(List<String> arguments, String name) {
+        rangedArgs(arguments, 1, 2, name);
+        return "floci_to_json_string(" + String.join(", ", arguments) + ")";
+    }
+
     private static String renderApproxQuantiles(List<String> arguments, String name) {
         if (arguments.size() != 2) {
             return args(arguments, 2, name, "");
@@ -16288,6 +16396,35 @@ final class SqlDialectTranslator {
         }
         return "quantile_disc(" + at(arguments, 0) + ", list_transform(generate_series(0, CAST(" + quantileCount
                 + " AS BIGINT)), x -> CAST(x AS DOUBLE) / CAST(" + quantileCount + " AS DOUBLE)))";
+    }
+
+    /** DuckDB has no HLL++ functions, so the sidecar supplies BigQuery-compatible ZetaSketch aggregates. */
+    private String renderHllCount(String function, int open, int close) {
+        List<String> arguments = arguments(open, close);
+        return switch (function) {
+            // HLL_COUNT.INIT, MERGE and MERGE_PARTIAL are aggregates in BigQuery, and the sidecar
+            // implements them as aggregates too, so a group is sketched as its rows arrive.
+            case "INIT" -> {
+                hllArgs(arguments, 1, 2, function);
+                String precision = arguments.size() == 2
+                        ? ", CAST(" + at(arguments, 1) + " AS INTEGER)"
+                        : "";
+                yield "floci_hll_init(" + at(arguments, 0) + precision + ")";
+            }
+            case "EXTRACT" -> {
+                hllArgs(arguments, 1, 1, function);
+                yield "floci_hll_extract(CAST(" + at(arguments, 0) + " AS BLOB))";
+            }
+            case "MERGE" -> {
+                hllArgs(arguments, 1, 1, function);
+                yield "floci_hll_merge(CAST(" + at(arguments, 0) + " AS BLOB))";
+            }
+            case "MERGE_PARTIAL" -> {
+                hllArgs(arguments, 1, 1, function);
+                yield "floci_hll_merge_partial(CAST(" + at(arguments, 0) + " AS BLOB))";
+            }
+            default -> null;
+        };
     }
 
     private String renderSafeCall(String function, int open, int close) {
@@ -16350,6 +16487,36 @@ final class SqlDialectTranslator {
                 + ch + ") ELSE lower(" + ch + ") END), '') END), 1)";
     }
 
+    private String renderNet(String function, int open, int close) {
+        List<String> arguments = arguments(open, close);
+        return switch (function) {
+            case "SAFE_IP_FROM_STRING" -> {
+                exactArgs(arguments, 1, "NET.SAFE_IP_FROM_STRING");
+                yield "safe_ip_from_string(" + at(arguments, 0) + ")";
+            }
+            case "IP_FROM_STRING" -> {
+                exactArgs(arguments, 1, "NET.IP_FROM_STRING");
+                yield "ip_from_string(" + at(arguments, 0) + ")";
+            }
+            case "IP_TO_STRING" -> {
+                exactArgs(arguments, 1, "NET.IP_TO_STRING");
+                yield "ip_to_string(" + at(arguments, 0) + ")";
+            }
+            case "IP_TRUNC" -> {
+                exactArgs(arguments, 2, "NET.IP_TRUNC");
+                yield "ip_trunc(" + at(arguments, 0) + ", " + at(arguments, 1) + ")";
+            }
+            default -> null;
+        };
+    }
+
+    private static void hllArgs(List<String> arguments, int minimum, int maximum, String function) {
+        if (arguments.size() < minimum || arguments.size() > maximum) {
+            throw invalidQuery("No matching signature for function HLL_COUNT." + function + " with "
+                    + arguments.size() + " arguments");
+        }
+    }
+
     private static String args(List<String> a, int expected, String name, String rendered) {
         if (a.size() < expected) {
             throw invalidQuery("No matching signature for function " + name + " with " + a.size() + " arguments");
@@ -16363,6 +16530,17 @@ final class SqlDialectTranslator {
                     + " arguments");
         }
         return rendered;
+    }
+
+    private static void exactArgs(List<String> arguments, int expected, String name) {
+        rangedArgs(arguments, expected, expected, name);
+    }
+
+    private static void rangedArgs(List<String> arguments, int minimum, int maximum, String name) {
+        if (arguments.size() < minimum || arguments.size() > maximum) {
+            throw invalidQuery("No matching signature for function " + name + " with "
+                    + arguments.size() + " arguments");
+        }
     }
 
     private static String at(List<String> a, int index) {

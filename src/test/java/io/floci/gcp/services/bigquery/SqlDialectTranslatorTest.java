@@ -2101,6 +2101,23 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void groupedHllCounterTakesTheSameStructStarRewriteAsAnUnqualifiedAggregate() {
+        // The rewrite has to see the qualified HLL counter as an aggregate; otherwise the call is
+        // treated as a column reference and the query fails with `Unrecognized name: HLL_COUNT`.
+        String hll = "SELECT t.s.* EXCEPT(a), HLL_COUNT.INIT(t.id) AS sketch FROM ds.t t GROUP BY ALL";
+        assertEquals("SELECT * EXCLUDE (\"a\", \"_floci_source_0\"),"
+                        + " floci_hll_init(\"_floci_source_0\") AS sketch"
+                        + " FROM (SELECT unnest(t.s), \"t\".\"id\" AS \"_floci_source_0\""
+                        + " FROM \"ds\".\"t\" AS \"t\") AS \"_expanded\" GROUP BY ALL",
+                sql(hll));
+        assertEquals("SELECT * EXCLUDE (\"a\", \"_floci_source_0\"),"
+                        + " floci_hll_merge(CAST(\"_floci_source_0\" AS BLOB)) AS sketch"
+                        + " FROM (SELECT unnest(t.s), \"t\".\"id\" AS \"_floci_source_0\""
+                        + " FROM \"ds\".\"t\" AS \"t\") AS \"_expanded\" GROUP BY ALL",
+                sql("SELECT t.s.* EXCEPT(a), HLL_COUNT.MERGE(t.id) AS sketch FROM ds.t t GROUP BY ALL"));
+    }
+
+    @Test
     void aggregateStructStarRejectsAnAggregateThatCannotReturnAStruct() {
         String base = " FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t";
         assertEquals("MAX is not defined for arguments of type STRUCT",
@@ -2115,6 +2132,14 @@ class SqlDialectTranslatorTest {
                 invalid("SELECT ARRAY_AGG(t.s).* EXCEPT(a)" + base).getMessage());
         assertEquals("Dot-star is not supported for the aggregate expression",
                 invalid("SELECT MAX(t.s.a).*" + base).getMessage());
+        // The HLL counters name the type BigQuery names: MERGE estimates in INT64, the sketch
+        // forms in BYTES.
+        assertEquals("Dot-star is not supported for type BYTES",
+                invalid("SELECT HLL_COUNT.INIT(t.b).*" + base).getMessage());
+        assertEquals("Dot-star is not supported for type BYTES",
+                invalid("SELECT HLL_COUNT.MERGE_PARTIAL(t.b).*" + base).getMessage());
+        assertEquals("Dot-star is not supported for type INT64",
+                invalid("SELECT HLL_COUNT.MERGE(t.b).*" + base).getMessage());
         // ANY_VALUE keeps its input type, so it can still expand a STRUCT.
         assertTrue(sql("SELECT ANY_VALUE(t.s).* EXCEPT(a)" + base + " GROUP BY ALL")
                 .contains("ANY_VALUE(t.s) AS \"_floci_star\""));
@@ -2191,13 +2216,13 @@ class SqlDialectTranslatorTest {
     @Test
     void structStarReplaceProjectsTheWholeStructWhenTheExpressionUsesIt() {
         assertEquals("SELECT * EXCLUDE (\"_floci_struct_0\")"
-                        + " REPLACE (CAST(to_json(\"_floci_struct_0\") AS VARCHAR) AS b)"
+                        + " REPLACE (floci_to_json_string(\"_floci_struct_0\") AS b)"
                         + " FROM (SELECT unnest(t.s), t.s AS \"_floci_struct_0\""
                         + " FROM (SELECT {'a': 1, 'b': 'x'} AS \"s\") t) AS \"_expanded\"",
                 sql("SELECT t.s.* REPLACE (TO_JSON_STRING(t.s) AS b)"
                         + " FROM (SELECT STRUCT(1 AS a, 'x' AS b) s) t"));
         assertEquals("SELECT * EXCLUDE (\"a\", \"_floci_struct_0\")"
-                        + " REPLACE (CAST(to_json(\"_floci_struct_0\") AS VARCHAR) AS b), COUNT(*) AS n"
+                        + " REPLACE (floci_to_json_string(\"_floci_struct_0\") AS b), COUNT(*) AS n"
                         + " FROM (SELECT unnest(t.s), t.s AS \"_floci_struct_0\""
                         + " FROM (SELECT {'a': 1, 'b': 'x'} AS \"s\") t) AS \"_expanded\" GROUP BY 1",
                 sql("SELECT t.s.* EXCEPT(a) REPLACE (TO_JSON_STRING(t.s) AS b), COUNT(*) AS n"
@@ -3432,9 +3457,10 @@ class SqlDialectTranslatorTest {
         String aggregateConcat = sql("SELECT CONCAT(COUNT(*), ' rows') FROM ds.t");
         assertEquals(1, aggregateConcat.split("COUNT\\(\\*\\)", -1).length - 1, aggregateConcat);
         assertFalse(aggregateConcat.contains("FROM (SELECT COUNT"), aggregateConcat);
-        assertEquals("SELECT LENGTH(value) AS n", sql("SELECT LENGTH(value) AS n"));
-        assertEquals("SELECT CAST(to_json(value) AS VARCHAR) AS json",
-                sql("SELECT TO_JSON_STRING(value) AS json"));
+        assertEquals("SELECT floci_length(value) AS n", sql("SELECT LENGTH(value) AS n"));
+        assertEquals("SELECT floci_byte_length(value) AS n", sql("SELECT BYTE_LENGTH(value) AS n"));
+        assertEquals("SELECT floci_to_json_string(value, TRUE) AS json",
+                sql("SELECT TO_JSON_STRING(value, TRUE) AS json"));
         assertEquals("SELECT (CASE WHEN x THEN 1 ELSE 2 END) AS c", sql("SELECT IF(x, 1, 2) AS c"));
         assertEquals("SELECT date_diff('day', b, a) AS d", sql("SELECT DATE_DIFF(a, b, DAY) AS d"));
         assertEquals("SELECT date_diff('week', (b - INTERVAL 1 DAY), (a - INTERVAL 1 DAY)) AS d",
@@ -3594,6 +3620,89 @@ class SqlDialectTranslatorTest {
         assertEquals("SELECT contains(_floci_nfkc_casefold(name), _floci_nfkc_casefold(','))"
                 + " AS has_comma FROM \"ds\".\"t\"", translated.sql());
         assertTrue(translated.needsUnicodeCaseFold());
+    }
+
+    @Test
+    void aggregateArrayConcatAndHllSketchFunctionsTranslateToDuckDb() {
+        assertEquals("SELECT list_extract(list_transform([list_filter(list(tags),"
+                        + " _floci_concat_array -> _floci_concat_array IS NOT NULL)],"
+                        + " _floci_concat_arrays -> CASE WHEN coalesce(len(_floci_concat_arrays), 0) = 0"
+                        + " THEN NULL ELSE flatten(_floci_concat_arrays) END), 1) AS tags FROM \"ds\".\"t\"",
+                sql("SELECT ARRAY_CONCAT_AGG(tags) AS tags FROM ds.t"));
+        // HLL_COUNT.INIT and MERGE are aggregates on the sidecar too, so a group is sketched as its
+        // rows arrive rather than being collected into a list first.
+        assertEquals("SELECT floci_hll_init(id, CAST(20 AS INTEGER)) AS sketch FROM \"ds\".\"t\"",
+                sql("SELECT HLL_COUNT.INIT(id, 20) AS sketch FROM ds.t"));
+        assertEquals("SELECT floci_hll_init(id) AS sketch FROM \"ds\".\"t\"",
+                sql("SELECT HLL_COUNT.INIT(id) AS sketch FROM ds.t"));
+        assertEquals("SELECT floci_hll_init(DISTINCT id) AS sketch FROM \"ds\".\"t\"",
+                sql("SELECT HLL_COUNT.INIT(DISTINCT id) AS sketch FROM ds.t"));
+        assertEquals("SELECT floci_hll_merge(CAST(sketch AS BLOB)) AS cardinality FROM \"ds\".\"t\"",
+                sql("SELECT HLL_COUNT.MERGE(sketch) AS cardinality FROM ds.t"));
+        assertEquals("SELECT floci_hll_extract(CAST(sketch AS BLOB)) AS cardinality FROM \"ds\".\"t\"",
+                sql("SELECT HLL_COUNT.EXTRACT(sketch) AS cardinality FROM ds.t"));
+    }
+
+    @Test
+    void toJsonStringUsesTheTypeAwareSidecarSerializer() {
+        assertEquals("SELECT floci_to_json_string(\"row\") AS json",
+                sql("SELECT TO_JSON_STRING(row) AS json"));
+        // The serializer itself decides between the JSON text null and SQL NULL, so pretty_print is
+        // rendered once: evaluating it again would run a volatile expression twice.
+        assertEquals("SELECT floci_to_json_string(\"row\", NOT flag) AS json",
+                sql("SELECT TO_JSON_STRING(row, NOT flag) AS json"));
+    }
+
+    @Test
+    void farmFingerprintUsesTheCompatibleSidecarScalar() {
+        assertEquals("SELECT farm_fingerprint(from_hex('31666f6f74727565')) AS fingerprint FROM \"ds\".\"t\"",
+                sql("SELECT FARM_FINGERPRINT(b'1footrue') AS fingerprint FROM ds.t"));
+    }
+
+    @Test
+    void temporaryFunctionsPreserveSidecarBlobOperators() {
+        SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript("""
+                CREATE TEMP FUNCTION check_bit_set(bs BYTES, idx INT64) RETURNS BOOL AS (
+                  BYTE_LENGTH(bs) > 0 AND
+                  BIT_COUNT(bs & (CONCAT(REPEAT(b'\\x00', BYTE_LENGTH(bs) - 1), b'\\x01') << idx)) != 0
+                );
+                SELECT check_bit_set(b'\\x10', 4) AS bit;
+                """, "test-project", null, SqlDialectTranslator.QueryParameters.none());
+
+        assertTrue(script.setupSql().contains("CAST(\"_floci_udf_arg_0\" AS BLOB) &"), script.setupSql());
+        assertTrue(script.setupSql().contains("from_hex('01')"), script.setupSql());
+        assertTrue(script.setupSql().contains("<< CAST(\"_floci_udf_arg_1\" AS BIGINT)"), script.setupSql());
+        assertTrue(script.setupSql().contains(
+                        "CASE (floci_byte_length(CAST(\"_floci_udf_arg_0\" AS BLOB)) > 0) WHEN FALSE THEN FALSE"),
+                script.setupSql());
+        assertFalse(script.setupSql().contains("_floci_udf_parameters"), script.setupSql());
+        assertFalse(script.setupSql().contains("CAST(CASE WHEN"), script.setupSql());
+    }
+
+    @Test
+    void newSidecarFunctionsValidateTheirSignatures() {
+        assertTrue(invalid("SELECT HLL_COUNT.MERGE()").getMessage().contains("HLL_COUNT.MERGE"));
+        assertTrue(invalid("SELECT HLL_COUNT.EXTRACT(a, b)").getMessage().contains("HLL_COUNT.EXTRACT"));
+        assertTrue(invalid("SELECT HLL_COUNT.INIT(a, 10, 20)").getMessage().contains("HLL_COUNT.INIT"));
+        assertTrue(invalid("SELECT LENGTH(a, b)").getMessage().contains("LENGTH"));
+        assertTrue(invalid("SELECT BYTE_LENGTH(a, b)").getMessage().contains("BYTE_LENGTH"));
+        assertTrue(invalid("SELECT FARM_FINGERPRINT()").getMessage().contains("FARM_FINGERPRINT"));
+        assertTrue(invalid("SELECT FARM_FINGERPRINT(a, b)").getMessage().contains("FARM_FINGERPRINT"));
+        assertTrue(invalid("SELECT TO_JSON_STRING()").getMessage().contains("TO_JSON_STRING"));
+        assertTrue(invalid("SELECT TO_JSON_STRING(a, TRUE, FALSE)").getMessage().contains("TO_JSON_STRING"));
+        assertTrue(invalid("SELECT NET.IP_FROM_STRING()").getMessage().contains("NET.IP_FROM_STRING"));
+        assertTrue(invalid("SELECT NET.IP_FROM_STRING(a, b)").getMessage().contains("NET.IP_FROM_STRING"));
+        assertTrue(invalid("SELECT NET.IP_TRUNC(a)").getMessage().contains("NET.IP_TRUNC"));
+    }
+
+    @Test
+    void netIpFunctionsUseSidecarScalars() {
+        assertEquals("SELECT safe_ip_from_string(ip) AS ipv4,"
+                        + " ip_trunc(safe_ip_from_string(ipv6), 64) AS ipv6 FROM \"ds\".\"t\"",
+                sql("SELECT NET.SAFE_IP_FROM_STRING(ip) AS ipv4, "
+                        + "NET.IP_TRUNC(NET.SAFE_IP_FROM_STRING(ipv6), 64) AS ipv6 FROM ds.t"));
+        assertEquals("SELECT ip_to_string(ip) AS ip_string FROM \"ds\".\"t\"",
+                sql("SELECT NET.IP_TO_STRING(ip) AS ip_string FROM ds.t"));
     }
 
     @Test

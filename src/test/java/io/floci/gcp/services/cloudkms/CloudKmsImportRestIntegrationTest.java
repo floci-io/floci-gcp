@@ -151,6 +151,51 @@ class CloudKmsImportRestIntegrationTest {
                 .body("state", equalTo("IMPORT_FAILED"));
     }
 
+    @Test
+    void importJobAndImportAcceptEnumsAsNumbers() throws Exception {
+        ensureKeyRing();
+        String pem = json().queryParam("importJobId", "job-numbers")
+                .body("{\"importMethod\": 3, \"protectionLevel\": 1}")
+                .when().post(KEY_RING + "/importJobs")
+                .then().statusCode(200)
+                .body("importMethod", equalTo("RSA_OAEP_3072_SHA256_AES_256"))
+                .body("protectionLevel", equalTo("SOFTWARE"))
+                .extract().path("publicKey.pem");
+        String key = createImportOnlyKey("imported-numbers");
+
+        json().body("{\"algorithm\": 1,"
+                        + " \"importJob\": \"" + KEY_RING_NAME + "/importJobs/job-numbers\","
+                        + " \"wrappedKey\": \"" + b64(rsaAesWrap(pem, aes256())) + "\"}")
+                .when().post(key + "/cryptoKeyVersions:import")
+                .then().statusCode(200)
+                .body("state", equalTo("ENABLED"))
+                .body("algorithm", equalTo("GOOGLE_SYMMETRIC_ENCRYPTION"));
+    }
+
+    @Test
+    void importJobAndImportRejectEnumNumbersTheEnumDoesNotDefine() throws Exception {
+        ensureKeyRing();
+        json().queryParam("importJobId", "job-unknown-method")
+                .body("{\"importMethod\": 99, \"protectionLevel\": 1}")
+                .when().post(KEY_RING + "/importJobs")
+                .then().statusCode(400)
+                .body("error.status", equalTo("INVALID_ARGUMENT"));
+        json().queryParam("importJobId", "job-unknown-level")
+                .body("{\"importMethod\": 3, \"protectionLevel\": 99}")
+                .when().post(KEY_RING + "/importJobs")
+                .then().statusCode(400)
+                .body("error.status", equalTo("INVALID_ARGUMENT"));
+
+        String pem = createImportJob("job-unknown-algorithm");
+        String key = createImportOnlyKey("imported-unknown-algorithm");
+        json().body("{\"algorithm\": 9999,"
+                        + " \"importJob\": \"" + KEY_RING_NAME + "/importJobs/job-unknown-algorithm\","
+                        + " \"wrappedKey\": \"" + b64(rsaAesWrap(pem, aes256())) + "\"}")
+                .when().post(key + "/cryptoKeyVersions:import")
+                .then().statusCode(400)
+                .body("error.status", equalTo("INVALID_ARGUMENT"));
+    }
+
     private static String b64(byte[] data) {
         return Base64.getEncoder().encodeToString(data);
     }

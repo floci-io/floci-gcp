@@ -12,6 +12,7 @@ import io.floci.gcp.core.storage.PersistentStorage;
 import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.core.storage.StorageException;
 import io.floci.gcp.core.storage.WalStorage;
+import io.floci.gcp.services.eventarc.EventarcService;
 import io.floci.gcp.services.gcs.model.GcsBucket;
 import io.floci.gcp.services.gcs.model.GcsContentRange;
 import io.floci.gcp.services.gcs.model.GcsObjectMeta;
@@ -22,11 +23,14 @@ import io.floci.gcp.services.iam.IamBucketLifecycleService;
 import io.floci.gcp.services.iam.IamBucketPolicyBootstrapService;
 import io.floci.gcp.services.iam.IamService;
 import io.floci.gcp.testing.ThreadStates;
+import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -56,7 +60,10 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 class GcsServiceTest {
@@ -1267,6 +1274,65 @@ class GcsServiceTest {
         assertEquals(List.of(original.getGeneration()),
                 softDeleted.stream().map(GcsObjectMeta::getGeneration).toList());
         assertNotNull(softDeleted.get(0).getSoftDeleteTime());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void restoreSendsTheEventarcFinalizedEventWithTheNewGeneration() throws Exception {
+        service.createBucket("bucket", "p1", BASE_URL,
+                Map.of("softDeletePolicy", Map.of("retentionDurationSeconds", "604800")));
+        GcsObjectMeta original = service.putObject("bucket", "obj.txt", "text/plain", new byte[]{1},
+                GcsCustomerEncryption.none(), BASE_URL);
+        service.deleteObject("bucket", "obj.txt");
+        Thread.sleep(5);
+        EventarcService eventarc = mock(EventarcService.class);
+        service.eventarcServiceInstance = mock(Instance.class);
+        when(service.eventarcServiceInstance.isResolvable()).thenReturn(true);
+        when(service.eventarcServiceInstance.get()).thenReturn(eventarc);
+
+        GcsObjectMeta restored = service.restoreObject("bucket", "obj.txt", original.getGeneration());
+
+        ArgumentCaptor<GcsObjectMeta> event = ArgumentCaptor.forClass(GcsObjectMeta.class);
+        verify(eventarc).onGcsEvent(eq("bucket"), eq("obj.txt"), event.capture(),
+                eq("google.cloud.storage.object.v1.finalized"));
+        verifyNoMoreInteractions(eventarc);
+        assertEquals(restored.getGeneration(), event.getValue().getGeneration());
+        assertNotEquals(original.getGeneration(), event.getValue().getGeneration());
+        assertEquals("1", event.getValue().getMetageneration());
+        assertTrue(Instant.parse(event.getValue().getTimeCreated())
+                .isAfter(Instant.parse(original.getTimeCreated())));
+        assertNull(event.getValue().getSoftDeleteTime());
+        assertNull(event.getValue().getHardDeleteTime());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void restoreOverALiveObjectSendsTheEventarcFinalizedAndDeletedEvents() {
+        service.createBucket("bucket", "p1", BASE_URL,
+                Map.of("softDeletePolicy", Map.of("retentionDurationSeconds", "604800")));
+        GcsObjectMeta original = service.putObject("bucket", "obj.txt", "text/plain", new byte[]{1},
+                GcsCustomerEncryption.none(), BASE_URL);
+        service.deleteObject("bucket", "obj.txt");
+        GcsObjectMeta live = service.putObject("bucket", "obj.txt", "text/plain", new byte[]{2},
+                GcsCustomerEncryption.none(), BASE_URL);
+        EventarcService eventarc = mock(EventarcService.class);
+        service.eventarcServiceInstance = mock(Instance.class);
+        when(service.eventarcServiceInstance.isResolvable()).thenReturn(true);
+        when(service.eventarcServiceInstance.get()).thenReturn(eventarc);
+
+        GcsObjectMeta restored = service.restoreObject("bucket", "obj.txt", original.getGeneration());
+
+        ArgumentCaptor<GcsObjectMeta> finalized = ArgumentCaptor.forClass(GcsObjectMeta.class);
+        ArgumentCaptor<GcsObjectMeta> deleted = ArgumentCaptor.forClass(GcsObjectMeta.class);
+        InOrder order = inOrder(eventarc);
+        order.verify(eventarc).onGcsEvent(eq("bucket"), eq("obj.txt"), finalized.capture(),
+                eq("google.cloud.storage.object.v1.finalized"));
+        order.verify(eventarc).onGcsEvent(eq("bucket"), eq("obj.txt"), deleted.capture(),
+                eq("google.cloud.storage.object.v1.deleted"));
+        verifyNoMoreInteractions(eventarc);
+        assertEquals(restored.getGeneration(), finalized.getValue().getGeneration());
+        assertEquals("1", finalized.getValue().getMetageneration());
+        assertEquals(live.getGeneration(), deleted.getValue().getGeneration());
     }
 
     @Test

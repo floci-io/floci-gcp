@@ -618,7 +618,8 @@ class GcsServiceTest {
         assertEquals(List.of("1"), restarted.listSoftDeletedObjects("bucket", null).stream()
                 .map(GcsObjectMeta::getGeneration)
                 .toList());
-        assertEquals("1", restarted.restoreObject("bucket", objectName, "1").getGeneration());
+        GcsObjectMeta restoredLegacy = restarted.restoreObject("bucket", objectName, "1");
+        assertTrue(Long.parseLong(restoredLegacy.getGeneration()) > 3);
         assertArrayEquals(new byte[]{1}, restarted.getObjectData("bucket", objectName));
 
         assertEquals(List.of("4"), restarted.listSoftDeletedObjects("soft-only", null).stream()
@@ -1228,7 +1229,113 @@ class GcsServiceTest {
         assertArrayEquals(new byte[]{1}, service.getObjectData("bucket", "obj.txt"));
         assertTrue(service.listObjectVersions("bucket", null).stream()
                 .anyMatch(m -> second.getGeneration().equals(m.getGeneration())));
-        assertTrue(service.listSoftDeletedObjects("bucket", null).isEmpty());
+        assertEquals(List.of(first.getGeneration()), service.listSoftDeletedObjects("bucket", null).stream()
+                .map(GcsObjectMeta::getGeneration).toList());
+    }
+
+    @Test
+    void restoreCreatesANewGenerationAndKeepsTheSoftDeletedOne() throws Exception {
+        service.createBucket("bucket", "p1", BASE_URL,
+                Map.of("softDeletePolicy", Map.of("retentionDurationSeconds", "604800")));
+        GcsObjectMeta original = service.putObject("bucket", "obj.txt", "text/plain", new byte[]{1},
+                GcsCustomerEncryption.none(), BASE_URL);
+        service.patchObject("bucket", "obj.txt", Map.of("metadata", Map.of("env", "dev")));
+        assertEquals("2", service.getObjectMeta("bucket", "obj.txt").getMetageneration());
+        service.deleteObject("bucket", "obj.txt");
+        Thread.sleep(5);
+
+        GcsObjectMeta restored = service.restoreObject("bucket", "obj.txt", original.getGeneration());
+
+        assertNotEquals(original.getGeneration(), restored.getGeneration());
+        assertTrue(Long.parseLong(restored.getGeneration()) > Long.parseLong(original.getGeneration()));
+        assertEquals("1", restored.getMetageneration());
+        assertTrue(Instant.parse(restored.getTimeCreated()).isAfter(Instant.parse(original.getTimeCreated())));
+        assertEquals(restored.getTimeCreated(), restored.getUpdated());
+        assertEquals("bucket/obj.txt/" + restored.getGeneration(), restored.getId());
+        assertTrue(restored.getMediaLink().endsWith("generation=" + restored.getGeneration()));
+        assertNull(restored.getSoftDeleteTime());
+        assertNull(restored.getHardDeleteTime());
+        assertNull(restored.getTimeDeleted());
+        assertEquals(Map.of("env", "dev"), restored.getMetadata());
+
+        GcsObjectMeta live = service.getObjectMeta("bucket", "obj.txt");
+        assertEquals(restored.getGeneration(), live.getGeneration());
+        assertEquals("1", live.getMetageneration());
+        assertArrayEquals(new byte[]{1}, service.getObjectData("bucket", "obj.txt"));
+
+        List<GcsObjectMeta> softDeleted = service.listSoftDeletedObjects("bucket", null);
+        assertEquals(List.of(original.getGeneration()),
+                softDeleted.stream().map(GcsObjectMeta::getGeneration).toList());
+        assertNotNull(softDeleted.get(0).getSoftDeleteTime());
+    }
+
+    @Test
+    void restoringTheSameSoftDeletedGenerationTwiceMintsTwoGenerations() {
+        service.createBucket("bucket", "p1", BASE_URL,
+                Map.of("softDeletePolicy", Map.of("retentionDurationSeconds", "604800")));
+        GcsObjectMeta original = service.putObject("bucket", "obj.txt", "text/plain", new byte[]{1},
+                GcsCustomerEncryption.none(), BASE_URL);
+        service.deleteObject("bucket", "obj.txt");
+
+        GcsObjectMeta first = service.restoreObject("bucket", "obj.txt", original.getGeneration());
+        GcsObjectMeta second = service.restoreObject("bucket", "obj.txt", original.getGeneration());
+
+        assertNotEquals(first.getGeneration(), second.getGeneration());
+        assertEquals(second.getGeneration(), service.getObjectMeta("bucket", "obj.txt").getGeneration());
+        assertEquals(Set.of(original.getGeneration(), first.getGeneration()),
+                service.listSoftDeletedObjects("bucket", null).stream()
+                        .map(GcsObjectMeta::getGeneration).collect(Collectors.toSet()));
+    }
+
+    @Test
+    void restoreInAVersionedBucketMakesTheRestoredGenerationTheOnlyVersionAndKeepsTheSoftDeletedOne() {
+        service.createBucket("bucket", "p1", BASE_URL, Map.of(
+                "versioning", Map.of("enabled", true),
+                "softDeletePolicy", Map.of("retentionDurationSeconds", "604800")));
+        GcsObjectMeta first = service.putObject("bucket", "obj.txt", "text/plain", new byte[]{1},
+                GcsCustomerEncryption.none(), BASE_URL);
+        service.deleteObject("bucket", "obj.txt");
+        service.deleteObjectVersion("bucket", "obj.txt", first.getGeneration());
+
+        GcsObjectMeta restored = service.restoreObject("bucket", "obj.txt", first.getGeneration());
+
+        assertEquals(List.of(restored.getGeneration()), service.listObjectVersions("bucket", null).stream()
+                .map(GcsObjectMeta::getGeneration).toList());
+        assertArrayEquals(new byte[]{1}, service.getObjectData(
+                "bucket", "obj.txt", restored.getGeneration(), GcsCustomerEncryption.none()));
+        assertEquals(List.of(first.getGeneration()), service.listSoftDeletedObjects("bucket", null).stream()
+                .map(GcsObjectMeta::getGeneration).toList());
+    }
+
+    @Test
+    void restoreRecomputesTheRetentionExpiryFromTheNewCreateTime() {
+        service.createBucket("bucket", "p1", BASE_URL,
+                Map.of("softDeletePolicy", Map.of("retentionDurationSeconds", "604800")));
+        GcsObjectMeta original = service.putObject("bucket", "obj.txt", "text/plain", new byte[]{1},
+                GcsCustomerEncryption.none(), BASE_URL);
+        service.deleteObject("bucket", "obj.txt");
+        service.updateBucket("bucket", Map.of("retentionPolicy", Map.of("retentionPeriod", "3600")));
+
+        GcsObjectMeta restored = service.restoreObject("bucket", "obj.txt", original.getGeneration());
+
+        assertEquals(Instant.parse(restored.getTimeCreated()).plusSeconds(3600)
+                        .truncatedTo(java.time.temporal.ChronoUnit.MICROS).toString(),
+                restored.getRetentionExpirationTime());
+        assertEquals(restored.getRetentionExpirationTime(),
+                service.getObjectMeta("bucket", "obj.txt").getRetentionExpirationTime());
+    }
+
+    @Test
+    void restoreLeavesNoRetentionExpiryWithoutABucketRetentionPolicy() {
+        service.createBucket("bucket", "p1", BASE_URL,
+                Map.of("softDeletePolicy", Map.of("retentionDurationSeconds", "604800")));
+        GcsObjectMeta original = service.putObject("bucket", "obj.txt", "text/plain", new byte[]{1},
+                GcsCustomerEncryption.none(), BASE_URL);
+        service.deleteObject("bucket", "obj.txt");
+
+        GcsObjectMeta restored = service.restoreObject("bucket", "obj.txt", original.getGeneration());
+
+        assertNull(restored.getRetentionExpirationTime());
     }
 
     private enum OverwriteOperation {

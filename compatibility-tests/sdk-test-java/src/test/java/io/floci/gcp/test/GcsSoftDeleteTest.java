@@ -77,6 +77,19 @@ class GcsSoftDeleteTest {
 
         Blob restored = storage.restore(BlobId.of(BUCKET, name, generation));
         assertThat(restored.getName()).isEqualTo(name);
+        // "A new generation is assigned and the metageneration is reset to 1", and the
+        // soft-deleted version "remains in the background until its retention period officially
+        // expires" (https://cloud.google.com/storage/docs/json_api/v1/objects/restore,
+        // https://cloud.google.com/storage/docs/soft-delete).
+        assertThat(restored.getGeneration()).isNotEqualTo(generation);
+        assertThat(restored.getMetageneration()).isEqualTo(1L);
+        assertThat(StreamSupport.stream(
+                        storage.list(BUCKET, Storage.BlobListOption.softDeleted(true))
+                                .iterateAll().spliterator(), false)
+                .filter(blob -> blob.getName().equals(name))
+                .map(Blob::getGeneration)
+                .toList())
+                .contains(generation);
 
         // Back in the live view, with its bytes intact.
         assertThat(liveNames()).contains(name);

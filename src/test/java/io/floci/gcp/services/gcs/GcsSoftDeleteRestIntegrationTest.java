@@ -1,8 +1,12 @@
 package io.floci.gcp.services.gcs;
 
+import com.google.pubsub.v1.PubsubMessage;
+import io.floci.gcp.services.pubsub.PubSubService;
+import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -17,9 +21,13 @@ import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.verify;
 
 /** Soft delete: retention policy, softDeleted listing, and objects.restore. */
 @QuarkusTest
@@ -29,6 +37,12 @@ class GcsSoftDeleteRestIntegrationTest {
 
     @Inject
     GcsSoftDeleteReaper reaper;
+
+    @Inject
+    GcsService gcs;
+
+    @InjectMock
+    PubSubService pubsub;
 
     private static void ensureBucket() {
         given().contentType("application/json")
@@ -94,6 +108,73 @@ class GcsSoftDeleteRestIntegrationTest {
         given().when().get("/storage/v1/b/" + BUCKET + "/o")
                 .then().statusCode(200)
                 .body("items.name", hasItem("restore-me"));
+    }
+
+    @Test
+    void restoreCreatesANewGenerationAndKeepsTheSoftDeletedOne() {
+        // "A new generation is assigned and the metageneration is reset to 1", and "The createTime
+        // of the new object is set to the time at which the soft-deleted object was restored"
+        // (https://cloud.google.com/storage/docs/json_api/v1/objects/restore).
+        ensureBucket();
+        String generation = writeObject("new-generation.txt");
+        String created = given().when().get("/storage/v1/b/" + BUCKET + "/o/new-generation.txt")
+                .then().statusCode(200).extract().path("timeCreated");
+        given().contentType("application/json").body(Map.of("metadata", Map.of("env", "dev")))
+                .when().patch("/storage/v1/b/" + BUCKET + "/o/new-generation.txt")
+                .then().statusCode(200)
+                .body("metageneration", equalTo("2"));
+        given().when().delete("/storage/v1/b/" + BUCKET + "/o/new-generation.txt").then().statusCode(204);
+
+        String restored = given().queryParam("generation", generation)
+                .when().post("/storage/v1/b/" + BUCKET + "/o/new-generation.txt/restore")
+                .then().statusCode(200)
+                .body("generation", not(equalTo(generation)))
+                .body("metageneration", equalTo("1"))
+                .body("timeCreated", not(equalTo(created)))
+                .body("metadata.env", equalTo("dev"))
+                .body("softDeleteTime", nullValue())
+                .body("hardDeleteTime", nullValue())
+                .extract().path("generation");
+
+        given().when().get("/storage/v1/b/" + BUCKET + "/o/new-generation.txt")
+                .then().statusCode(200)
+                .body("generation", equalTo(restored))
+                .body("metageneration", equalTo("1"));
+        // "The original, soft-deleted version remains in the background until its retention period
+        // officially expires" (https://cloud.google.com/storage/docs/soft-delete).
+        given().queryParam("softDeleted", true).queryParam("prefix", "new-generation.txt")
+                .when().get("/storage/v1/b/" + BUCKET + "/o")
+                .then().statusCode(200)
+                .body("items.generation", equalTo(List.of(generation)));
+    }
+
+    @Test
+    void restorePublishesAnObjectFinalizeForTheNewGeneration() {
+        // "Restoring a soft-deleted version of an object triggers an OBJECT_FINALIZE event"
+        // (https://cloud.google.com/storage/docs/soft-delete).
+        String bucket = "restore-notification-bucket";
+        String topic = "projects/test-project/topics/" + bucket;
+        given().contentType("application/json").body(Map.of("name", bucket))
+                .when().post("/storage/v1/b?project=test-project")
+                .then().statusCode(200);
+        String generation = given().contentType("text/plain").body("bytes")
+                .queryParam("uploadType", "media").queryParam("name", "notified.txt")
+                .when().post("/upload/storage/v1/b/" + bucket + "/o")
+                .then().statusCode(200).extract().path("generation");
+        given().when().delete("/storage/v1/b/" + bucket + "/o/notified.txt").then().statusCode(204);
+        gcs.createNotification(bucket, Map.of("topic", topic,
+                "event_types", List.of("OBJECT_FINALIZE"), "payload_format", "NONE"));
+
+        String restored = given().queryParam("generation", generation)
+                .when().post("/storage/v1/b/" + bucket + "/o/notified.txt/restore")
+                .then().statusCode(200).extract().path("generation");
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<PubsubMessage>> published = ArgumentCaptor.forClass(List.class);
+        verify(pubsub).publish(eq(topic), published.capture());
+        Map<String, String> attributes = published.getValue().get(0).getAttributesMap();
+        assertEquals("OBJECT_FINALIZE", attributes.get("eventType"));
+        assertEquals(restored, attributes.get("objectGeneration"));
     }
 
     @Test

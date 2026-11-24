@@ -314,6 +314,77 @@ class GcsNotificationEventsIntegrationTest {
         }
     }
 
+    @Test
+    void restoringOverALiveObjectSendsFinalizeAndDeleteWithTheOtherGeneration() throws Exception {
+        String bucket = createBucket(false);
+        createNotification(bucket, Map.of());
+        String softDeleted = upload(bucket, "a.txt", "one");
+        given().delete("/storage/v1/b/" + bucket + "/o/a.txt").then().statusCode(204);
+        String displaced = upload(bucket, "a.txt", "two");
+        published.clear();
+
+        String restored = restore(bucket, "a.txt", softDeleted);
+
+        PubsubMessage finalize = single("OBJECT_FINALIZE");
+        assertEquals(restored, finalize.getAttributesMap().get("objectGeneration"));
+        assertEquals(displaced, finalize.getAttributesMap().get("overwroteGeneration"));
+        PubsubMessage delete = single("OBJECT_DELETE");
+        assertEquals(displaced, delete.getAttributesMap().get("objectGeneration"));
+        assertEquals(restored, delete.getAttributesMap().get("overwrittenByGeneration"));
+        assertFalse(delete.getAttributesMap().containsKey("overwroteGeneration"));
+        assertTrue(JSON.readTree(delete.getData().toByteArray()).hasNonNull("timeDeleted"));
+        assertTrue(events("OBJECT_ARCHIVE").isEmpty());
+
+        List<String> softDeletedGenerations = given().queryParam("softDeleted", true)
+                .get("/storage/v1/b/" + bucket + "/o").then().statusCode(200)
+                .extract().jsonPath().getList("items.generation", String.class);
+        assertTrue(softDeletedGenerations.contains(displaced), softDeletedGenerations.toString());
+    }
+
+    @Test
+    void restoringOverALiveObjectInAVersionedBucketArchivesTheDisplacedOne() {
+        String bucket = createBucket(true);
+        createNotification(bucket, Map.of());
+        String softDeleted = upload(bucket, "a.txt", "one");
+        given().delete("/storage/v1/b/" + bucket + "/o/a.txt").then().statusCode(204);
+        given().queryParam("generation", softDeleted)
+                .delete("/storage/v1/b/" + bucket + "/o/a.txt").then().statusCode(204);
+        String displaced = upload(bucket, "a.txt", "two");
+        published.clear();
+
+        String restored = restore(bucket, "a.txt", softDeleted);
+
+        PubsubMessage finalize = single("OBJECT_FINALIZE");
+        assertEquals(restored, finalize.getAttributesMap().get("objectGeneration"));
+        assertEquals(displaced, finalize.getAttributesMap().get("overwroteGeneration"));
+        PubsubMessage archived = single("OBJECT_ARCHIVE");
+        assertEquals(displaced, archived.getAttributesMap().get("objectGeneration"));
+        assertEquals(restored, archived.getAttributesMap().get("overwrittenByGeneration"));
+        assertTrue(events("OBJECT_DELETE").isEmpty());
+    }
+
+    @Test
+    void restoringWithNoLiveObjectSendsOnlyAFinalize() {
+        String bucket = createBucket(false);
+        createNotification(bucket, Map.of());
+        String softDeleted = upload(bucket, "a.txt", "one");
+        given().delete("/storage/v1/b/" + bucket + "/o/a.txt").then().statusCode(204);
+        published.clear();
+
+        String restored = restore(bucket, "a.txt", softDeleted);
+
+        PubsubMessage finalize = single("OBJECT_FINALIZE");
+        assertEquals(restored, finalize.getAttributesMap().get("objectGeneration"));
+        assertFalse(finalize.getAttributesMap().containsKey("overwroteGeneration"));
+        assertEquals(1, published.size(), published.toString());
+    }
+
+    private String restore(String bucket, String name, String generation) {
+        return given().queryParam("generation", generation)
+                .post("/storage/v1/b/" + bucket + "/o/" + name + "/restore")
+                .then().statusCode(200).extract().path("generation");
+    }
+
     private String createBucket(boolean versioned) {
         String bucket = "notif-" + UUID.randomUUID().toString().substring(0, 8);
         Map<String, Object> body = versioned

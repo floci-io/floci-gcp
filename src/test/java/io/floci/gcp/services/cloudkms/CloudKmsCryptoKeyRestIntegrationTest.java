@@ -5,6 +5,8 @@ import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.allOf;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.nullValue;
 
@@ -172,5 +174,87 @@ class CloudKmsCryptoKeyRestIntegrationTest {
                 .then().statusCode(200)
                 .body("rotationPeriod", equalTo("86400s"))
                 .body("labels.team", equalTo("a"));
+    }
+
+    @Test
+    void createAcceptsThePurposeAsItsNumber() {
+        String key = createKey("purpose-number", "{\"purpose\": 1}");
+
+        given().when().get(key)
+                .then().statusCode(200)
+                .body("purpose", equalTo("ENCRYPT_DECRYPT"))
+                .body("versionTemplate.algorithm", equalTo("GOOGLE_SYMMETRIC_ENCRYPTION"))
+                .body("primary.state", equalTo("ENABLED"));
+    }
+
+    @Test
+    void createAcceptsTheVersionTemplateEnumsAsNumbers() {
+        String key = createKey("template-numbers",
+                "{\"purpose\": 5, \"versionTemplate\": {\"algorithm\": 12, \"protectionLevel\": 1}}");
+
+        given().when().get(key)
+                .then().statusCode(200)
+                .body("purpose", equalTo("ASYMMETRIC_SIGN"))
+                .body("versionTemplate.algorithm", equalTo("EC_SIGN_P256_SHA256"))
+                .body("versionTemplate.protectionLevel", equalTo("SOFTWARE"));
+        given().when().get(key + "/cryptoKeyVersions/1")
+                .then().statusCode(200)
+                .body("algorithm", equalTo("EC_SIGN_P256_SHA256"));
+    }
+
+    @Test
+    void updateAcceptsTheVersionTemplateAlgorithmAsItsNumber() {
+        String key = createKey("update-algorithm-number",
+                "{\"purpose\": \"MAC\", \"versionTemplate\": {\"algorithm\": \"HMAC_SHA256\"}}");
+
+        json().queryParam("updateMask", "versionTemplate.algorithm")
+                .body("{\"versionTemplate\": {\"algorithm\": 35}}")
+                .when().patch(key)
+                .then().statusCode(200)
+                .body("versionTemplate.algorithm", equalTo("HMAC_SHA512"));
+    }
+
+    @Test
+    void updateVersionAcceptsTheStateAsItsNumber() {
+        String version = createKey("state-number", "{\"purpose\": \"ENCRYPT_DECRYPT\"}") + "/cryptoKeyVersions/1";
+
+        json().body("{\"state\": 2}")
+                .when().patch(version)
+                .then().statusCode(200)
+                .body("state", equalTo("DISABLED"));
+        json().body("{\"state\": 1}")
+                .when().patch(version)
+                .then().statusCode(200)
+                .body("state", equalTo("ENABLED"));
+    }
+
+    @Test
+    void createRejectsAnEnumNumberOrNameTheEnumDoesNotDefine() {
+        json().queryParam("keyRingId", "ring").body("{}").when().post(LOCATION + "/keyRings");
+        json().queryParam("cryptoKeyId", "purpose-unknown").body("{\"purpose\": 99}")
+                .when().post(KEY_RING + "/cryptoKeys")
+                .then().statusCode(400)
+                .body("error.status", equalTo("INVALID_ARGUMENT"))
+                .body("error.message", allOf(containsString("crypto_key.purpose"), containsString("99")));
+
+        createRejected("purpose-fraction", "{\"purpose\": 1.5}");
+        createRejected("purpose-name-unknown", "{\"purpose\": \"NOT_A_PURPOSE\"}");
+        createRejected("algorithm-unknown", "{\"purpose\": 1, \"versionTemplate\": {\"algorithm\": 9999}}");
+        createRejected("algorithm-boolean", "{\"purpose\": 1, \"versionTemplate\": {\"algorithm\": true}}");
+        createRejected("protection-unknown",
+                "{\"purpose\": 1, \"versionTemplate\": {\"algorithm\": 1, \"protectionLevel\": 99}}");
+    }
+
+    @Test
+    void updateVersionRejectsAStateNumberTheEnumDoesNotDefine() {
+        String version = createKey("state-unknown", "{\"purpose\": \"ENCRYPT_DECRYPT\"}") + "/cryptoKeyVersions/1";
+
+        json().body("{\"state\": 99}")
+                .when().patch(version)
+                .then().statusCode(400)
+                .body("error.status", equalTo("INVALID_ARGUMENT"));
+        given().when().get(version)
+                .then().statusCode(200)
+                .body("state", equalTo("ENABLED"));
     }
 }

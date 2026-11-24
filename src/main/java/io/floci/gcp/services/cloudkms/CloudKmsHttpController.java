@@ -4,11 +4,17 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.cloud.kms.v1.CryptoKey;
+import com.google.cloud.kms.v1.CryptoKeyVersion;
+import com.google.cloud.kms.v1.ImportJob;
+import com.google.cloud.kms.v1.ProtectionLevel;
+import com.google.protobuf.Descriptors.EnumDescriptor;
 import com.google.protobuf.Timestamp;
 import com.google.protobuf.util.Durations;
 import com.google.protobuf.util.Timestamps;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.ProtoJsonBytes;
+import io.floci.gcp.core.common.ProtoJsonEnums;
 import io.floci.gcp.services.cloudkms.model.StoredCryptoKey;
 import io.floci.gcp.services.cloudkms.model.StoredCryptoKeyVersion;
 import io.floci.gcp.services.cloudkms.model.StoredImportJob;
@@ -111,7 +117,8 @@ public class CloudKmsHttpController {
             @PathParam("keyRing") String keyRing, @QueryParam("cryptoKeyId") String cryptoKeyId,
             @QueryParam("skipInitialVersionCreation") @DefaultValue("false") boolean skip, Map<String, Object> body) {
         try {
-            String purpose = body != null ? (String) body.get("purpose") : null;
+            String purpose = enumField(body, "purpose", CryptoKey.CryptoKeyPurpose.getDescriptor(),
+                    "crypto_key.purpose");
             boolean importOnly = body != null && Boolean.TRUE.equals(body.get("importOnly"));
             StoredCryptoKey stored = service.createCryptoKey(
                     keyRingName(project, location, keyRing), cryptoKeyId, purpose, versionTemplateAlgorithm(body), skip,
@@ -204,7 +211,8 @@ public class CloudKmsHttpController {
             if (body != null && body.get("cryptoKeyVersion") instanceof String existing && !existing.isEmpty()) {
                 throw GcpException.unimplemented("Re-importing into an existing CryptoKeyVersion is not supported");
             }
-            String algorithm = body != null ? (String) body.get("algorithm") : null;
+            String algorithm = enumField(body, "algorithm",
+                    CryptoKeyVersion.CryptoKeyVersionAlgorithm.getDescriptor(), "algorithm");
             String importJob = body != null ? (String) body.get("importJob") : null;
             byte[] wrappedKey = decodeField(body, "wrappedKey");
             if (wrappedKey.length == 0) {
@@ -251,7 +259,8 @@ public class CloudKmsHttpController {
             @PathParam("keyRing") String keyRing, @PathParam("cryptoKey") String cryptoKey,
             @PathParam("version") String version, Map<String, Object> body) {
         try {
-            String state = body != null ? (String) body.get("state") : null;
+            String state = enumField(body, "state", CryptoKeyVersion.CryptoKeyVersionState.getDescriptor(),
+                    "crypto_key_version.state");
             StoredCryptoKeyVersion v = service.updateCryptoKeyVersionState(
                     versionName(project, location, keyRing, cryptoKey, version), state);
             return Response.ok(toVersionJson(v)).build();
@@ -317,8 +326,10 @@ public class CloudKmsHttpController {
             @PathParam("keyRing") String keyRing, @QueryParam("importJobId") String importJobId,
             Map<String, Object> body) {
         try {
-            String importMethod = body != null ? (String) body.get("importMethod") : null;
-            String protectionLevel = body != null ? (String) body.get("protectionLevel") : null;
+            String importMethod = enumField(body, "importMethod", ImportJob.ImportMethod.getDescriptor(),
+                    "import_job.import_method");
+            String protectionLevel = enumField(body, "protectionLevel", ProtectionLevel.getDescriptor(),
+                    "import_job.protection_level");
             StoredImportJob stored = service.createImportJob(
                     keyRingName(project, location, keyRing), importJobId, importMethod, protectionLevel);
             return Response.ok(toImportJobJson(stored)).build();
@@ -627,15 +638,22 @@ public class CloudKmsHttpController {
         return cryptoKeyName(project, location, keyRing, cryptoKey) + "/cryptoKeyVersions/" + version;
     }
 
+    /**
+     * The template's algorithm. Its protection level is read only to reject a value ProtectionLevel
+     * does not define, since every version floci creates is SOFTWARE.
+     */
     private static String versionTemplateAlgorithm(Map<String, Object> body) {
         if (body == null || !(body.get("versionTemplate") instanceof Map<?, ?> template)) {
             return null;
         }
-        Object algorithm = template.get("algorithm");
-        if (algorithm != null && !(algorithm instanceof String)) {
-            throw GcpException.invalidArgument("versionTemplate.algorithm must be a string");
-        }
-        return (String) algorithm;
+        ProtoJsonEnums.name(template.get("protectionLevel"), ProtectionLevel.getDescriptor(),
+                "crypto_key.version_template.protection_level");
+        return ProtoJsonEnums.name(template.get("algorithm"),
+                CryptoKeyVersion.CryptoKeyVersionAlgorithm.getDescriptor(), "crypto_key.version_template.algorithm");
+    }
+
+    private static String enumField(Map<String, Object> body, String key, EnumDescriptor type, String field) {
+        return body != null ? ProtoJsonEnums.name(body.get(key), type, field) : null;
     }
 
     private static CloudKmsService.CryptoKeyFields cryptoKeyFields(Map<String, Object> body) {

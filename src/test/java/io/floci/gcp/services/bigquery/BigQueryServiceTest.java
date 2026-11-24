@@ -1287,6 +1287,26 @@ class BigQueryServiceTest {
     }
 
     @Test
+    void aVariableTypeWithAnUnnamedStructFieldIsRefusedLikeBigQuery() {
+        for (String type : List.of("STRUCT<INT64>", "STRUCT<a STRUCT<INT64>>", "ARRAY<STRUCT<INT64>>",
+                "struct<int64, n string>")) {
+            GcpException error = assertThrows(GcpException.class,
+                    () -> service.query(PROJECT, "US", null, "DECLARE v " + type + "; SELECT 1 AS a;", null));
+            assertEquals("Unsupported variable type: " + type, error.getMessage(), type);
+        }
+        GcpException withDefault = assertThrows(GcpException.class, () -> service.query(PROJECT, "US", null,
+                "DECLARE v STRUCT<INT64> DEFAULT STRUCT(1); SELECT 1 AS a;", null));
+        assertEquals("Unsupported variable type: STRUCT<INT64>", withDefault.getMessage());
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        when(engine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("a", "INTEGER", null))), List.of(Map.of("a", 1L)), "SELECT", 0));
+        BigQueryService namedService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), engine);
+        assertDoesNotThrow(() -> namedService.query(PROJECT, "US", null,
+                "DECLARE v STRUCT<a STRUCT<x INT64>>; SELECT 1 AS a;", null));
+    }
+
+    @Test
     void structVariablesTakeDefaultFieldsByPosition() {
         // Live BigQuery returns a=1, b=2 for `STRUCT(1 AS b, 2 AS a)` assigned to
         // `STRUCT<a INT64, b INT64>`: the source field names do not swap the values.

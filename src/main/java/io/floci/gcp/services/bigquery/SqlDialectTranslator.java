@@ -11604,11 +11604,33 @@ final class SqlDialectTranslator {
         if (after >= 0 && isComparison(tokens.get(after))) {
             return startsTemporal(nextSignificant(after + 1, tokens.size()));
         }
+        int distinctFrom = after >= 0 && tokens.get(after).isKeyword("IS") ? distinctFrom(after) : -1;
+        if (distinctFrom >= 0) {
+            // @a IS [NOT] DISTINCT FROM x
+            return startsTemporal(nextSignificant(distinctFrom + 1, tokens.size()));
+        }
         if (before < 0) {
             return null;
         }
         if (isComparison(tokens.get(before))) {
             return endsTemporal(significantBefore(before));
+        }
+        if (tokens.get(before).isKeyword("FROM")) {
+            // x IS [NOT] DISTINCT FROM @a
+            int distinct = significantBefore(before);
+            int is = distinct >= 0 && tokens.get(distinct).isKeyword("DISTINCT")
+                    ? skipNot(significantBefore(distinct)) : -1;
+            return is >= 0 && tokens.get(is).isKeyword("IS") ? endsTemporal(significantBefore(is)) : null;
+        }
+        if (tokens.get(before).isKeyword("IN")) {
+            // x [NOT] IN (@a), whose only member's parentheses were read as grouping above.
+            return endsTemporal(skipNot(significantBefore(before)));
+        }
+        if (tokens.get(before).isPunct("(") || tokens.get(before).isPunct(",")) {
+            // A member of x [NOT] IN (..., @a, ...).
+            int open = tokens.get(before).isPunct("(") ? before : openerBefore(before);
+            int in = open < 0 || !tokens.get(open).isPunct("(") ? -1 : significantBefore(open);
+            return in >= 0 && tokens.get(in).isKeyword("IN") ? endsTemporal(skipNot(significantBefore(in))) : null;
         }
         if (tokens.get(before).isKeyword("BETWEEN")) {
             return endsTemporal(skipNot(significantBefore(before)));
@@ -11621,6 +11643,16 @@ final class SqlDialectTranslator {
                     ? endsTemporal(skipNot(significantBefore(between))) : null;
         }
         return null;
+    }
+
+    /** The {@code FROM} of an {@code IS [NOT] DISTINCT FROM} starting at the {@code IS} at {@code is}, or -1. */
+    private int distinctFrom(int is) {
+        int next = nextSignificant(is + 1, tokens.size());
+        if (next >= 0 && tokens.get(next).isKeyword("NOT")) {
+            next = nextSignificant(next + 1, tokens.size());
+        }
+        int from = next >= 0 && tokens.get(next).isKeyword("DISTINCT") ? nextSignificant(next + 1, tokens.size()) : -1;
+        return from >= 0 && tokens.get(from).isKeyword("FROM") ? from : -1;
     }
 
     /** The token before an optional {@code NOT} at {@code index}, as in {@code x NOT BETWEEN a AND b}. */
@@ -11879,7 +11911,8 @@ final class SqlDialectTranslator {
     /**
      * The schema of {@code path} read from one of {@code sources}, or null when no table has it. BigQuery rejects an
      * unqualified name several sources have unless a join's {@code USING} combines them into one column, so several
-     * matches of the same type and mode are that column; matches that differ are left untyped.
+     * matches of the same type are that column, also when one is REQUIRED and another NULLABLE; matches that differ
+     * in type, or where only one is REPEATED, are left untyped.
      */
     private TableFieldSchema sourcesColumnField(List<ProjectionSource> sources, List<String> path) {
         boolean qualified = path.size() > 1 && sources.stream()
@@ -11906,7 +11939,7 @@ final class SqlDialectTranslator {
             }
             if (matching != null) {
                 if (found != null && !(Objects.equals(found.getType(), matching.getType())
-                        && Objects.equals(found.getMode(), matching.getMode()))) {
+                        && "REPEATED".equals(found.getMode()) == "REPEATED".equals(matching.getMode()))) {
                     return null;
                 }
                 found = matching;

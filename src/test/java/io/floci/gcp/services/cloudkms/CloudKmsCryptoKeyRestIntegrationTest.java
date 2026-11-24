@@ -238,6 +238,7 @@ class CloudKmsCryptoKeyRestIntegrationTest {
                 .body("error.message", allOf(containsString("crypto_key.purpose"), containsString("99")));
 
         createRejected("purpose-fraction", "{\"purpose\": 1.5}");
+        createRejected("purpose-rounding-fraction", "{\"purpose\": 1.0000000000000001}");
         createRejected("purpose-name-unknown", "{\"purpose\": \"NOT_A_PURPOSE\"}");
         createRejected("algorithm-unknown", "{\"purpose\": 1, \"versionTemplate\": {\"algorithm\": 9999}}");
         createRejected("algorithm-boolean", "{\"purpose\": 1, \"versionTemplate\": {\"algorithm\": true}}");
@@ -250,6 +251,10 @@ class CloudKmsCryptoKeyRestIntegrationTest {
         String version = createKey("state-unknown", "{\"purpose\": \"ENCRYPT_DECRYPT\"}") + "/cryptoKeyVersions/1";
 
         json().body("{\"state\": 99}")
+                .when().patch(version)
+                .then().statusCode(400)
+                .body("error.status", equalTo("INVALID_ARGUMENT"));
+        json().body("{\"state\": 2.0000000000000001}")
                 .when().patch(version)
                 .then().statusCode(400)
                 .body("error.status", equalTo("INVALID_ARGUMENT"));

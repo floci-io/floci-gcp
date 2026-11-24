@@ -115,8 +115,9 @@ public class CloudKmsHttpController {
     @Path("/{location}/keyRings/{keyRing}/cryptoKeys")
     public Response createCryptoKey(@PathParam("project") String project, @PathParam("location") String location,
             @PathParam("keyRing") String keyRing, @QueryParam("cryptoKeyId") String cryptoKeyId,
-            @QueryParam("skipInitialVersionCreation") @DefaultValue("false") boolean skip, Map<String, Object> body) {
+            @QueryParam("skipInitialVersionCreation") @DefaultValue("false") boolean skip, String rawBody) {
         try {
+            Map<String, Object> body = parseBody(rawBody);
             String purpose = enumField(body, "purpose", CryptoKey.CryptoKeyPurpose.getDescriptor(),
                     "crypto_key.purpose");
             boolean importOnly = body != null && Boolean.TRUE.equals(body.get("importOnly"));
@@ -158,8 +159,9 @@ public class CloudKmsHttpController {
     @Path("/{location}/keyRings/{keyRing}/cryptoKeys/{cryptoKey}")
     public Response updateCryptoKey(@PathParam("project") String project, @PathParam("location") String location,
             @PathParam("keyRing") String keyRing, @PathParam("cryptoKey") String cryptoKey,
-            @QueryParam("updateMask") String updateMask, Map<String, Object> body) {
+            @QueryParam("updateMask") String updateMask, String rawBody) {
         try {
+            Map<String, Object> body = parseBody(rawBody);
             Set<String> paths;
             if (updateMask != null && !updateMask.isBlank()) {
                 paths = CloudKmsService.snakeCasePaths(Arrays.asList(updateMask.split(",")));
@@ -206,8 +208,9 @@ public class CloudKmsHttpController {
     @POST
     @Path("/{location}/keyRings/{keyRing}/cryptoKeys/{cryptoKey}/cryptoKeyVersions:import")
     public Response importCryptoKeyVersion(@PathParam("project") String project, @PathParam("location") String location,
-            @PathParam("keyRing") String keyRing, @PathParam("cryptoKey") String cryptoKey, Map<String, Object> body) {
+            @PathParam("keyRing") String keyRing, @PathParam("cryptoKey") String cryptoKey, String rawBody) {
         try {
+            Map<String, Object> body = parseBody(rawBody);
             if (body != null && body.get("cryptoKeyVersion") instanceof String existing && !existing.isEmpty()) {
                 throw GcpException.unimplemented("Re-importing into an existing CryptoKeyVersion is not supported");
             }
@@ -257,8 +260,9 @@ public class CloudKmsHttpController {
     @Path("/{location}/keyRings/{keyRing}/cryptoKeys/{cryptoKey}/cryptoKeyVersions/{version}")
     public Response updateCryptoKeyVersion(@PathParam("project") String project, @PathParam("location") String location,
             @PathParam("keyRing") String keyRing, @PathParam("cryptoKey") String cryptoKey,
-            @PathParam("version") String version, Map<String, Object> body) {
+            @PathParam("version") String version, String rawBody) {
         try {
+            Map<String, Object> body = parseBody(rawBody);
             String state = enumField(body, "state", CryptoKeyVersion.CryptoKeyVersionState.getDescriptor(),
                     "crypto_key_version.state");
             StoredCryptoKeyVersion v = service.updateCryptoKeyVersionState(
@@ -324,8 +328,9 @@ public class CloudKmsHttpController {
     @Path("/{location}/keyRings/{keyRing}/importJobs")
     public Response createImportJob(@PathParam("project") String project, @PathParam("location") String location,
             @PathParam("keyRing") String keyRing, @QueryParam("importJobId") String importJobId,
-            Map<String, Object> body) {
+            String rawBody) {
         try {
+            Map<String, Object> body = parseBody(rawBody);
             String importMethod = enumField(body, "importMethod", ImportJob.ImportMethod.getDescriptor(),
                     "import_job.import_method");
             String protectionLevel = enumField(body, "protectionLevel", ProtectionLevel.getDescriptor(),
@@ -755,9 +760,10 @@ public class CloudKmsHttpController {
     }
 
     /**
-     * Parses a request whose int64 checksums must be read exactly. The shared mapper turns a JSON
-     * number with a fraction or exponent into a double, which can round a non-integral literal such
-     * as {@code 1e-324} to {@code 0}; reading floats as BigDecimal keeps the literal.
+     * Parses a request whose int64 checksums or enum numbers must be read exactly. The shared mapper
+     * turns a JSON number with a fraction or exponent into a double, which can round a non-integral
+     * literal such as {@code 1e-324} to {@code 0} or {@code 1.0000000000000001} to {@code 1};
+     * reading floats as BigDecimal keeps the literal.
      */
     private static Map<String, Object> parseBody(String rawBody) {
         if (rawBody == null || rawBody.isBlank()) {

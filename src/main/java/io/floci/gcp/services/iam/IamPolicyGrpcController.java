@@ -63,7 +63,8 @@ public class IamPolicyGrpcController extends IAMPolicyGrpc.IAMPolicyImplBase {
             Policy policy = isSecret(request.getResource())
                     ? secretManager.get().setIamPolicy(request.getResource(), request.getPolicy())
                     : IamPolicyCodec.toProtoPolicy(iamService.setPolicy(
-                            policyResource(request.getResource()), IamPolicyCodec.toStoredPolicy(request.getPolicy())));
+                            policyResource(request.getResource()), IamPolicyCodec.toStoredPolicy(request.getPolicy()),
+                            request.getUpdateMask().getPathsList()));
             responseObserver.onNext(policy);
             responseObserver.onCompleted();
         } catch (Exception e) {

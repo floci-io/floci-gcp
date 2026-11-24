@@ -1,20 +1,33 @@
 package io.floci.gcp.services.iam;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.iam.v1.AuditConfig;
 import com.google.iam.v1.Binding;
 import com.google.iam.v1.Policy;
 import com.google.protobuf.ByteString;
+import com.google.protobuf.InvalidProtocolBufferException;
+import com.google.protobuf.util.JsonFormat;
 import com.google.type.Expr;
+import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.common.ProtoJson;
 import io.floci.gcp.services.iam.model.StoredPolicy;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 /**
  * Converts between {@code google.iam.v1.Policy} protos and {@link StoredPolicy}.
- * Bindings round-trip losslessly, including {@code condition} blocks. Evaluation is handled by the shared IAM authorization service.
+ * Bindings round-trip losslessly, including {@code condition} blocks, and so do {@code auditConfigs}.
+ * Evaluation is handled by the shared IAM authorization service.
  */
 public final class IamPolicyCodec {
+
+    // Strict, so an unknown field or log type is refused rather than dropped from the stored configuration.
+    private static final JsonFormat.Parser AUDIT_CONFIG_PARSER = JsonFormat.parser();
+    private static final ObjectMapper JSON = new ObjectMapper();
 
     private IamPolicyCodec() {}
 
@@ -33,6 +46,15 @@ public final class IamPolicyCodec {
         if (policyMap.containsKey("etag")) {
             policy.setEtag((String) policyMap.get("etag"));
         }
+        if (policyMap.get("auditConfigs") instanceof List<?> configs) {
+            List<AuditConfig> parsed = new ArrayList<>();
+            for (Object config : configs) {
+                parsed.add(parseAuditConfig(config));
+            }
+            policy.setAuditConfigs(auditConfigMaps(parsed));
+        } else if (policyMap.get("auditConfigs") != null) {
+            throw GcpException.invalidArgument("Invalid policy: auditConfigs must be a list");
+        }
         return policy;
     }
 
@@ -45,6 +67,7 @@ public final class IamPolicyCodec {
         stored.setBindings(policy.getBindingsList().stream()
                 .map(IamPolicyCodec::bindingToMap)
                 .toList());
+        stored.setAuditConfigs(auditConfigMaps(policy.getAuditConfigsList()));
         return stored;
     }
 
@@ -57,6 +80,11 @@ public final class IamPolicyCodec {
         if (stored.getBindings() != null) {
             for (Map<String, Object> binding : stored.getBindings()) {
                 builder.addBindings(mapToBinding(binding));
+            }
+        }
+        if (stored.getAuditConfigs() != null) {
+            for (Map<String, Object> config : stored.getAuditConfigs()) {
+                builder.addAuditConfigs(parseAuditConfig(config));
             }
         }
         return builder.build();
@@ -98,5 +126,25 @@ public final class IamPolicyCodec {
                     .build());
         }
         return builder.build();
+    }
+
+    private static List<Map<String, Object>> auditConfigMaps(List<AuditConfig> configs) {
+        if (configs.isEmpty()) {
+            return null;
+        }
+        return configs.stream().map(ProtoJson::printAsMap).toList();
+    }
+
+    private static AuditConfig parseAuditConfig(Object config) {
+        if (!(config instanceof Map<?, ?>)) {
+            throw GcpException.invalidArgument("Invalid policy: each auditConfigs entry must be an object");
+        }
+        try {
+            AuditConfig.Builder builder = AuditConfig.newBuilder();
+            AUDIT_CONFIG_PARSER.merge(JSON.writeValueAsString(config), builder);
+            return builder.build();
+        } catch (InvalidProtocolBufferException | JsonProcessingException e) {
+            throw GcpException.invalidArgument("Invalid policy auditConfigs: " + e.getMessage());
+        }
     }
 }

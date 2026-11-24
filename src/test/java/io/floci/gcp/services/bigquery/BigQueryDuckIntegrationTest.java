@@ -1265,6 +1265,19 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(5)
+    void unixSecondsRoundsDownForPositiveAndNegativeFractionalTimestamps() {
+        query(Map.of("query", """
+                SELECT
+                  UNIX_SECONDS(TIMESTAMP '1970-01-01 00:00:01.8+00') AS positive_fraction,
+                  UNIX_SECONDS(TIMESTAMP '1969-12-31 23:59:59.5+00') AS negative_fraction,
+                  UNIX_SECONDS(TIMESTAMP '2026-01-01 23:59:59.999999+00') AS near_next_second
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("1", "-1", "1767311999")));
+    }
+
+    @Test
+    @Order(5)
     void stringOperandsOfDateFunctionsAreCoerced() {
         query("""
                 {"query": "SELECT DATE_ADD(@d, INTERVAL 1 DAY) AS a, DATE_SUB(@d, INTERVAL 1 MONTH) AS s, DATE_DIFF(@d2, @d, DAY) AS dd, DATE_TRUNC(@d, MONTH) AS t, UNIX_SECONDS(TIMESTAMP_ADD(@ts, INTERVAL 1 HOUR)) AS ta, UNIX_SECONDS(TIMESTAMP_TRUNC(@ts, DAY)) AS tt, FORMAT_DATETIME('%Y-%m-%d %H:%M:%S', DATETIME_ADD(@ts, INTERVAL 1 HOUR)) AS da, DATE_ADD('2026-03-01', INTERVAL 2 DAY) AS lit",

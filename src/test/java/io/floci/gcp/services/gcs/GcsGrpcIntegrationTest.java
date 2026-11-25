@@ -5,6 +5,8 @@ import com.google.storage.v2.Bucket;
 import com.google.storage.v2.CreateBucketRequest;
 import com.google.storage.v2.DeleteBucketRequest;
 import com.google.storage.v2.GetObjectRequest;
+import com.google.storage.v2.RewriteObjectRequest;
+import com.google.storage.v2.RewriteResponse;
 import com.google.storage.v2.StorageGrpc;
 import com.google.storage.v2.UpdateBucketRequest;
 import com.google.storage.v2.UpdateObjectRequest;
@@ -26,7 +28,9 @@ import java.util.concurrent.TimeUnit;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 class GcsGrpcIntegrationTest {
@@ -66,6 +70,115 @@ class GcsGrpcIntegrationTest {
             storage.createBucket(create);
             given().when().get("/storage/v1/b/" + bucket + "/iam")
                     .then().statusCode(200).body("bindings.size()", equalTo(0));
+        } finally {
+            channel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+        }
+    }
+
+    /**
+     * Server-side copies go through the gRPC RewriteObject RPC. The rewrite token protocol has
+     * to answer over the wire the same way the JSON endpoint does.
+     */
+    @Test
+    void grpcRewriteObjectCompletesTheCopy() throws Exception {
+        String bucket = "grpc-rewrite-" + UUID.randomUUID().toString().substring(0, 8);
+        ManagedChannel channel = ManagedChannelBuilder
+                .forAddress(endpoint.getHost(), endpoint.getPort())
+                .usePlaintext()
+                .build();
+        try {
+            StorageGrpc.StorageBlockingStub storage = StorageGrpc.newBlockingStub(channel);
+            storage.createBucket(CreateBucketRequest.newBuilder()
+                    .setParent("projects/_")
+                    .setBucketId(bucket)
+                    .setBucket(Bucket.newBuilder().setProject("projects/test-project"))
+                    .build());
+            given()
+                    .queryParam("uploadType", "media")
+                    .queryParam("name", "source.txt")
+                    .contentType("text/plain")
+                    .body("copied".getBytes(StandardCharsets.UTF_8))
+                    .when().post("/upload/storage/v1/b/" + bucket + "/o")
+                    .then().statusCode(200);
+
+            RewriteResponse response = storage.rewriteObject(RewriteObjectRequest.newBuilder()
+                    .setSourceBucket("projects/_/buckets/" + bucket)
+                    .setSourceObject("source.txt")
+                    .setDestinationBucket("projects/_/buckets/" + bucket)
+                    .setDestinationName("copy.txt")
+                    .build());
+
+            assertTrue(response.getDone());
+            assertEquals(6, response.getTotalBytesRewritten());
+            assertEquals(6, response.getObjectSize());
+            assertEquals("", response.getRewriteToken());
+            assertEquals("copy.txt", response.getResource().getName());
+            assertEquals("projects/_/buckets/" + bucket, response.getResource().getBucket());
+            given().when().get("/storage/v1/b/" + bucket + "/o/copy.txt")
+                    .then().statusCode(200).body("size", equalTo("6"));
+        } finally {
+            channel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test
+    void grpcRewriteObjectAnswersWithATokenUntilTheCopyCompletes() throws Exception {
+        String sourceBucket = "grpc-rewrite-src-" + UUID.randomUUID().toString().substring(0, 8);
+        String destinationBucket = "grpc-rewrite-dst-" + UUID.randomUUID().toString().substring(0, 8);
+        int oneMiB = 1024 * 1024;
+        ManagedChannel channel = ManagedChannelBuilder
+                .forAddress(endpoint.getHost(), endpoint.getPort())
+                .usePlaintext()
+                .build();
+        try {
+            StorageGrpc.StorageBlockingStub storage = StorageGrpc.newBlockingStub(channel);
+            storage.createBucket(CreateBucketRequest.newBuilder()
+                    .setParent("projects/_")
+                    .setBucketId(sourceBucket)
+                    .setBucket(Bucket.newBuilder().setProject("projects/test-project"))
+                    .build());
+            storage.createBucket(CreateBucketRequest.newBuilder()
+                    .setParent("projects/_")
+                    .setBucketId(destinationBucket)
+                    .setBucket(Bucket.newBuilder()
+                            .setProject("projects/test-project")
+                            .setStorageClass("NEARLINE"))
+                    .build());
+            given()
+                    .queryParam("uploadType", "media")
+                    .queryParam("name", "big")
+                    .contentType("application/octet-stream")
+                    .body(new byte[2 * oneMiB])
+                    .when().post("/upload/storage/v1/b/" + sourceBucket + "/o")
+                    .then().statusCode(200);
+
+            RewriteObjectRequest first = RewriteObjectRequest.newBuilder()
+                    .setSourceBucket("projects/_/buckets/" + sourceBucket)
+                    .setSourceObject("big")
+                    .setDestinationBucket("projects/_/buckets/" + destinationBucket)
+                    .setDestinationName("big")
+                    .setMaxBytesRewrittenPerCall(oneMiB)
+                    .build();
+            RewriteResponse partial = storage.rewriteObject(first);
+
+            assertFalse(partial.getDone());
+            assertFalse(partial.getRewriteToken().isBlank());
+            assertFalse(partial.hasResource());
+            assertEquals(oneMiB, partial.getTotalBytesRewritten());
+            assertEquals(2L * oneMiB, partial.getObjectSize());
+            // The destination only appears once the completing call runs.
+            given().when().get("/storage/v1/b/" + destinationBucket + "/o/big")
+                    .then().statusCode(404);
+
+            RewriteResponse completed = storage.rewriteObject(first.toBuilder()
+                    .setRewriteToken(partial.getRewriteToken())
+                    .build());
+
+            assertTrue(completed.getDone());
+            assertEquals(2L * oneMiB, completed.getTotalBytesRewritten());
+            assertEquals("NEARLINE", completed.getResource().getStorageClass());
+            given().when().get("/storage/v1/b/" + destinationBucket + "/o/big")
+                    .then().statusCode(200).body("size", equalTo(String.valueOf(2L * oneMiB)));
         } finally {
             channel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
         }

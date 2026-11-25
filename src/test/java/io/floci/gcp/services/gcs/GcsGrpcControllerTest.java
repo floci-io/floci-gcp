@@ -23,6 +23,8 @@ import com.google.storage.v2.QueryWriteStatusRequest;
 import com.google.storage.v2.QueryWriteStatusResponse;
 import com.google.storage.v2.ReadObjectRequest;
 import com.google.storage.v2.ReadObjectResponse;
+import com.google.storage.v2.RewriteObjectRequest;
+import com.google.storage.v2.RewriteResponse;
 import com.google.storage.v2.StartResumableWriteRequest;
 import com.google.storage.v2.StartResumableWriteResponse;
 import com.google.storage.v2.UpdateBucketRequest;
@@ -59,6 +61,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class GcsGrpcControllerTest {
@@ -704,6 +707,146 @@ class GcsGrpcControllerTest {
         assertNull(response.error);
         assertArrayEquals("first".getBytes(StandardCharsets.UTF_8),
                 service.getObjectData("versioned-bucket", "composed"));
+    }
+
+    @Test
+    void rewriteObjectCompletesTheServerSideCopy() {
+        createBucket("grpc-rewrite-bucket");
+        service.putObject("grpc-rewrite-bucket", "source.txt", "text/plain",
+                "copied".getBytes(StandardCharsets.UTF_8), BASE_URL);
+
+        RecordingObserver<RewriteResponse> response = new RecordingObserver<>();
+        controller.rewriteObject(RewriteObjectRequest.newBuilder()
+                .setSourceBucket("projects/_/buckets/grpc-rewrite-bucket")
+                .setSourceObject("source.txt")
+                .setDestinationBucket("projects/_/buckets/grpc-rewrite-bucket")
+                .setDestinationName("copy.txt")
+                .build(), response);
+
+        assertNull(response.error);
+        RewriteResponse rewritten = response.single();
+        assertTrue(rewritten.getDone());
+        assertEquals(6, rewritten.getTotalBytesRewritten());
+        assertEquals(6, rewritten.getObjectSize());
+        assertEquals("", rewritten.getRewriteToken());
+        assertEquals("copy.txt", rewritten.getResource().getName());
+        assertEquals("projects/_/buckets/grpc-rewrite-bucket", rewritten.getResource().getBucket());
+        assertEquals("text/plain", rewritten.getResource().getContentType());
+        assertArrayEquals("copied".getBytes(StandardCharsets.UTF_8),
+                service.getObjectData("grpc-rewrite-bucket", "copy.txt"));
+    }
+
+    @Test
+    void rewriteObjectLoopsOnTheTokenUntilTheCopyCompletes() {
+        createBucket("grpc-rewrite-chunked-src");
+        createBucket("grpc-rewrite-chunked-dst");
+        byte[] payload = new byte[2 * 1024 * 1024];
+        service.putObject("grpc-rewrite-chunked-src", "big", "application/octet-stream", payload, BASE_URL);
+
+        RewriteObjectRequest first = RewriteObjectRequest.newBuilder()
+                .setSourceBucket("projects/_/buckets/grpc-rewrite-chunked-src")
+                .setSourceObject("big")
+                .setDestinationBucket("projects/_/buckets/grpc-rewrite-chunked-dst")
+                .setDestinationName("big")
+                .setDestination(com.google.storage.v2.Object.newBuilder().setStorageClass("NEARLINE"))
+                .setMaxBytesRewrittenPerCall(1024 * 1024)
+                .build();
+
+        RecordingObserver<RewriteResponse> partial = new RecordingObserver<>();
+        controller.rewriteObject(first, partial);
+
+        assertNull(partial.error);
+        RewriteResponse inProgress = partial.single();
+        assertFalse(inProgress.getDone());
+        assertFalse(inProgress.getRewriteToken().isBlank());
+        assertFalse(inProgress.hasResource());
+        assertEquals(1024 * 1024, inProgress.getTotalBytesRewritten());
+        assertEquals(2L * 1024 * 1024, inProgress.getObjectSize());
+        assertThrows(io.floci.gcp.core.common.GcpException.class,
+                () -> service.getObjectMeta("grpc-rewrite-chunked-dst", "big"));
+
+        // Continuation calls may resend every field along with the token, and the service must
+        // keep the first call's max_bytes_rewritten_per_call and destination class.
+        RecordingObserver<RewriteResponse> completed = new RecordingObserver<>();
+        controller.rewriteObject(first.toBuilder()
+                .setRewriteToken(inProgress.getRewriteToken())
+                .build(), completed);
+
+        assertNull(completed.error);
+        assertTrue(completed.single().getDone());
+        assertEquals(2L * 1024 * 1024, completed.single().getTotalBytesRewritten());
+        assertEquals("NEARLINE", completed.single().getResource().getStorageClass());
+        assertEquals(payload.length,
+                service.getObjectData("grpc-rewrite-chunked-dst", "big").length);
+    }
+
+    @Test
+    void rewriteObjectHonorsSourceGenerationAndDestinationPreconditions() {
+        service.createBucket("grpc-rewrite-versioned", "test-project", BASE_URL,
+                Map.of("versioning", Map.of("enabled", true)));
+        String firstGeneration = service.putObject("grpc-rewrite-versioned", "source", "text/plain",
+                "first".getBytes(StandardCharsets.UTF_8), BASE_URL).getGeneration();
+        service.putObject("grpc-rewrite-versioned", "source", "text/plain",
+                "second".getBytes(StandardCharsets.UTF_8), BASE_URL);
+
+        RecordingObserver<RewriteResponse> pinned = new RecordingObserver<>();
+        controller.rewriteObject(RewriteObjectRequest.newBuilder()
+                .setSourceBucket("projects/_/buckets/grpc-rewrite-versioned")
+                .setSourceObject("source")
+                .setSourceGeneration(Long.parseLong(firstGeneration))
+                .setDestinationBucket("projects/_/buckets/grpc-rewrite-versioned")
+                .setDestinationName("pinned")
+                .build(), pinned);
+
+        assertNull(pinned.error);
+        assertArrayEquals("first".getBytes(StandardCharsets.UTF_8),
+                service.getObjectData("grpc-rewrite-versioned", "pinned"));
+
+        RecordingObserver<RewriteResponse> blocked = new RecordingObserver<>();
+        controller.rewriteObject(RewriteObjectRequest.newBuilder()
+                .setSourceBucket("projects/_/buckets/grpc-rewrite-versioned")
+                .setSourceObject("source")
+                .setDestinationBucket("projects/_/buckets/grpc-rewrite-versioned")
+                .setDestinationName("blocked")
+                .setIfGenerationMatch(999_999)
+                .build(), blocked);
+
+        assertEquals(Status.Code.FAILED_PRECONDITION, Status.fromThrowable(blocked.error).getCode());
+        assertThrows(io.floci.gcp.core.common.GcpException.class,
+                () -> service.getObjectMeta("grpc-rewrite-versioned", "blocked"));
+    }
+
+    @Test
+    void rewriteObjectRejectsEmptyRequiredObjectNames() {
+        createBucket("grpc-rewrite-names");
+        service.putObject("grpc-rewrite-names", "source", "text/plain", new byte[] {1}, BASE_URL);
+
+        RecordingObserver<RewriteResponse> missingDestination = new RecordingObserver<>();
+        controller.rewriteObject(RewriteObjectRequest.newBuilder()
+                .setSourceBucket("projects/_/buckets/grpc-rewrite-names")
+                .setSourceObject("source")
+                .setDestinationBucket("projects/_/buckets/grpc-rewrite-names")
+                .setDestinationName("")
+                .build(), missingDestination);
+
+        Status destinationStatus = Status.fromThrowable(missingDestination.error);
+        assertEquals(Status.Code.INVALID_ARGUMENT, destinationStatus.getCode());
+        assertEquals("The `destination_name` field must be set to an object name.",
+                destinationStatus.getDescription());
+        assertTrue(service.listObjects("grpc-rewrite-names").stream()
+                .noneMatch(meta -> meta.getName().isEmpty()));
+
+        RecordingObserver<RewriteResponse> missingSource = new RecordingObserver<>();
+        controller.rewriteObject(RewriteObjectRequest.newBuilder()
+                .setSourceBucket("projects/_/buckets/grpc-rewrite-names")
+                .setSourceObject("")
+                .setDestinationBucket("projects/_/buckets/grpc-rewrite-names")
+                .setDestinationName("copy")
+                .build(), missingSource);
+
+        Status sourceStatus = Status.fromThrowable(missingSource.error);
+        assertEquals(Status.Code.INVALID_ARGUMENT, sourceStatus.getCode());
+        assertEquals("You must specify an object name.", sourceStatus.getDescription());
     }
 
     @Test

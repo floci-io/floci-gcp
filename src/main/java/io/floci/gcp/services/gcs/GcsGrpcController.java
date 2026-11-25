@@ -22,6 +22,8 @@ import com.google.storage.v2.QueryWriteStatusRequest;
 import com.google.storage.v2.QueryWriteStatusResponse;
 import com.google.storage.v2.ReadObjectRequest;
 import com.google.storage.v2.ReadObjectResponse;
+import com.google.storage.v2.RewriteObjectRequest;
+import com.google.storage.v2.RewriteResponse;
 import com.google.storage.v2.StartResumableWriteRequest;
 import com.google.storage.v2.StartResumableWriteResponse;
 import com.google.storage.v2.StorageGrpc;
@@ -40,6 +42,7 @@ import io.floci.gcp.services.gcs.model.GcsComposeSource;
 import io.floci.gcp.services.gcs.model.GcsObjectDownload;
 import io.floci.gcp.services.gcs.model.GcsObjectMeta;
 import io.floci.gcp.services.gcs.model.GcsObjectPreconditions;
+import io.floci.gcp.services.gcs.model.GcsRewriteResult;
 import io.floci.gcp.services.gcs.model.GcsStreamingUpload;
 import io.grpc.stub.StreamObserver;
 
@@ -235,6 +238,54 @@ public class GcsGrpcController extends StorageGrpc.StorageImplBase {
                     destination.getContentType().isBlank() ? null : destination.getContentType(),
                     GcsGrpcMapper.fromProto(destination), conditions, baseUrl);
             return GcsGrpcMapper.toProto(stored);
+        });
+    }
+
+    /**
+     * Server-side copy. Shares {@code GcsService.rewriteObject} with the REST endpoint, including
+     * the rewrite token protocol: a copy that spans locations or storage classes and is capped by
+     * {@code max_bytes_rewritten_per_call} answers {@code done: false} with a token the client
+     * must send back, and the destination only appears once the completing call runs.
+     */
+    @Override
+    public void rewriteObject(RewriteObjectRequest request, StreamObserver<RewriteResponse> observer) {
+        unary(observer, () -> {
+            String sourceBucket = GcsGrpcMapper.bucketId(request.getSourceBucket());
+            String destinationBucket = GcsGrpcMapper.bucketId(request.getDestinationBucket());
+            // Live GCS validates the required object names before starting the rewrite. An empty
+            // destination_name would otherwise be stored as an object with an empty name.
+            if (request.getSourceObject().isEmpty()) {
+                throw GcpException.invalidArgument("You must specify an object name.");
+            }
+            if (request.getDestinationName().isEmpty()) {
+                throw GcpException.invalidArgument(
+                        "The `destination_name` field must be set to an object name.");
+            }
+            requireRead(sourceBucket, request.getSourceObject());
+            requireWrite(destinationBucket, request.getDestinationName());
+            GcsObjectPreconditions conditions = preconditions(
+                    request.hasIfGenerationMatch(), request.getIfGenerationMatch(),
+                    request.hasIfGenerationNotMatch(), request.getIfGenerationNotMatch(),
+                    request.hasIfMetagenerationMatch(), request.getIfMetagenerationMatch(),
+                    request.hasIfMetagenerationNotMatch(), request.getIfMetagenerationNotMatch());
+            GcsRewriteResult result = service.rewriteObject(sourceBucket, request.getSourceObject(),
+                    request.getSourceGeneration() == 0 ? null : Long.toString(request.getSourceGeneration()),
+                    destinationBucket, request.getDestinationName(),
+                    request.getMaxBytesRewrittenPerCall() == 0 ? null : request.getMaxBytesRewrittenPerCall(),
+                    request.getRewriteToken().isBlank() ? null : request.getRewriteToken(),
+                    request.hasDestination() && !request.getDestination().getStorageClass().isBlank()
+                            ? request.getDestination().getStorageClass() : null,
+                    conditions, baseUrl, null);
+            RewriteResponse.Builder response = RewriteResponse.newBuilder()
+                    .setTotalBytesRewritten(result.totalBytesRewritten())
+                    .setObjectSize(result.objectSize())
+                    .setDone(result.done());
+            if (result.done()) {
+                response.setResource(GcsGrpcMapper.toProto(result.meta()));
+            } else {
+                response.setRewriteToken(result.rewriteToken());
+            }
+            return response.build();
         });
     }
 

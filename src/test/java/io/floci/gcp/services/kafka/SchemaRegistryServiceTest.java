@@ -10,6 +10,7 @@ import io.floci.gcp.core.common.LocationCatalog;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.services.kafka.SchemaRegistryDataPlane.Scope;
 import io.floci.gcp.services.kafka.model.StoredSchemaRegistry;
+import io.floci.gcp.testing.ThreadStates;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -97,7 +98,7 @@ class SchemaRegistryServiceTest {
         FutureTask<Map<String, Object>> second = new FutureTask<>(() -> service.createRegistry(P, L, "reg"));
         Thread secondThread = new Thread(second);
         secondThread.start();
-        awaitParked(secondThread);
+        ThreadStates.awaitBlocked(secondThread);
         plane.blockStart.release();
 
         first.get(10, TimeUnit.SECONDS);
@@ -117,7 +118,7 @@ class SchemaRegistryServiceTest {
         FutureTask<Void> delete = new FutureTask<>(() -> service.deleteRegistry(P, L, "reg"), null);
         Thread deleteThread = new Thread(delete);
         deleteThread.start();
-        awaitParked(deleteThread);
+        ThreadStates.awaitBlocked(deleteThread);
         assertEquals(0, plane.deleted.get(), "the delete must not reach the data plane during the call");
         plane.blockList.release();
 
@@ -141,7 +142,7 @@ class SchemaRegistryServiceTest {
         FutureTask<JsonNode> call = new FutureTask<>(() -> service.listSubjects(REG, null, false));
         Thread callThread = new Thread(call);
         callThread.start();
-        awaitParked(callThread);
+        ThreadStates.awaitBlocked(callThread);
         plane.blockDelete.release();
 
         delete.get(10, TimeUnit.SECONDS);
@@ -206,19 +207,6 @@ class SchemaRegistryServiceTest {
 
         GcpException e = assertThrows(GcpException.class, () -> service.updateConfig(REG, null, body));
         assertEquals(400, e.getHttpStatus());
-    }
-
-    /** Waits, without sleeping, until {@code thread} is parked on a lock or monitor. */
-    private static void awaitParked(Thread thread) {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-        while (System.nanoTime() < deadline) {
-            Thread.State state = thread.getState();
-            if (state == Thread.State.WAITING || state == Thread.State.BLOCKED) {
-                return;
-            }
-            Thread.onSpinWait();
-        }
-        throw new AssertionError("thread did not block, state " + thread.getState());
     }
 
     private static final class Gate {

@@ -4,6 +4,7 @@ import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.services.bigquery.model.TableFieldSchema;
 import org.junit.jupiter.api.Test;
 
+import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -59,6 +60,36 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void bareGroupByNameReadsTheSelectAliasBeforeTheSourceColumn() {
+        // BigQuery: select aliases "override names in the corresponding FROM clause" in GROUP BY.
+        String renamed = sql("WITH t AS (SELECT 1 AS id UNION ALL SELECT 2) SELECT MOD(id, 2) AS id, COUNT(*) AS n"
+                + " FROM t GROUP BY id ORDER BY id");
+        assertTrue(renamed.contains("GROUP BY 1"), renamed);
+        String joined = sql("WITH a AS (SELECT 1 AS uuid, 10 AS b_id), b AS (SELECT 10 AS uuid)"
+                + " SELECT COUNT(*) AS n, a.b_id AS uuid FROM a JOIN b ON a.b_id = b.uuid GROUP BY uuid");
+        assertTrue(joined.contains("GROUP BY 2"), joined);
+        String qualified = sql("WITH a AS (SELECT 1 AS uuid, 10 AS b_id), b AS (SELECT 10 AS uuid)"
+                + " SELECT a.uuid, COUNT(*) AS n FROM a JOIN b ON a.b_id = b.uuid GROUP BY uuid");
+        assertTrue(qualified.contains("GROUP BY 1"), qualified);
+        // The commas of a typed STRUCT or ARRAY constructor do not count as select items.
+        String typedStruct = sql("SELECT STRUCT<a INT64, b INT64>(1, 2) AS s, MOD(id, 2) AS id FROM ds.t GROUP BY id");
+        assertTrue(typedStruct.contains("GROUP BY 2"), typedStruct);
+        String typedArray = sql("SELECT ARRAY<STRUCT<a INT64, b INT64>>[(1, 2)] AS s, MOD(id, 2) AS id FROM ds.t"
+                + " GROUP BY id");
+        assertTrue(typedArray.contains("GROUP BY 2"), typedArray);
+        // Left as written: the column itself, a qualified name, a name no item outputs, an aggregate's alias.
+        assertTrue(sql("SELECT id, COUNT(*) AS n FROM ds.t GROUP BY id").contains("GROUP BY id"));
+        assertTrue(sql("SELECT MOD(id, 2) AS id FROM ds.t GROUP BY t.id").contains("GROUP BY t.id"));
+        assertTrue(sql("SELECT MOD(id, 2) AS m FROM ds.t GROUP BY id").contains("GROUP BY id"));
+        assertTrue(sql("SELECT k, COUNT(*) AS n FROM ds.t GROUP BY k, n").contains("GROUP BY k, n"));
+        // Only an alias or a column path names an output; the trailing name of an unaliased expression does not.
+        String unnamed = sql("SELECT id - id, COUNT(*) AS n FROM ds.t GROUP BY id");
+        assertTrue(unnamed.contains("GROUP BY id"), unnamed);
+        String implicit = sql("SELECT MOD(id, 2) id, COUNT(*) AS n FROM ds.t GROUP BY id");
+        assertTrue(implicit.contains("GROUP BY 1"), implicit);
+    }
+
+    @Test
     void lowercaseTimestampParameterIsUppercasedOnlyWhereComparedWithATemporalValue() {
         SqlDialectTranslator.QueryParameters a = new SqlDialectTranslator.QueryParameters(List.of(Map.of("name", "a",
                 "parameterType", Map.of("type", "STRING"), "parameterValue", Map.of("value", "2014-09-27t12:30:00z"))),
@@ -83,6 +114,52 @@ class SqlDialectTranslatorTest {
         assertNull(SqlDialectTranslator.QueryParameters.lowercaseTemporal("CAST('buzz' AS VARCHAR)"));
         assertEquals("2014-09-27T12:30:00", SqlDialectTranslator.QueryParameters.lowercaseTemporal(
                 "CAST('2014-09-27t12:30:00' AS VARCHAR)"));
+    }
+
+    @Test
+    void stringParameterComparedWithATemporalValueIsRefusedWhereBigQueryCannotCoerceIt() {
+        // Live BigQuery (REST jobs.query, named STRING parameter @a, 2026-11-16) refuses each of these.
+        String[][] refused = {
+                {"SELECT DATE '2014-09-28' > @a AS r", "2014-09-27T12:30:00", "Invalid date: '2014-09-27T12:30:00'"},
+                {"SELECT DATE '2014-09-28' > @a AS r", "2014-09-27 12:30:00", "Invalid date: '2014-09-27 12:30:00'"},
+                {"SELECT CURRENT_DATE() > @a AS r", "2014-09-27 12:30:00", "Invalid date: '2014-09-27 12:30:00'"},
+                {"SELECT DATETIME '2014-09-27 20:00:00' > @a AS r", "2014-09-27T12:30:00Z",
+                        "Invalid datetime string \"2014-09-27T12:30:00Z\""},
+                {"SELECT DATETIME '2014-09-27 20:00:00' > @a AS r", "2014-09-27 12:30:00+00",
+                        "Invalid datetime string \"2014-09-27 12:30:00+00\""},
+                {"SELECT TIMESTAMP '2014-09-27 20:00:00+00' > @a AS r", "2014-09-27T12:30",
+                        "Invalid timestamp: '2014-09-27T12:30'"},
+                {"SELECT TIMESTAMP '2014-09-27 20:00:00+00' > @a AS r", "2014-09-27 12:30:00 utc",
+                        "Invalid time zone: utc"},
+                {"SELECT DATE '2014-09-27' BETWEEN @a AND DATE '2014-09-28' AS r", "2014-09-26 12:30:00",
+                        "Invalid date: '2014-09-26 12:30:00'"},
+        };
+        for (String[] c : refused) {
+            GcpException e = assertThrows(GcpException.class, () -> withStringParameter(c[0], c[1]), c[0]);
+            assertTrue(e.getMessage().contains(c[2]), c[0] + " with " + c[1] + ": " + e.getMessage());
+        }
+        // Accepted by BigQuery: a date alone against a DATE, a zone name against a TIMESTAMP, a lowercase t or z.
+        assertTrue(withStringParameter("SELECT DATE '2014-09-28' > @a AS r", "2014-09-27").contains("'2014-09-27'"));
+        withStringParameter("SELECT TIMESTAMP '2014-09-27 20:00:00+00' > @a AS r", "2014-09-27 12:30:00 UTC");
+        withStringParameter("SELECT TIMESTAMP '2014-09-27 20:00:00+00' > @a AS r",
+                "2014-09-27 12:30:00 America/Los_Angeles");
+        withStringParameter("SELECT DATETIME '2014-09-27 20:00:00' > @a AS r", "2014-09-27t12:30:00");
+        withStringParameter("SELECT TIMESTAMP '2014-09-27 20:00:00+00' > @a AS r", "2014-09-27 12:30:00.45z");
+        // Not compared with a temporal value as written: the STRING is passed on unchecked.
+        withStringParameter("SELECT @a AS r, UPPER(@a) > 'A' AS s", "2014-09-27 12:30:00 utc");
+        withStringParameter("SELECT DATE_TRUNC(TIMESTAMP '2014-09-27 20:00:00+00', DAY) > @a AS r",
+                "2014-09-27 12:30:00");
+        // A temporal operand that is one term of + or - arithmetic does not type the side: DATE + INTERVAL is a
+        // DATETIME in BigQuery, so a value with a time part is valid there.
+        withStringParameter("SELECT @a = DATE '2014-09-27' + INTERVAL 1 DAY AS r", "2014-09-28 00:00:00");
+        withStringParameter("SELECT @a = (DATE '2014-09-27') - INTERVAL 1 DAY AS r", "2014-09-26 00:00:00");
+        withStringParameter("SELECT INTERVAL 1 DAY + DATE '2014-09-27' = @a AS r", "2014-09-28 00:00:00");
+    }
+
+    private static String withStringParameter(String sql, String value) {
+        return SqlDialectTranslator.translate(sql, "test-project", null, new SqlDialectTranslator.QueryParameters(
+                List.of(Map.of("name", "a", "parameterType", Map.of("type", "STRING"),
+                        "parameterValue", Map.of("value", value))), "NAMED")).sql();
     }
 
     @Test
@@ -896,6 +973,27 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void aBracedConstructorIsRejectedLikeBigQuery() {
+        for (String sql : List.of("SELECT {'a': 1} AS s", "SELECT STRUCT({'a': 1} AS x) AS s",
+                "SELECT [{'a': 1}] AS a")) {
+            GcpException e = assertThrows(GcpException.class, () -> sql(sql));
+            assertEquals("Braced constructors are not supported", e.getMessage(), sql);
+        }
+        assertTrue(sql("SELECT '{\"a\": 1}' AS j").contains("'{\"a\": 1}'"));
+        assertTrue(sql("SELECT (SELECT AS STRUCT 1 AS x) AS s").contains("{'x': 1}"));
+    }
+
+    @Test
+    void anUnnamedStructTypeFieldIsNamedByItsPositionLikeBigQuery() {
+        String cast = sql("SELECT CAST(s AS STRUCT<INT64, n STRING, ARRAY<INT64>>) AS s FROM ds.t");
+        assertTrue(cast.contains("STRUCT(\"_field_1\" BIGINT, \"n\" VARCHAR, \"_field_3\" BIGINT[])"), cast);
+        String nested = sql("SELECT CAST(s AS STRUCT<a STRUCT<INT64>, b NUMERIC(10, 2)>) AS s FROM ds.t");
+        assertTrue(nested.contains("STRUCT(\"a\" STRUCT(\"_field_1\" BIGINT), \"b\" DECIMAL(38,9))"), nested);
+        String named = sql("SELECT CAST(s AS STRUCT<int64 INT64>) AS s FROM ds.t");
+        assertTrue(named.contains("STRUCT(\"int64\" BIGINT)"), named);
+    }
+
+    @Test
     void selectDistinctAsStructKeepsItsRowModifier() {
         assertTrue(sql("SELECT ARRAY(SELECT DISTINCT AS STRUCT x FROM UNNEST([1, 1]) x) AS a")
                 .contains("SELECT DISTINCT {'x': x} FROM UNNEST([1, 1])"));
@@ -1232,8 +1330,26 @@ class SqlDialectTranslatorTest {
         String translated = sql("SELECT CAST(0.0 AS STRING) AS a, CAST(-0.0 AS STRING) AS b, "
                 + "CAST(0.5 AS STRING) AS c");
         assertTrue(translated.contains("[CAST(0.0 AS DOUBLE)]"), translated);
-        assertTrue(translated.contains("[CAST(-0.0 AS DOUBLE)]"), translated);
+        assertTrue(translated.contains("[-CAST(0.0 AS DOUBLE)]"), translated);
         assertTrue(translated.contains("[CAST(0.5 AS DOUBLE)]"), translated);
+    }
+
+    @Test
+    void aDecimalLiteralRendersAsDoubleUnlessItMeetsANumeric() {
+        String bare = sql("SELECT 0.5 AS a, x * 1.5e2 AS b, -0.25 AS c FROM ds.t");
+        assertTrue(bare.contains("CAST(0.5 AS DOUBLE) AS a"), bare);
+        assertTrue(bare.contains("x * CAST(1.5e2 AS DOUBLE)"), bare);
+        assertTrue(bare.contains("-CAST(0.25 AS DOUBLE)"), bare);
+        String numeric = sql("SELECT CAST(x AS NUMERIC) + 0.5 AS a, COALESCE(CAST(x AS NUMERIC), 0.25) AS b,"
+                + " NUMERIC '1' * 0.75 AS c FROM ds.t");
+        assertFalse(numeric.contains("AS DOUBLE"), numeric);
+        String precedence = sql("SELECT CAST(x AS NUMERIC) + 0.5 * 2 AS a FROM ds.t");
+        assertTrue(precedence.contains("CAST(0.5 AS DOUBLE) * 2"), precedence);
+        assertFalse(sql("SELECT * FROM ds.t TABLESAMPLE SYSTEM (10.5 PERCENT)").contains("AS DOUBLE"));
+        String typed = sql("SELECT ARRAY<NUMERIC>[9007199254740993.0] AS a, STRUCT<n NUMERIC>(9007199254740993.0) AS s,"
+                + " CAST(9007199254740993.0 AS NUMERIC) AS c FROM ds.t");
+        assertFalse(typed.contains("AS DOUBLE"), typed);
+        assertTrue(sql("SELECT 1 AS a FROM ds.t").contains("SELECT 1 AS a"));
     }
 
     @Test
@@ -1985,6 +2101,23 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void groupedHllCounterTakesTheSameStructStarRewriteAsAnUnqualifiedAggregate() {
+        // The rewrite has to see the qualified HLL counter as an aggregate; otherwise the call is
+        // treated as a column reference and the query fails with `Unrecognized name: HLL_COUNT`.
+        String hll = "SELECT t.s.* EXCEPT(a), HLL_COUNT.INIT(t.id) AS sketch FROM ds.t t GROUP BY ALL";
+        assertEquals("SELECT * EXCLUDE (\"a\", \"_floci_source_0\"),"
+                        + " floci_hll_init(\"_floci_source_0\") AS sketch"
+                        + " FROM (SELECT unnest(t.s), \"t\".\"id\" AS \"_floci_source_0\""
+                        + " FROM \"ds\".\"t\" AS \"t\") AS \"_expanded\" GROUP BY ALL",
+                sql(hll));
+        assertEquals("SELECT * EXCLUDE (\"a\", \"_floci_source_0\"),"
+                        + " floci_hll_merge(CAST(\"_floci_source_0\" AS BLOB)) AS sketch"
+                        + " FROM (SELECT unnest(t.s), \"t\".\"id\" AS \"_floci_source_0\""
+                        + " FROM \"ds\".\"t\" AS \"t\") AS \"_expanded\" GROUP BY ALL",
+                sql("SELECT t.s.* EXCEPT(a), HLL_COUNT.MERGE(t.id) AS sketch FROM ds.t t GROUP BY ALL"));
+    }
+
+    @Test
     void aggregateStructStarRejectsAnAggregateThatCannotReturnAStruct() {
         String base = " FROM (SELECT STRUCT(1 AS a, 2 AS b) s) t";
         assertEquals("MAX is not defined for arguments of type STRUCT",
@@ -1999,6 +2132,14 @@ class SqlDialectTranslatorTest {
                 invalid("SELECT ARRAY_AGG(t.s).* EXCEPT(a)" + base).getMessage());
         assertEquals("Dot-star is not supported for the aggregate expression",
                 invalid("SELECT MAX(t.s.a).*" + base).getMessage());
+        // The HLL counters name the type BigQuery names: MERGE estimates in INT64, the sketch
+        // forms in BYTES.
+        assertEquals("Dot-star is not supported for type BYTES",
+                invalid("SELECT HLL_COUNT.INIT(t.b).*" + base).getMessage());
+        assertEquals("Dot-star is not supported for type BYTES",
+                invalid("SELECT HLL_COUNT.MERGE_PARTIAL(t.b).*" + base).getMessage());
+        assertEquals("Dot-star is not supported for type INT64",
+                invalid("SELECT HLL_COUNT.MERGE(t.b).*" + base).getMessage());
         // ANY_VALUE keeps its input type, so it can still expand a STRUCT.
         assertTrue(sql("SELECT ANY_VALUE(t.s).* EXCEPT(a)" + base + " GROUP BY ALL")
                 .contains("ANY_VALUE(t.s) AS \"_floci_star\""));
@@ -2075,13 +2216,13 @@ class SqlDialectTranslatorTest {
     @Test
     void structStarReplaceProjectsTheWholeStructWhenTheExpressionUsesIt() {
         assertEquals("SELECT * EXCLUDE (\"_floci_struct_0\")"
-                        + " REPLACE (CAST(to_json(\"_floci_struct_0\") AS VARCHAR) AS b)"
+                        + " REPLACE (floci_to_json_string(\"_floci_struct_0\") AS b)"
                         + " FROM (SELECT unnest(t.s), t.s AS \"_floci_struct_0\""
                         + " FROM (SELECT {'a': 1, 'b': 'x'} AS \"s\") t) AS \"_expanded\"",
                 sql("SELECT t.s.* REPLACE (TO_JSON_STRING(t.s) AS b)"
                         + " FROM (SELECT STRUCT(1 AS a, 'x' AS b) s) t"));
         assertEquals("SELECT * EXCLUDE (\"a\", \"_floci_struct_0\")"
-                        + " REPLACE (CAST(to_json(\"_floci_struct_0\") AS VARCHAR) AS b), COUNT(*) AS n"
+                        + " REPLACE (floci_to_json_string(\"_floci_struct_0\") AS b), COUNT(*) AS n"
                         + " FROM (SELECT unnest(t.s), t.s AS \"_floci_struct_0\""
                         + " FROM (SELECT {'a': 1, 'b': 'x'} AS \"s\") t) AS \"_expanded\" GROUP BY 1",
                 sql("SELECT t.s.* EXCEPT(a) REPLACE (TO_JSON_STRING(t.s) AS b), COUNT(*) AS n"
@@ -3316,9 +3457,10 @@ class SqlDialectTranslatorTest {
         String aggregateConcat = sql("SELECT CONCAT(COUNT(*), ' rows') FROM ds.t");
         assertEquals(1, aggregateConcat.split("COUNT\\(\\*\\)", -1).length - 1, aggregateConcat);
         assertFalse(aggregateConcat.contains("FROM (SELECT COUNT"), aggregateConcat);
-        assertEquals("SELECT LENGTH(value) AS n", sql("SELECT LENGTH(value) AS n"));
-        assertEquals("SELECT CAST(to_json(value) AS VARCHAR) AS json",
-                sql("SELECT TO_JSON_STRING(value) AS json"));
+        assertEquals("SELECT floci_length(value) AS n", sql("SELECT LENGTH(value) AS n"));
+        assertEquals("SELECT floci_byte_length(value) AS n", sql("SELECT BYTE_LENGTH(value) AS n"));
+        assertEquals("SELECT floci_to_json_string(value, TRUE) AS json",
+                sql("SELECT TO_JSON_STRING(value, TRUE) AS json"));
         assertEquals("SELECT (CASE WHEN x THEN 1 ELSE 2 END) AS c", sql("SELECT IF(x, 1, 2) AS c"));
         assertEquals("SELECT date_diff('day', b, a) AS d", sql("SELECT DATE_DIFF(a, b, DAY) AS d"));
         assertEquals("SELECT date_diff('week', (b - INTERVAL 1 DAY), (a - INTERVAL 1 DAY)) AS d",
@@ -3478,6 +3620,89 @@ class SqlDialectTranslatorTest {
         assertEquals("SELECT contains(_floci_nfkc_casefold(name), _floci_nfkc_casefold(','))"
                 + " AS has_comma FROM \"ds\".\"t\"", translated.sql());
         assertTrue(translated.needsUnicodeCaseFold());
+    }
+
+    @Test
+    void aggregateArrayConcatAndHllSketchFunctionsTranslateToDuckDb() {
+        assertEquals("SELECT list_extract(list_transform([list_filter(list(tags),"
+                        + " _floci_concat_array -> _floci_concat_array IS NOT NULL)],"
+                        + " _floci_concat_arrays -> CASE WHEN coalesce(len(_floci_concat_arrays), 0) = 0"
+                        + " THEN NULL ELSE flatten(_floci_concat_arrays) END), 1) AS tags FROM \"ds\".\"t\"",
+                sql("SELECT ARRAY_CONCAT_AGG(tags) AS tags FROM ds.t"));
+        // HLL_COUNT.INIT and MERGE are aggregates on the sidecar too, so a group is sketched as its
+        // rows arrive rather than being collected into a list first.
+        assertEquals("SELECT floci_hll_init(id, CAST(20 AS INTEGER)) AS sketch FROM \"ds\".\"t\"",
+                sql("SELECT HLL_COUNT.INIT(id, 20) AS sketch FROM ds.t"));
+        assertEquals("SELECT floci_hll_init(id) AS sketch FROM \"ds\".\"t\"",
+                sql("SELECT HLL_COUNT.INIT(id) AS sketch FROM ds.t"));
+        assertEquals("SELECT floci_hll_init(DISTINCT id) AS sketch FROM \"ds\".\"t\"",
+                sql("SELECT HLL_COUNT.INIT(DISTINCT id) AS sketch FROM ds.t"));
+        assertEquals("SELECT floci_hll_merge(CAST(sketch AS BLOB)) AS cardinality FROM \"ds\".\"t\"",
+                sql("SELECT HLL_COUNT.MERGE(sketch) AS cardinality FROM ds.t"));
+        assertEquals("SELECT floci_hll_extract(CAST(sketch AS BLOB)) AS cardinality FROM \"ds\".\"t\"",
+                sql("SELECT HLL_COUNT.EXTRACT(sketch) AS cardinality FROM ds.t"));
+    }
+
+    @Test
+    void toJsonStringUsesTheTypeAwareSidecarSerializer() {
+        assertEquals("SELECT floci_to_json_string(\"row\") AS json",
+                sql("SELECT TO_JSON_STRING(row) AS json"));
+        // The serializer itself decides between the JSON text null and SQL NULL, so pretty_print is
+        // rendered once: evaluating it again would run a volatile expression twice.
+        assertEquals("SELECT floci_to_json_string(\"row\", NOT flag) AS json",
+                sql("SELECT TO_JSON_STRING(row, NOT flag) AS json"));
+    }
+
+    @Test
+    void farmFingerprintUsesTheCompatibleSidecarScalar() {
+        assertEquals("SELECT farm_fingerprint(from_hex('31666f6f74727565')) AS fingerprint FROM \"ds\".\"t\"",
+                sql("SELECT FARM_FINGERPRINT(b'1footrue') AS fingerprint FROM ds.t"));
+    }
+
+    @Test
+    void temporaryFunctionsPreserveSidecarBlobOperators() {
+        SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript("""
+                CREATE TEMP FUNCTION check_bit_set(bs BYTES, idx INT64) RETURNS BOOL AS (
+                  BYTE_LENGTH(bs) > 0 AND
+                  BIT_COUNT(bs & (CONCAT(REPEAT(b'\\x00', BYTE_LENGTH(bs) - 1), b'\\x01') << idx)) != 0
+                );
+                SELECT check_bit_set(b'\\x10', 4) AS bit;
+                """, "test-project", null, SqlDialectTranslator.QueryParameters.none());
+
+        assertTrue(script.setupSql().contains("CAST(\"_floci_udf_arg_0\" AS BLOB) &"), script.setupSql());
+        assertTrue(script.setupSql().contains("from_hex('01')"), script.setupSql());
+        assertTrue(script.setupSql().contains("<< CAST(\"_floci_udf_arg_1\" AS BIGINT)"), script.setupSql());
+        assertTrue(script.setupSql().contains(
+                        "CASE (floci_byte_length(CAST(\"_floci_udf_arg_0\" AS BLOB)) > 0) WHEN FALSE THEN FALSE"),
+                script.setupSql());
+        assertFalse(script.setupSql().contains("_floci_udf_parameters"), script.setupSql());
+        assertFalse(script.setupSql().contains("CAST(CASE WHEN"), script.setupSql());
+    }
+
+    @Test
+    void newSidecarFunctionsValidateTheirSignatures() {
+        assertTrue(invalid("SELECT HLL_COUNT.MERGE()").getMessage().contains("HLL_COUNT.MERGE"));
+        assertTrue(invalid("SELECT HLL_COUNT.EXTRACT(a, b)").getMessage().contains("HLL_COUNT.EXTRACT"));
+        assertTrue(invalid("SELECT HLL_COUNT.INIT(a, 10, 20)").getMessage().contains("HLL_COUNT.INIT"));
+        assertTrue(invalid("SELECT LENGTH(a, b)").getMessage().contains("LENGTH"));
+        assertTrue(invalid("SELECT BYTE_LENGTH(a, b)").getMessage().contains("BYTE_LENGTH"));
+        assertTrue(invalid("SELECT FARM_FINGERPRINT()").getMessage().contains("FARM_FINGERPRINT"));
+        assertTrue(invalid("SELECT FARM_FINGERPRINT(a, b)").getMessage().contains("FARM_FINGERPRINT"));
+        assertTrue(invalid("SELECT TO_JSON_STRING()").getMessage().contains("TO_JSON_STRING"));
+        assertTrue(invalid("SELECT TO_JSON_STRING(a, TRUE, FALSE)").getMessage().contains("TO_JSON_STRING"));
+        assertTrue(invalid("SELECT NET.IP_FROM_STRING()").getMessage().contains("NET.IP_FROM_STRING"));
+        assertTrue(invalid("SELECT NET.IP_FROM_STRING(a, b)").getMessage().contains("NET.IP_FROM_STRING"));
+        assertTrue(invalid("SELECT NET.IP_TRUNC(a)").getMessage().contains("NET.IP_TRUNC"));
+    }
+
+    @Test
+    void netIpFunctionsUseSidecarScalars() {
+        assertEquals("SELECT safe_ip_from_string(ip) AS ipv4,"
+                        + " ip_trunc(safe_ip_from_string(ipv6), 64) AS ipv6 FROM \"ds\".\"t\"",
+                sql("SELECT NET.SAFE_IP_FROM_STRING(ip) AS ipv4, "
+                        + "NET.IP_TRUNC(NET.SAFE_IP_FROM_STRING(ipv6), 64) AS ipv6 FROM ds.t"));
+        assertEquals("SELECT ip_to_string(ip) AS ip_string FROM \"ds\".\"t\"",
+                sql("SELECT NET.IP_TO_STRING(ip) AS ip_string FROM ds.t"));
     }
 
     @Test
@@ -3842,7 +4067,7 @@ class SqlDialectTranslatorTest {
                 SELECT * FROM "selected\"""",
                 sql("""
                         WITH selected AS (
-                          SELECT {'group_id': group_id, 'latest_at': MAX(event_time)} AS latest_per_group
+                          SELECT STRUCT(group_id, MAX(event_time) AS latest_at) AS latest_per_group
                           FROM ds.t GROUP BY group_id HAVING latest_per_group.latest_at <= '2021-01-30'
                         )
                         SELECT * FROM selected"""));
@@ -3862,7 +4087,7 @@ class SqlDialectTranslatorTest {
     void havingStructAliasWorksWithAnInlineSourceQuery() {
         String translated = sql("""
                 WITH grouped AS (
-                  SELECT {'group_id': group_id, 'latest_at': MAX(event_time)} AS latest_per_group
+                  SELECT STRUCT(group_id, MAX(event_time) AS latest_at) AS latest_per_group
                   FROM (
                     SELECT 'first' AS group_id, TIMESTAMP '2021-01-29 00:00:00+00' AS event_time
                     UNION ALL SELECT 'first', TIMESTAMP '2021-01-30 00:00:00+00'
@@ -3960,6 +4185,24 @@ class SqlDialectTranslatorTest {
         assertTrue(aggregate.contains("ORDER BY s.n)"), aggregate);
         String union = sql("SELECT STRUCT(1 AS n) AS s UNION ALL SELECT STRUCT(3 AS n) ORDER BY s.n DESC");
         assertTrue(union.endsWith("ORDER BY s.n DESC"), union);
+    }
+
+    @Test
+    void orderByReadsAFieldOfARenamedColumnPathAlias() {
+        String renamed = sql("SELECT t.s AS r FROM ds.t ORDER BY r.n, r.n.m DESC");
+        assertTrue(renamed.contains("ORDER BY t.s.n, t.s.n.m DESC"), renamed);
+        String bare = sql("SELECT s AS r FROM ds.t ORDER BY r.n");
+        assertTrue(bare.contains("ORDER BY s.n"), bare);
+        String sameNamed = sql("SELECT t.s AS s FROM ds.t ORDER BY s.n");
+        assertTrue(sameNamed.contains("ORDER BY s.n"), sameNamed);
+        String nested = sql("SELECT t.s AS r FROM ds.t ORDER BY (SELECT MAX(r.n) FROM ds.u AS r)");
+        assertTrue(nested.contains("MAX(r.n)"), nested);
+        String computed = sql("SELECT t.s.n + 1 AS r FROM ds.t ORDER BY r");
+        assertTrue(computed.contains("ORDER BY r"), computed);
+        String swapped = sql("SELECT a AS b, c AS a FROM ds.t ORDER BY b.n");
+        assertTrue(swapped.contains("ORDER BY a.n"), swapped);
+        String struct = sql("SELECT s AS r, STRUCT(5 AS n) AS s FROM ds.t ORDER BY r.n");
+        assertTrue(struct.contains("ORDER BY s.n"), struct);
     }
 
     @Test
@@ -4498,6 +4741,32 @@ class SqlDialectTranslatorTest {
         assertEquals(Map.of("field", "id", "range",
                 Map.of("start", "0", "end", "100", "interval", "1")), rangeCtas.rangePartitioning());
 
+        SqlDialectTranslator.Statement clusteredCtas = statement("""
+                CREATE TABLE IF NOT EXISTS ds.cached CLUSTER BY entity_id
+                OPTIONS(expiration_timestamp=TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 40 DAY))
+                AS (SELECT entity_id FROM ds.src)
+                """);
+        assertTrue(clusteredCtas.ifNotExists());
+        assertEquals(List.of("entity_id"), clusteredCtas.clusteringFields());
+        assertEquals("TIMESTAMP_ADD ( CURRENT_TIMESTAMP ( ) , INTERVAL 40 DAY )",
+                ((SqlDialectTranslator.OptionExpression) clusteredCtas.options().get("expiration_timestamp")).sql());
+        assertEquals("(SELECT entity_id FROM ds.src)", clusteredCtas.querySql().trim());
+
+        GcpException tooManyClusteringFields = assertThrows(GcpException.class, () -> statement(
+                "CREATE TABLE ds.wide (a INT64, b INT64, c INT64, d INT64, e INT64) CLUSTER BY a, b, c, d, e"));
+        assertEquals("5 clustering fields specified, exceeding the limit of 4.",
+                tooManyClusteringFields.getMessage());
+        GcpException clusteringExpression = assertThrows(GcpException.class, () ->
+                statement("CREATE TABLE ds.lowered (name STRING) CLUSTER BY LOWER(name)"));
+        assertEquals("Entries in the CLUSTER BY clause must be column names",
+                clusteringExpression.getMessage());
+        GcpException emptyClustering = assertThrows(GcpException.class, () ->
+                statement("CREATE TABLE ds.empty (id STRING) CLUSTER BY"));
+        assertEquals("Syntax error: Expected a column name in CLUSTER BY", emptyClustering.getMessage());
+        GcpException trailingClustering = assertThrows(GcpException.class, () ->
+                statement("CREATE TABLE ds.trailing (id STRING) CLUSTER BY id,"));
+        assertEquals("Syntax error: Expected a column name in CLUSTER BY", trailingClustering.getMessage());
+
         GcpException ingestionCtas = assertThrows(GcpException.class, () -> statement(
                 "CREATE TABLE ds.daily PARTITION BY DATE(_PARTITIONTIME) AS SELECT event_time FROM ds.src"));
         assertEquals("invalidQuery", ingestionCtas.getReason());
@@ -4508,6 +4777,38 @@ class SqlDialectTranslatorTest {
         assertEquals("SELECT 1 AS a", view.querySql());
         assertEquals("CREATE_MATERIALIZED_VIEW",
                 statement("CREATE MATERIALIZED VIEW ds.mv AS SELECT 1 AS a").statementType());
+    }
+
+    @Test
+    void createTableAcceptsBigQueryTableOptionsOnlyOnCreate() {
+        SqlDialectTranslator.Statement options = statement("""
+                CREATE TABLE ds.model (id INT64, d DATE) PARTITION BY d
+                OPTIONS(require_partition_filter=true, partition_expiration_days=7,
+                        kms_key_name='projects/p/locations/us/keyRings/r/cryptoKeys/k',
+                        enable_change_history=true, tags=[('123/env', 'prod')])
+                """);
+        assertEquals(Boolean.TRUE, options.options().get("require_partition_filter"));
+        assertEquals(new BigDecimal("7"), options.options().get("partition_expiration_days"));
+        assertEquals("projects/p/locations/us/keyRings/r/cryptoKeys/k",
+                options.options().get("kms_key_name"));
+        assertFalse(options.options().containsKey("enable_change_history"));
+        assertFalse(options.options().containsKey("tags"));
+
+        SqlDialectTranslator.Statement ctas = statement("CREATE TABLE ds.model2"
+                + " OPTIONS(require_partition_filter=false, partition_expiration_days=1.5) AS SELECT 1 AS id");
+        assertEquals(Boolean.FALSE, ctas.options().get("require_partition_filter"));
+        assertEquals(new BigDecimal("1.5"), ctas.options().get("partition_expiration_days"));
+        assertEquals(new BigDecimal("0"), statement("CREATE TABLE ds.z (d DATE) PARTITION BY d"
+                + " OPTIONS(partition_expiration_days=0)").options().get("partition_expiration_days"));
+        assertEquals(new BigDecimal("-1"), statement("CREATE TABLE ds.z (d DATE) PARTITION BY d"
+                + " OPTIONS(partition_expiration_days=-1)").options().get("partition_expiration_days"));
+
+        assertEquals("Option require_partition_filter is not supported by the floci BigQuery emulator yet.",
+                assertThrows(GcpException.class, () -> statement(
+                        "ALTER TABLE ds.t SET OPTIONS(require_partition_filter=true)")).getMessage());
+        assertEquals("Option kms_key_name is not supported by the floci BigQuery emulator yet.",
+                assertThrows(GcpException.class, () -> statement(
+                        "CREATE TABLE ds.c COPY ds.src OPTIONS(kms_key_name='k')")).getMessage());
     }
 
     @Test
@@ -4526,6 +4827,10 @@ class SqlDialectTranslatorTest {
         assertTrue(all.options().containsKey("friendly_name") && all.options().get("friendly_name") == null);
         assertEquals(Map.of("a", "b", "c", "d"), all.options().get("labels"));
         assertEquals(1795132800000L, all.options().get("expiration_timestamp"));
+        SqlDialectTranslator.Statement computed = statement("ALTER TABLE ds.t SET OPTIONS(expiration_timestamp="
+                + "TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 7 DAY))");
+        assertEquals("TIMESTAMP_ADD ( CURRENT_TIMESTAMP ( ) , INTERVAL 7 DAY )",
+                ((SqlDialectTranslator.OptionExpression) computed.options().get("expiration_timestamp")).sql());
         assertEquals("ALTER_VIEW", statement("ALTER VIEW ds.v SET OPTIONS(description='v')").statementType());
 
         SqlDialectTranslator.Statement expressions = statement("ALTER TABLE ds.t SET OPTIONS(description=CONCAT('a', 'b'),"
@@ -4546,6 +4851,9 @@ class SqlDialectTranslatorTest {
     void alterRejectsWhatBigQueryRejectsAndWhatFlociDoesNotSupport() {
         assertEquals("Unknown option: foo", assertThrows(GcpException.class,
                 () -> statement("ALTER TABLE ds.t SET OPTIONS(foo='bar')")).getMessage());
+        assertEquals("'description' is specified more than once in table OPTIONS",
+                assertThrows(GcpException.class, () -> statement(
+                        "ALTER TABLE ds.t SET OPTIONS(description='a', DESCRIPTION='b')")).getMessage());
         assertEquals("Option description value has type INT64 which cannot be coerced to expected type STRING",
                 assertThrows(GcpException.class,
                         () -> statement("ALTER TABLE ds.t SET OPTIONS(description=5)")).getMessage());

@@ -83,7 +83,9 @@ class ServiceRegistryConsistencyTest {
      * gRPC services, on a gated descriptor with the generic usage adapter, that the generic resolution does
      * not cover: a method whose request names no project in a field the gate reads.
      */
-    private static final Map<String, String> GRPC_PROJECT_RESOLUTION = Map.of();
+    private static final Map<String, String> GRPC_PROJECT_RESOLUTION = Map.of(
+            "UptimeCheckController", "ListUptimeCheckIps names no project in the real API (GET /v3/uptimeCheckIps); "
+                    + "the other uptime RPCs name theirs in parent or name");
 
     /** Descriptors that serve location-scoped resources without a strict location check. */
     private static final Map<String, String> NO_LOCATION_CHECK = Map.of(

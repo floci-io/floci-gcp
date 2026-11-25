@@ -14,6 +14,8 @@ import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.core.storage.StorageFactory;
 import io.floci.gcp.lifecycle.GrpcServerManager;
+import io.floci.gcp.services.credentials.CredentialAuthenticationException;
+import io.floci.gcp.services.credentials.CredentialTokenService;
 import io.floci.gcp.services.iam.authorization.IamAuthorizationService;
 import io.floci.gcp.services.iam.model.StoredPolicy;
 import io.floci.gcp.services.iam.model.StoredServiceAccount;
@@ -45,6 +47,8 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Collection;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -59,6 +63,7 @@ import java.util.function.Consumer;
 import java.util.function.BiFunction;
 import java.util.function.Function;
 import java.util.function.Supplier;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
@@ -67,6 +72,10 @@ public class IamService {
     private static final Logger LOG = Logger.getLogger(IamService.class);
     private static final String WILDCARD_PROJECT = "-";
     private static final String SA_EMAIL_DOMAIN = ".iam.gserviceaccount.com";
+    // "You can configure Data Access audit logs for Google Cloud projects, billing accounts, folders, and
+    // organizations." https://docs.cloud.google.com/logging/docs/audit/configure-data-access
+    private static final Pattern AUDIT_CONFIG_RESOURCE =
+            Pattern.compile("(projects|folders|organizations|billingAccounts)/[^/]+");
 
     private final StorageBackend<String, StoredServiceAccount> saStore;
     private final StorageBackend<String, StoredServiceAccountKey> keyStore;
@@ -80,13 +89,15 @@ public class IamService {
     private final Instance<SecretManagerService> secretManager;
     private final SecretManagerIamAuthorizationAdapter secretManagerIamAdapter;
     private final ProjectRegistry projects;
+    private final CredentialTokenService tokens;
     private final Map<String, Consumer<String>> policyResolvers = new ConcurrentHashMap<>();
 
     @Inject
     public IamService(ServiceRegistry serviceRegistry, EmulatorConfig config, StorageFactory storageFactory,
             GrpcServerManager grpcServerManager, Instance<IamAuthorizationService> authorization,
             Instance<SecretManagerService> secretManager,
-            SecretManagerIamAuthorizationAdapter secretManagerIamAdapter, ProjectRegistry projects) {
+            SecretManagerIamAuthorizationAdapter secretManagerIamAdapter, ProjectRegistry projects,
+            CredentialTokenService tokens) {
         this.serviceRegistry = serviceRegistry;
         this.config = config;
         this.grpcServerManager = grpcServerManager;
@@ -94,6 +105,7 @@ public class IamService {
         this.secretManager = secretManager;
         this.secretManagerIamAdapter = secretManagerIamAdapter;
         this.projects = projects;
+        this.tokens = tokens;
         this.saStore = storageFactory.createGlobal("iam-service-accounts", "iam-service-accounts.json",
                 new TypeReference<Map<String, StoredServiceAccount>>() {});
         this.keyStore = storageFactory.createGlobal("iam-sa-keys", "iam-sa-keys.json",
@@ -133,6 +145,7 @@ public class IamService {
         this.secretManager = null;
         this.secretManagerIamAdapter = null;
         this.projects = projects;
+        this.tokens = null;
         registerServiceAccountPolicyResolver();
     }
 
@@ -266,6 +279,40 @@ public class IamService {
         });
     }
 
+    /**
+     * IAM v1 {@code serviceAccounts.disable} and {@code enable}. Either is a no-op when the account
+     * is already in that state, as the IAM reference documents for both methods.
+     */
+    public void setServiceAccountDisabled(String project, String emailOrId, boolean disabled) {
+        ServiceAccountRef ref = resolve(project, emailOrId);
+        String key = saKey(ref.project(), ref.email());
+        withPolicyLocks(accountPolicyResources(ref.project(), ref.email()), () -> {
+            // A unique ID resolved before the lock may name an account deleted since, whose email a
+            // replacement now holds; the request must not reach the replacement.
+            StoredServiceAccount sa = saStore.get(key)
+                    .filter(found -> namesAccount(emailOrId, found))
+                    .orElseThrow(() -> GcpException.notFound("Service account not found: " + ref.email()));
+            if (sa.isDisabled() != disabled) {
+                sa.setDisabled(disabled);
+                saStore.put(key, sa);
+            }
+            LOG.debugf("setServiceAccountDisabled project=%s email=%s disabled=%s", ref.project(), ref.email(),
+                    disabled);
+            return null;
+        });
+    }
+
+    /** The stored account with this email, without the not-found and permission errors of a request. */
+    public Optional<StoredServiceAccount> findServiceAccount(String email) {
+        String owner = projectFromEmail(email);
+        if (owner != null) {
+            return saStore.get(saKey(owner, email));
+        }
+        return saStore.scan(k -> k.startsWith("sa:")).stream()
+                .filter(sa -> email.equals(sa.getEmail()))
+                .findFirst();
+    }
+
     public List<StoredServiceAccount> listServiceAccounts(String project) {
         String prefix = "sa:" + project + ":";
         return saStore.scan(k -> k.startsWith(prefix));
@@ -286,6 +333,11 @@ public class IamService {
                 policyStore.delete(policyKey(resource));
             }
             policyStore.checkpoint();
+            // Deleting the account revokes its short-lived credentials
+            // (https://docs.cloud.google.com/iam/docs/keys-disable-enable); only enforce mode evaluates them.
+            if (tokens != null && config.services().iam().authorizationMode() == EmulatorConfig.IamAuthorizationMode.ENFORCE) {
+                tokens.revokeServiceAccountTokens(ref.email());
+            }
             LOG.debugf("deleteServiceAccount project=%s email=%s", ref.project(), ref.email());
             return null;
         });
@@ -317,6 +369,18 @@ public class IamService {
     }
 
     public StoredPolicy setPolicy(String resource, StoredPolicy policy) {
+        return setPolicy(resource, policy, null);
+    }
+
+    /**
+     * Sets the policy fields named by {@code updateMask} ({@code version}, {@code bindings}, {@code etag},
+     * {@code auditConfigs}, in proto or JSON spelling); a null or empty mask is the API's default,
+     * {@code bindings, etag}, so an omitted {@code auditConfigs} is kept. Only resource containers
+     * (projects, folders, organizations, billing accounts) keep {@code auditConfigs}, the resources
+     * Data Access audit logs are configured on.
+     */
+    public StoredPolicy setPolicy(String resource, StoredPolicy policy, Collection<String> updateMask) {
+        Set<String> mask = policyMask(updateMask);
         resource = canonicalProjectName(resource);
         String key = policyKey(resource);
         // Serializes existence check + etag read-compare-write per resource, both
@@ -333,6 +397,14 @@ public class IamService {
                 throw GcpException.aborted(
                         "There were concurrent policy changes. Please retry the whole read-modify-write with exponential backoff. "
                                 + "The request's ETag '" + requestEtag + "' did not match the current policy's ETag '" + currentEtag + "'.");
+            }
+            if (!mask.contains("bindings")) {
+                StoredPolicy kept = current.orElseGet(StoredPolicy::new);
+                policy.setBindings(kept.copy().getBindings());
+                policy.setVersion(kept.getVersion());
+            }
+            if (!mask.contains("auditConfigs") || !AUDIT_CONFIG_RESOURCE.matcher(resource).matches()) {
+                policy.setAuditConfigs(current.map(StoredPolicy::copy).map(StoredPolicy::getAuditConfigs).orElse(null));
             }
             if (authorization != null) {
                 authorization.get().validatePolicyWrite(resource, current.orElse(null), policy);
@@ -552,6 +624,28 @@ public class IamService {
         return Math.floorMod(key.hashCode(), POLICY_LOCKS.length);
     }
 
+    /**
+     * The canonical names of a setIamPolicy {@code updateMask}. Paths outside the Policy message are refused:
+     * "When writing data, field masks should return an INVALID_ARGUMENT error if an entry points to a value
+     * that can not exist" (https://google.aip.dev/161).
+     */
+    private static Set<String> policyMask(Collection<String> updateMask) {
+        if (updateMask == null || updateMask.isEmpty()) {
+            return Set.of("bindings", "etag");
+        }
+        Set<String> mask = new HashSet<>();
+        for (String path : updateMask) {
+            String trimmed = path.trim();
+            String canonical = switch (trimmed) {
+                case "version", "bindings", "etag" -> trimmed;
+                case "auditConfigs", "audit_configs" -> "auditConfigs";
+                default -> throw GcpException.invalidArgument("Invalid updateMask path for a Policy: " + trimmed);
+            };
+            mask.add(canonical);
+        }
+        return mask;
+    }
+
     private static StoredPolicy emptyPolicy() {
         StoredPolicy policy = new StoredPolicy();
         policy.setEtag(EMPTY_POLICY_ETAG);
@@ -649,25 +743,37 @@ public class IamService {
     /**
      * The public parts of the keys that sign for the account with this email at {@code now}, by key ID:
      * its valid user-managed keys and, once it has signed, its Google-managed key. Empty when no such
-     * account exists. A deleted key verifies nothing.
+     * account exists. A deleted key verifies nothing. The account and its keys are read under the lock
+     * that deleting and creating the account take, so the keys are those of the account whose unique ID
+     * is returned with them.
      */
-    public Optional<Map<String, PublicKey>> publicKeys(String email, Instant now) {
+    public Optional<AccountKeys> publicKeys(String email, Instant now) {
         String project = email == null ? null : projectFromEmail(email);
-        if (project == null || saStore.get(saKey(project, email)).isEmpty()) {
+        if (project == null) {
             return Optional.empty();
         }
-        Map<String, PublicKey> keys = new LinkedHashMap<>();
-        for (StoredServiceAccountKey key : keyStore.scan(k -> k.startsWith(keyStoragePrefix(project, email)))) {
-            boolean valid = (key.getValidAfterTime() == null || !now.isBefore(Instant.parse(key.getValidAfterTime())))
-                    && (key.getValidBeforeTime() == null || now.isBefore(Instant.parse(key.getValidBeforeTime())));
-            if (valid && key.getPublicKeyData() != null) {
-                keys.put(key.getKeyId(), publicKey(key.getPublicKeyData()));
+        return withPolicyLocks(accountPolicyResources(project, email), () -> {
+            Optional<StoredServiceAccount> account = saStore.get(saKey(project, email));
+            if (account.isEmpty()) {
+                return Optional.empty();
             }
-        }
-        signingKeyStore.get(signingKeyStorageKey(project, email))
-                .ifPresent(key -> keys.put(key.getKeyId(), signingPublicKey(key)));
-        return Optional.of(keys);
+            Map<String, PublicKey> keys = new LinkedHashMap<>();
+            for (StoredServiceAccountKey key : keyStore.scan(k -> k.startsWith(keyStoragePrefix(project, email)))) {
+                boolean valid = (key.getValidAfterTime() == null
+                        || !now.isBefore(Instant.parse(key.getValidAfterTime())))
+                        && (key.getValidBeforeTime() == null || now.isBefore(Instant.parse(key.getValidBeforeTime())));
+                if (valid && key.getPublicKeyData() != null) {
+                    keys.put(key.getKeyId(), publicKey(key.getPublicKeyData()));
+                }
+            }
+            signingKeyStore.get(signingKeyStorageKey(project, email))
+                    .ifPresent(key -> keys.put(key.getKeyId(), signingPublicKey(key)));
+            return Optional.of(new AccountKeys(account.get().getUniqueId(), keys));
+        });
     }
+
+    /** The keys that sign for an account, and the unique ID of the account they belong to. */
+    public record AccountKeys(String uniqueId, Map<String, PublicKey> keys) {}
 
     private static PublicKey signingPublicKey(StoredSigningKey key) {
         try {
@@ -758,6 +864,12 @@ public class IamService {
             account = saStore.get(saKey(ref.project(), ref.email()))
                     .filter(found -> namesAccount(emailOrId, found))
                     .orElseThrow(() -> GcpException.notFound("Service account not found: " + emailOrId));
+            // Every signing route (IAM v1 signBlob, IAM Credentials signBlob, signJwt and generateIdToken)
+            // comes through here, so a disabled account signs nothing on any of them.
+            if (account.isDisabled() && config != null
+                    && config.services().iam().authorizationMode() == EmulatorConfig.IamAuthorizationMode.ENFORCE) {
+                throw CredentialAuthenticationException.accountStateInvalid();
+            }
             key = signingKey(ref);
         }
         byte[] data = input.apply(account, key.getKeyId());

@@ -391,8 +391,9 @@ handles, or redirection. Unsupported RPCs return gRPC `UNIMPLEMENTED`.
 - `Content-Length` on a media read is the length of the bytes that read returns: the stored
   size, the range length on a `206`, or the decompressed size when the read is transcoded. HEAD
   reports the same value the matching GET would
-- The XML API advertises `Accept-Ranges: bytes` on a media read. JSON API media responses do
-  not, as on GCS. A `Range` the emulator cannot make sense of is ignored and the whole object is
+- The XML API advertises `Accept-Ranges: bytes` on a media read, except on a transcoded one,
+  which GCS does not advertise ranges on. JSON API media responses do not advertise ranges at
+  all, as on GCS. A `Range` the emulator cannot make sense of is ignored and the whole object is
   served with a `200`: an unknown unit, an empty or unparseable set, a range whose last byte
   precedes its first, a position beyond the signed 64-bit integer range, and a set of ranges
   that does not walk forward, wherever the unreadable element sits in the set. A set whose every
@@ -431,6 +432,8 @@ Object names containing `/`, spaces, `+`, or percent-encoded sequences round-tri
 **Pub/Sub notifications (REST JSON):**
 
 - `CreateNotification` / `ListNotifications` / `GetNotification` / `DeleteNotification` (`/storage/v1/b/{bucket}/notificationConfigs`), object changes publish to the configured Pub/Sub topic in the local backend
+- Event types: `OBJECT_FINALIZE` (upload, copy, rewrite, compose), `OBJECT_METADATA_UPDATE` (JSON `objects.patch` / `objects.update`, gRPC `UpdateObject`), `OBJECT_DELETE`, and `OBJECT_ARCHIVE` when the bucket has versioning enabled. Replacing an object sends `OBJECT_FINALIZE` with `overwroteGeneration` plus `OBJECT_DELETE` or `OBJECT_ARCHIVE` with `overwrittenByGeneration`
+- Every message carries `notificationConfig` (`projects/_/buckets/{bucket}/notificationConfigs/{id}`), `eventType`, `payloadFormat`, `bucketId`, `objectId`, `objectGeneration`, `eventTime` (RFC 3339) and the config's `custom_attributes`
 
 **Object ACLs (REST JSON):**
 

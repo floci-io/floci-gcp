@@ -17,6 +17,7 @@ import io.floci.gcp.core.common.docker.ImageCacheService;
 import io.floci.gcp.services.compute.ComputeInstanceRuntime.Intent;
 import io.floci.gcp.services.compute.ComputeInstanceRuntime.Kind;
 import io.floci.gcp.services.compute.ComputeInstanceRuntime.Phase;
+import io.floci.gcp.testing.ThreadStates;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -30,12 +31,14 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.AbstractExecutorService;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -315,23 +318,28 @@ class ComputeInstanceRuntimeTest {
         Container stale = container("vm-container", "running", identity("vm", "4588"));
         when(lifecycleManager.listContainersByLabels(anyString(), any())).thenReturn(List.of(stale));
         AtomicBoolean readWhileStepRan = new AtomicBoolean();
-        CountDownLatch reconciled = new CountDownLatch(1);
+        CompletableFuture<Void> reconciled = new CompletableFuture<>();
+        AtomicReference<Thread> reconciler = new AtomicReference<>();
         ExecutorService pool = Executors.newFixedThreadPool(2);
         try {
             ComputeInstanceRuntime concurrent = new ComputeInstanceRuntime(config, mock(ContainerBuilder.class),
                     lifecycleManager, imageCache, scripts, dockerHost, pool, MoreExecutors.newDirectExecutorService());
             concurrent.submit("start", List.of(intent(Kind.LAUNCH)));
             assertTrue(pulling.await(5, TimeUnit.SECONDS));
+            doAnswer(invocation -> {
+                reconciler.compareAndSet(null, Thread.currentThread());
+                return List.of(stale);
+            }).when(lifecycleManager).listContainersByLabels(anyString(), any());
 
             concurrent.reconcile((project, zone, name) -> {
                 readWhileStepRan.set(release.getCount() > 0);
-                reconciled.countDown();
+                reconciled.complete(null);
                 return "RUNNING";
             });
-            Thread.sleep(200);
+            ThreadStates.awaitBlockedOrDone(reconciler, reconciled);
             release.countDown();
 
-            assertTrue(reconciled.await(5, TimeUnit.SECONDS));
+            reconciled.get(5, TimeUnit.SECONDS);
             assertFalse(readWhileStepRan.get(), "reconcile must not read the status while a step on the instance runs");
         } finally {
             pool.shutdownNow();

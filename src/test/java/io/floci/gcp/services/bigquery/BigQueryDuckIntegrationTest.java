@@ -1,5 +1,7 @@
 package io.floci.gcp.services.bigquery;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
@@ -13,12 +15,17 @@ import org.junit.jupiter.api.condition.EnabledIf;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.anyOf;
@@ -30,6 +37,7 @@ import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Runs GoogleSQL end to end on the real floci-duck sidecar. Needs Docker; skipped when no
@@ -1218,6 +1226,106 @@ class BigQueryDuckIntegrationTest {
                 .then().statusCode(200)
                 .body("rows.f.v", equalTo(List.of(List.of("1", "1"), List.of("10.5", "1"),
                         List.of("4.25", "1"))));
+    }
+
+    @Test
+    @Order(2)
+    void aDecimalLiteralIsFloat64UnlessItMeetsANumericLikeBigQuery() {
+        query(Map.of("query", "SELECT 0.5 AS l, x + 0.5 AS v, STRUCT(x + 0.5) AS s, 0.1 + 0.2 AS f, 2 * 0.5 AS i"
+                + " FROM UNNEST([2]) x", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of("FLOAT", "FLOAT", "RECORD", "FLOAT", "FLOAT")))
+                .body("schema.fields[2].fields[0].type", equalTo("FLOAT"))
+                .body("rows[0].f[3].v", equalTo("0.30000000000000004"));
+        query(Map.of("query", "SELECT CAST(1 AS NUMERIC) + 0.5 AS a, COALESCE(CAST(NULL AS NUMERIC), 0.25) AS b,"
+                + " IF(TRUE, 0.5, CAST(1 AS NUMERIC)) AS c, CASE WHEN TRUE THEN 0.5 ELSE CAST(1 AS NUMERIC) END AS d,"
+                + " NUMERIC '1' * 0.5 AS g, CAST(1 AS NUMERIC) + 0.5 * 2 AS h", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type",
+                        equalTo(List.of("NUMERIC", "NUMERIC", "NUMERIC", "NUMERIC", "NUMERIC", "FLOAT")))
+                .body("rows[0].f.v", equalTo(List.of("1.5", "0.25", "0.5", "0.5", "0.5", "2.0")));
+        query(Map.of("query", "SELECT NUMERIC '1' + (0.5) AS a, COALESCE(CAST(NULL AS NUMERIC), (0.25)) AS b,"
+                + " 0.1 + 0.2 + NUMERIC '1' AS c, 0.5 + NUMERIC '1' + 0.25 AS d, 0.1 * 0.2 + NUMERIC '1' AS e,"
+                + " NUMERIC '9007199254740993' IN (9007199254740992.0) AS f,"
+                + " NUMERIC '9007199254740993' BETWEEN 9007199254740992.5 AND 9007199254740992.9 AS g,"
+                + " 0.3 IN (NUMERIC '0.3') AS h", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of("NUMERIC", "NUMERIC", "FLOAT", "NUMERIC", "FLOAT",
+                        "BOOLEAN", "BOOLEAN", "BOOLEAN")))
+                .body("rows[0].f.v", equalTo(List.of("1.5", "0.25", "1.3", "1.75", "1.02", "false", "false", "true")));
+        query(Map.of("query", "SELECT ARRAY<NUMERIC>[9007199254740993.0] AS a,"
+                + " STRUCT<n NUMERIC>(9007199254740993.0) AS s, CAST(9007199254740993.0 AS NUMERIC) AS c,"
+                + " SAFE_CAST(9007199254740993.0 AS NUMERIC) AS d,"
+                + " ARRAY<FLOAT64>[0.1] AS f", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of("NUMERIC", "RECORD", "NUMERIC", "NUMERIC", "FLOAT")))
+                .body("rows[0].f[0].v[0].v", equalTo("9007199254740993"))
+                .body("rows[0].f[1].v.f[0].v", equalTo("9007199254740993"))
+                .body("rows[0].f[2].v", equalTo("9007199254740993"))
+                .body("rows[0].f[3].v", equalTo("9007199254740993"));
+        query(Map.of("query", "CREATE TEMP FUNCTION f(x NUMERIC) AS (x); CREATE TEMP FUNCTION g(x FLOAT64) AS (x);"
+                + " SELECT f(9007199254740993.0) AS a, g(0.1) AS b, f((9007199254740993.0)) AS c",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of("NUMERIC", "FLOAT", "NUMERIC")))
+                .body("rows[0].f.v", equalTo(List.of("9007199254740993", "0.1", "9007199254740993")));
+        query(Map.of("query", "CREATE TEMP FUNCTION f(x NUMERIC) AS (x);"
+                + " CREATE TEMP TABLE t AS SELECT f(9007199254740993.0) AS a; SELECT a FROM t", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].type", equalTo("NUMERIC"))
+                .body("rows[0].f[0].v", equalTo("9007199254740993"));
+        query(Map.of("query", "CREATE TEMP FUNCTION f(x NUMERIC) AS (x);"
+                + " CREATE TEMP FUNCTION g() AS (f(9007199254740993.0)); SELECT g() AS a", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].type", equalTo("NUMERIC"))
+                .body("rows[0].f[0].v", equalTo("9007199254740993"));
+        query(Map.of("query", "CREATE TEMP FUNCTION f() AS (0.1 + 0.2); CREATE TEMP FUNCTION g(x NUMERIC) AS (x + 0.5);"
+                + " SELECT f() AS a, g(1) AS b", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of("FLOAT", "NUMERIC")))
+                .body("rows[0].f.v", equalTo(List.of("0.30000000000000004", "1.5")));
+        query(Map.of("query", "CREATE TABLE shop.decimal_literals AS SELECT CAST(1.5 AS NUMERIC) AS n",
+                "useLegacySql", false))
+                .then().statusCode(200);
+        query(Map.of("query", "INSERT INTO shop.decimal_literals (n) VALUES (0.123456789)", "useLegacySql", false))
+                .then().statusCode(200);
+        query(Map.of("query", "CREATE TEMP FUNCTION g(x NUMERIC) AS (x + 0.5 + (SELECT COUNT(*)"
+                + " FROM shop.decimal_literals WHERE FALSE)); CREATE TEMP FUNCTION h(x INT64) AS (x + 0.5"
+                + " + (SELECT COUNT(*) FROM shop.decimal_literals WHERE FALSE)); SELECT g(1) AS a, h(1) AS b",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of("NUMERIC", "FLOAT")))
+                .body("rows[0].f.v", equalTo(List.of("1.5", "1.5")));
+        query(Map.of("query", "SELECT n * 0.5 AS a, n + 0.5 * 2 AS b FROM shop.decimal_literals WHERE n > 1",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of("NUMERIC", "FLOAT")))
+                .body("rows[0].f.v", equalTo(List.of("0.75", "2.5")));
+        query(Map.of("query", "CREATE TEMP FUNCTION f() AS ((SELECT n * 0.5 FROM shop.decimal_literals WHERE n > 1));"
+                + " SELECT f() AS a", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].type", equalTo("NUMERIC"))
+                .body("rows[0].f[0].v", equalTo("0.75"));
+        query(Map.of("query", "SELECT SUM(n) * 0.5 AS a, COUNTIF(n = 0.123456789) AS c,"
+                + " SUM(DISTINCT n) * 0.5 AS d, MAX(DISTINCT n) - 0.5 AS e FROM shop.decimal_literals",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].type", equalTo("NUMERIC"))
+                .body("schema.fields[2].type", equalTo("NUMERIC"))
+                .body("schema.fields[3].type", equalTo("NUMERIC"))
+                .body("rows[0].f[1].v", equalTo("1"));
+        query(Map.of("query", "INSERT INTO shop.decimal_literals (n) VALUES ((9007199254740993.0))",
+                "useLegacySql", false))
+                .then().statusCode(200);
+        query(Map.of("query", "SELECT n FROM shop.decimal_literals WHERE n > 9007199254740990", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("9007199254740993"));
+        query(Map.of("query", "UPDATE shop.decimal_literals SET n = (9007199254740995.0) WHERE n > 9007199254740990",
+                "useLegacySql", false))
+                .then().statusCode(200);
+        query(Map.of("query", "SELECT n FROM shop.decimal_literals WHERE n > 9007199254740990", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("9007199254740995"));
     }
 
     @Test
@@ -2545,6 +2653,76 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(2)
+    void executeImmediateBuildsClusteredCtasWithOptionsAndUsingParameters() {
+        query(Map.of("query", "CREATE SCHEMA dynamic_script", "useLegacySql", false)).then().statusCode(200);
+        query(Map.of("query", "CREATE TABLE dynamic_script.dynamic_source (entity_id STRING, record_id STRING, "
+                        + "score FLOAT64, event_timestamp TIMESTAMP, record_timestamp TIMESTAMP, event_date DATE) "
+                        + "PARTITION BY event_date", "useLegacySql", false)).then().statusCode(200);
+        query(Map.of("query", "INSERT INTO dynamic_script.dynamic_source VALUES "
+                        + "('item-1', 'record-1', 0.5, TIMESTAMP '2026-10-29 00:00:00 UTC', "
+                        + "TIMESTAMP '2026-10-29 00:00:00 UTC', DATE '2026-10-29'), "
+                        + "('item-1', 'record-1', 0.9, TIMESTAMP '2026-10-29 00:00:00 UTC', "
+                        + "TIMESTAMP '2026-10-29 00:00:00 UTC', DATE '2026-10-29')", "useLegacySql", false))
+                .then().statusCode(200);
+
+        String dynamicScript = """
+                BEGIN
+                  DECLARE table_partition_date DATE DEFAULT DATE '2026-10-29';
+                  DECLARE cache_name STRING DEFAULT '';
+                  SET cache_name = CONCAT(
+                    'bq-duck-it.dynamic_script.cache_',
+                    FORMAT_DATE('%Y%m%d', table_partition_date)
+                  );
+                  EXECUTE IMMEDIATE
+                  '''
+                  CREATE TABLE IF NOT EXISTS `''' || cache_name || '''`
+                  CLUSTER BY entity_id
+                  OPTIONS (expiration_timestamp = TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 40 DAY))
+                  AS (
+                    SELECT entity_id, record_id, score
+                    FROM dynamic_script.dynamic_source
+                    WHERE event_date = @pd
+                    QUALIFY ROW_NUMBER() OVER (
+                      PARTITION BY entity_id, record_id
+                      ORDER BY score DESC NULLS LAST, event_timestamp DESC NULLS LAST,
+                               record_timestamp DESC NULLS LAST
+                    ) = 1
+                  )
+                  '''
+                  USING table_partition_date AS pd;
+                END;
+                """;
+        query(Map.of("query", dynamicScript, "useLegacySql", false)).then().statusCode(200);
+
+        query(Map.of("query", "SELECT entity_id, record_id, score FROM dynamic_script.cache_20261029",
+                        "useLegacySql", false))
+                .then().statusCode(200).body("rows", hasSize(1))
+                .body("rows[0].f[0].v", equalTo("item-1"))
+                .body("rows[0].f[1].v", equalTo("record-1"))
+                .body("rows[0].f[2].v", equalTo("0.9"));
+
+        Response table = given().when().get(BASE + "/datasets/dynamic_script/tables/cache_20261029")
+                .then().statusCode(200).extract().response();
+        table.then().body("clustering.fields", equalTo(List.of("entity_id")));
+        long expirationMillis = Long.parseLong(table.jsonPath().getString("expirationTime"));
+        assertTrue(expirationMillis >= Instant.now().plus(Duration.ofDays(39)).toEpochMilli());
+        assertTrue(expirationMillis <= Instant.now().plus(Duration.ofDays(41)).toEpochMilli());
+        query(Map.of("query", dynamicScript, "useLegacySql", false)).then().statusCode(200);
+        given().when().get(BASE + "/datasets/dynamic_script/tables/cache_20261029")
+                .then().statusCode(200).body("expirationTime", equalTo(String.valueOf(expirationMillis)));
+        String expirationLiteral = "TIMESTAMP \"" + DateTimeFormatter
+                .ofPattern("uuuu-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC)
+                .format(Instant.ofEpochMilli(expirationMillis)) + "\"";
+        query(Map.of("query", "SELECT option_type, option_value FROM dynamic_script.INFORMATION_SCHEMA.TABLE_OPTIONS"
+                        + " WHERE table_name = 'cache_20261029' AND option_name = 'expiration_timestamp'",
+                        "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("TIMESTAMP"))
+                .body("rows[0].f[1].v", equalTo(expirationLiteral));
+    }
+
+    @Test
+    @Order(2)
     void executeImmediateCreatesTemporaryTables() {
         query(Map.of("query", """
                 EXECUTE IMMEDIATE "CREATE TEMP TABLE dynamic_values AS SELECT 1 AS value UNION ALL SELECT 2";
@@ -2552,6 +2730,116 @@ class BigQueryDuckIntegrationTest {
                 """, "useLegacySql", false))
                 .then().statusCode(200)
                 .body("rows[0].f[0].v", equalTo("3"));
+    }
+
+    @Test
+    @Order(2)
+    void alterExpirationTimestampEvaluatesExpressions() {
+        given().contentType("application/json").body("""
+                {"tableReference": {"tableId": "expiration_expression"}, "schema": {"fields": [
+                  {"name": "id", "type": "INT64"}
+                ]}}
+                """).when().post(BASE + "/datasets/shop/tables").then().statusCode(200);
+
+        query(Map.of("query", """
+                DECLARE table_creation_time TIMESTAMP DEFAULT TIMESTAMP '2099-01-01 00:00:00+00';
+                ALTER TABLE shop.expiration_expression SET OPTIONS (
+                  expiration_timestamp = TIMESTAMP_ADD(
+                    table_creation_time, INTERVAL 172800000 MILLISECOND
+                  )
+                );
+                """, "useLegacySql", false)).then().statusCode(200);
+
+        given().when().get(BASE + "/datasets/shop/tables/expiration_expression")
+                .then().statusCode(200)
+                .body("expirationTime", equalTo(String.valueOf(Instant.parse("2099-01-03T00:00:00Z")
+                        .toEpochMilli())));
+    }
+
+    @Test
+    @Order(2)
+    void createTableAsSelectReadsTheParametersAfterItsOptionExpressions() {
+        query(Map.of("query", "CREATE SCHEMA parameterized_cache", "useLegacySql", false)).then().statusCode(200);
+
+        query(Map.of("query",
+                "CREATE TABLE parameterized_cache.copied OPTIONS(description=?) AS SELECT ? AS value",
+                "useLegacySql", false, "parameterMode", "POSITIONAL",
+                "queryParameters", List.of(
+                        Map.of("parameterType", Map.of("type", "STRING"),
+                                "parameterValue", Map.of("value", "cache")),
+                        Map.of("parameterType", Map.of("type", "STRING"),
+                                "parameterValue", Map.of("value", "wanted")))))
+                .then().statusCode(200);
+
+        given().when().get(BASE + "/datasets/parameterized_cache/tables/copied")
+                .then().statusCode(200)
+                .body("description", equalTo("cache"));
+        query(Map.of("query", "SELECT value FROM parameterized_cache.copied", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("wanted"));
+    }
+
+    @Test
+    @Order(2)
+    void duplicateClusteringFieldAndDuplicateOptionQuoteWhatBigQueryReports() {
+        query(Map.of("query", "CREATE SCHEMA duplicates", "useLegacySql", false)).then().statusCode(200);
+        query(Map.of("query", "CREATE TABLE duplicates.duplicate_clustering (id INT64) CLUSTER BY id, ID",
+                        "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message",
+                        equalTo("Field can only appear once in clustering fields. Invalid field: id."));
+        query(Map.of("query", "CREATE TABLE duplicates.ctas_duplicate CLUSTER BY id, ID AS SELECT 1 AS id",
+                        "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message",
+                        equalTo("Same column cannot be used multiple times as clustering column: 'id'"));
+        query(Map.of("query",
+                        "CREATE TABLE duplicates.duplicate_options (id INT64) OPTIONS(description='a', DESCRIPTION='b')",
+                        "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", equalTo("'description' is specified more than once in table OPTIONS"));
+    }
+
+    @Test
+    @Order(2)
+    void createTableAcceptsDbtShapedBigQueryTableOptions() {
+        query(Map.of("query", "CREATE SCHEMA dbt_options", "useLegacySql", false)).then().statusCode(200);
+        query(Map.of("query", """
+                        CREATE OR REPLACE TABLE dbt_options.model
+                        PARTITION BY d
+                        CLUSTER BY id
+                        OPTIONS(
+                          require_partition_filter=true,
+                          partition_expiration_days=7,
+                          kms_key_name='projects/p/locations/us/keyRings/r/cryptoKeys/k',
+                          enable_change_history=true,
+                          tags=[('123/env', 'prod')],
+                          description='dbt model'
+                        )
+                        AS SELECT DATE '2026-10-29' AS d, 1 AS id
+                        """, "useLegacySql", false))
+                .then().statusCode(200);
+
+        given().when().get(BASE + "/datasets/dbt_options/tables/model")
+                .then().statusCode(200)
+                .body("requirePartitionFilter", equalTo(true))
+                .body("timePartitioning.requirePartitionFilter", equalTo(true))
+                .body("timePartitioning.expirationMs", equalTo("604800000"))
+                .body("encryptionConfiguration.kmsKeyName",
+                        equalTo("projects/p/locations/us/keyRings/r/cryptoKeys/k"))
+                .body("clustering.fields", equalTo(List.of("id")))
+                .body("description", equalTo("dbt model"));
+
+        query(Map.of("query", "CREATE TABLE dbt_options.unpartitioned (id INT64)"
+                        + " OPTIONS(require_partition_filter=true)", "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", equalTo("require_partition_filter value in table OPTIONS is only supported"
+                        + " for a CREATE TABLE statement with a PARTITION BY clause"));
+        query(Map.of("query", "CREATE TABLE dbt_options.zero_expiration (id INT64, d DATE) PARTITION BY d"
+                        + " OPTIONS(partition_expiration_days=0)", "useLegacySql", false, "dryRun", true))
+                .then().statusCode(400)
+                .body("error.message",
+                        equalTo("partition_expiration_days value in table OPTIONS must be positive"));
     }
 
     @Test
@@ -2874,6 +3162,11 @@ class BigQueryDuckIntegrationTest {
                 {"SELECT DISTINCT STRUCT(x AS n) AS s FROM UNNEST([2, 1, 3]) x QUALIFY ROW_NUMBER() OVER (ORDER BY s.n) <= 2 ORDER BY s.n", "rows.collect { it.f[0].v.f[0].v }", "1,2"},
                 {"SELECT t.s.n AS m, STRUCT(0 AS n) AS s FROM (SELECT STRUCT(x AS n) AS s FROM UNNEST([2, 1, 3]) x) AS t ORDER BY t.s.n", "rows.collect { it.f[0].v }", "1,2,3"},
                 {"SELECT STRUCT(MAX(t.s.n) AS n) AS s, t.s.n AS k FROM (SELECT STRUCT(x AS n) AS s FROM UNNEST([2, 1, 3]) x) AS t GROUP BY k HAVING t.s.n > 1 ORDER BY k", "rows.collect { it.f[1].v }", "2,3"},
+                {"SELECT t.s AS r FROM (SELECT STRUCT(2 AS n) AS s UNION ALL SELECT STRUCT(1 AS n)) t ORDER BY r.n", "rows.collect { it.f[0].v.f[0].v }", "1,2"},
+                {"SELECT s AS r, k FROM (SELECT STRUCT(2 AS n) AS s, 'a' AS k UNION ALL SELECT STRUCT(1 AS n), 'b') ORDER BY r.n DESC", "rows.collect { it.f[1].v }", "a,b"},
+                {"SELECT t.s AS r FROM (SELECT STRUCT(STRUCT(2 AS m) AS n) AS s UNION ALL SELECT STRUCT(STRUCT(1 AS m))) t ORDER BY r.n.m", "rows.collect { it.f[0].v.f[0].v.f[0].v }", "1,2"},
+                {"SELECT s AS r, q AS s FROM (SELECT STRUCT(2 AS n) AS s, STRUCT(1 AS n) AS q UNION ALL SELECT STRUCT(1 AS n), STRUCT(2 AS n)) t ORDER BY r.n", "rows.collect { it.f[0].v.f[0].v }", "1,2"},
+                {"SELECT s AS r, STRUCT(5 AS n) AS s FROM (SELECT STRUCT(2 AS n) AS s UNION ALL SELECT STRUCT(1 AS n)) t ORDER BY r.n", "rows.collect { it.f[0].v.f[0].v }", "1,2"},
         };
         for (String[] c : cases) {
             query(Map.of("query", c[0], "useLegacySql", false))
@@ -2905,6 +3198,32 @@ class BigQueryDuckIntegrationTest {
                 + " FORMAT_TIMESTAMP('%Y', Null) d, FORMAT_TIME('%H', (null)) e", "useLegacySql", false))
                 .then().statusCode(200)
                 .body("rows[0].f.v", equalTo(Arrays.asList(null, null, null, null, null)));
+    }
+
+    @Test
+    @Order(5)
+    void aBracedConstructorIsRejectedLikeBigQuery() {
+        query(Map.of("query", "SELECT {'a': 1} AS s", "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", equalTo("Braced constructors are not supported"));
+        query(Map.of("query", "SELECT JSON_VALUE('{\"a\": 1}', '$.a') AS v", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("1"));
+    }
+
+    @Test
+    @Order(5)
+    void anUnnamedStructTypeFieldIsNamedByItsPositionLikeBigQuery() {
+        query(Map.of("query", "SELECT CAST(STRUCT(1, 'x' AS n, [2]) AS STRUCT<INT64, n STRING, ARRAY<INT64>>) AS s",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].fields.name", equalTo(List.of("_field_1", "n", "_field_3")))
+                .body("rows[0].f[0].v.f[0].v", equalTo("1"))
+                .body("rows[0].f[0].v.f[1].v", equalTo("x"));
+        query(Map.of("query", "SELECT STRUCT<a STRUCT<INT64>>(STRUCT(1 AS _field_1)) AS s", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].fields[0].fields.name", equalTo(List.of("_field_1")))
+                .body("rows[0].f[0].v.f[0].v.f[0].v", equalTo("1"));
     }
 
     @Test
@@ -2970,6 +3289,13 @@ class BigQueryDuckIntegrationTest {
                 {"SELECT TIMESTAMP '2014-09-29 00:00:00+00' NOT BETWEEN TIMESTAMP '2014-09-26 00:00:00+00' AND @a AS v",
                         "2014-09-27t12:30:00z", "true"},
                 {"SELECT @a AS v, @a = '2014-09-27t12:30:00' AS same", "2014-09-27t12:30:00", "2014-09-27t12:30:00,true"},
+                {"SELECT TIMESTAMP '2014-09-27 12:30:00+00' IN (@a) AS v", "2014-09-27t12:30:00", "true"},
+                {"SELECT TIMESTAMP '2014-09-27 12:30:00+00' IN (TIMESTAMP '2014-01-01 00:00:00+00', @a) AS v",
+                        "2014-09-27t12:30:00z", "true"},
+                {"SELECT TIMESTAMP '2014-09-27 12:30:00+00' NOT IN (@a) AS v", "2014-09-27t12:30:00", "false"},
+                {"SELECT TIMESTAMP '2014-09-27 12:30:00+00' IS NOT DISTINCT FROM @a AS v", "2014-09-27t12:30:00z",
+                        "true"},
+                {"SELECT @a IS DISTINCT FROM TIMESTAMP '2014-09-27 12:30:00+00' AS v", "2014-09-27t12:30:00", "false"},
         }) {
             query(Map.of("query", c[0], "useLegacySql", false, "parameterMode", "NAMED",
                     "queryParameters", List.of(Map.of("name", "a", "parameterType", Map.of("type", "STRING"),
@@ -2977,6 +3303,20 @@ class BigQueryDuckIntegrationTest {
                     .then().statusCode(200)
                     .body("rows[0].f.v", equalTo(List.of(c[2].split(","))));
         }
+        query(Map.of("query", "CREATE TABLE shop.using_required (ts TIMESTAMP NOT NULL)", "useLegacySql", false))
+                .then().statusCode(200);
+        query(Map.of("query", "INSERT INTO shop.using_required (ts) VALUES (TIMESTAMP '2014-09-27 20:00:00+00')",
+                "useLegacySql", false))
+                .then().statusCode(200);
+        query(Map.of("query", "CREATE TABLE shop.using_nullable AS SELECT TIMESTAMP '2014-09-27 20:00:00+00' AS ts",
+                "useLegacySql", false))
+                .then().statusCode(200);
+        query(Map.of("query", "SELECT COUNT(*) AS n FROM shop.using_required JOIN shop.using_nullable USING (ts)"
+                + " WHERE ts > @a", "useLegacySql", false, "parameterMode", "NAMED",
+                "queryParameters", List.of(Map.of("name", "a", "parameterType", Map.of("type", "STRING"),
+                        "parameterValue", Map.of("value", "2014-09-27t12:30:00")))))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("1"));
         query(Map.of("query", "CREATE TABLE shop.lowercase_quoted AS SELECT '2014-09-27t12:30:00' AS `CURRENT_DATE`",
                 "useLegacySql", false))
                 .then().statusCode(200);
@@ -3006,6 +3346,86 @@ class BigQueryDuckIntegrationTest {
     }
 
     @Test
+    void bareGroupByNameGroupsByTheSelectAliasLikeBigQuery() {
+        // Live BigQuery (2026-10-31): a select alias overrides the FROM column of that name in GROUP BY.
+        query(Map.of("query", "WITH t AS (SELECT 1 AS id UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4)"
+                + " SELECT MOD(id, 2) AS id, COUNT(*) AS n FROM t GROUP BY id ORDER BY id", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(2))
+                .body("rows[0].f.v", equalTo(List.of("0", "2")))
+                .body("rows[1].f.v", equalTo(List.of("1", "2")));
+        query(Map.of("query", "WITH a AS (SELECT 1 AS uuid, 10 AS b_id), b AS (SELECT 10 AS uuid)"
+                + " SELECT a.b_id AS uuid, COUNT(*) AS n FROM a JOIN b ON a.b_id = b.uuid GROUP BY uuid",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(1))
+                .body("rows[0].f.v", equalTo(List.of("10", "1")));
+        query(Map.of("query", "WITH a AS (SELECT 1 AS uuid, 10 AS b_id)"
+                + " SELECT a.b_id AS uuid, COUNT(*) AS n FROM a GROUP BY uuid", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(1))
+                .body("rows[0].f.v", equalTo(List.of("10", "1")));
+        // A typed STRUCT or ARRAY item before the alias does not shift its position (live BigQuery, 2026-11-21:
+        // 4, 2 and 2 rows).
+        String ids = "WITH t AS (SELECT 1 AS id UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4) ";
+        for (Object[] c : new Object[][] {
+                {"SELECT STRUCT<a INT64, b INT64>(1, 2).a AS s, id AS k, COUNT(*) AS n FROM t GROUP BY s, k", 4},
+                {"SELECT STRUCT<a INT64, b INT64>(1, 2).a AS s, MOD(id, 2) AS id, COUNT(*) AS n FROM t"
+                        + " GROUP BY s, id", 2},
+                {"SELECT ARRAY<STRUCT<a INT64, b INT64>>[(1, 2)][OFFSET(0)].a AS s, MOD(id, 2) AS id, COUNT(*) AS n"
+                        + " FROM t GROUP BY s, id", 2},
+                // An unaliased expression names no output, so GROUP BY id keeps the source column: one row per id.
+                {"SELECT id - id, COUNT(*) AS n FROM t GROUP BY id", 4}}) {
+            query(Map.of("query", ids + c[0], "useLegacySql", false))
+                    .then().statusCode(200)
+                    .body("rows", hasSize((Integer) c[1]));
+        }
+    }
+
+    @Test
+    void stringParameterComparedWithATemporalValueIsRefusedWhereBigQueryCannotCoerceIt() {
+        // Live BigQuery (REST jobs.query, named STRING parameter @a, 2026-11-16) refuses each of these, where DuckDB's
+        // implicit cast dropped the time part or zone and answered true.
+        for (String[] c : new String[][] {
+                {"SELECT DATE '2014-09-28' > @a AS r", "2014-09-27T12:30:00", "Invalid date: '2014-09-27T12:30:00'"},
+                {"SELECT CURRENT_DATE() > @a AS r", "2014-09-27 12:30:00", "Invalid date: '2014-09-27 12:30:00'"},
+                {"SELECT DATETIME '2014-09-27 20:00:00' > @a AS r", "2014-09-27T12:30:00Z",
+                        "Invalid datetime string \"2014-09-27T12:30:00Z\""},
+                {"SELECT TIMESTAMP '2014-09-27 20:00:00+00' > @a AS r", "2014-09-27T12:30",
+                        "Invalid timestamp: '2014-09-27T12:30'"},
+                {"SELECT TIMESTAMP '2014-09-27 20:00:00+00' > @a AS r", "2014-09-27 12:30:00 utc",
+                        "Invalid time zone: utc"},
+        }) {
+            query(Map.of("query", c[0], "useLegacySql", false, "parameterMode", "NAMED",
+                    "queryParameters", List.of(Map.of("name", "a", "parameterType", Map.of("type", "STRING"),
+                            "parameterValue", Map.of("value", c[1])))))
+                    .then().statusCode(400)
+                    .body("error.errors[0].reason", equalTo("invalidQuery"))
+                    .body("error.message", containsString(c[2]));
+        }
+        // A date alone against a DATE is accepted by both.
+        query(Map.of("query", "SELECT DATE '2014-09-28' > @a AS r", "useLegacySql", false, "parameterMode", "NAMED",
+                "queryParameters", List.of(Map.of("name", "a", "parameterType", Map.of("type", "STRING"),
+                        "parameterValue", Map.of("value", "2014-09-27")))))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("true"));
+        // DATE + INTERVAL is a DATETIME in BigQuery, so a value with a time part is not checked as a DATE, whether
+        // the DATE is a literal or a column.
+        given().contentType("application/json").body("{\"datasetReference\": {\"datasetId\": \"param_dates\"}}")
+                .when().post(BASE + "/datasets").then().statusCode(200);
+        query(Map.of("query", "CREATE TABLE param_dates.d AS SELECT DATE '2014-09-27' AS d", "useLegacySql", false))
+                .then().statusCode(200);
+        for (String sql : List.of("SELECT @a = DATE '2014-09-27' + INTERVAL 1 DAY AS r",
+                "SELECT @a = d + INTERVAL 1 DAY AS r FROM param_dates.d")) {
+            query(Map.of("query", sql, "useLegacySql", false, "parameterMode", "NAMED",
+                    "queryParameters", List.of(Map.of("name", "a", "parameterType", Map.of("type", "STRING"),
+                            "parameterValue", Map.of("value", "2014-09-28 00:00:00")))))
+                    .then().statusCode(200)
+                    .body("rows[0].f[0].v", equalTo("true"));
+        }
+    }
+
+    @Test
     @Order(5)
     void orderByAMissingFieldOfASourceStructNamesTheFieldLikeBigQuery() {
         String source = "(SELECT STRUCT(1 AS n, STRUCT('a' AS k) AS m) AS s) t";
@@ -3018,11 +3438,20 @@ class BigQueryDuckIntegrationTest {
                         "Field name zz does not exist in STRUCT<n INT64>"},
                 {"SELECT STRUCT(1 AS n) AS s FROM UNNEST([1]) UNION ALL SELECT STRUCT(2 AS n) FROM UNNEST([1]) ORDER BY s.zz",
                         "Field name zz does not exist in STRUCT<n INT64>"},
+                {"(SELECT t.s AS s FROM (SELECT STRUCT(1 AS n) AS s) t ORDER BY s.zz)",
+                        "Field name zz does not exist in STRUCT<n INT64>"},
         }) {
             query(Map.of("query", c[0], "useLegacySql", false))
                     .then().statusCode(400)
                     .body("error.message", equalTo(c[1]));
         }
+        // A path inside a subquery reads the subquery's own source, so it is not checked against the outer result;
+        // the unknown name keeps the engine's message, as any unknown ORDER BY column does.
+        query(Map.of("query", "SELECT t.s AS s FROM (SELECT STRUCT(1 AS n) AS s) t"
+                + " ORDER BY (SELECT s.zz FROM (SELECT STRUCT(1 AS zz) AS s)), missing", "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", not(containsString("Field name zz")))
+                .body("error.message", containsString("\"missing\""));
         query(Map.of("query", "SELECT t.s AS s FROM " + source + " ORDER BY s.zz", "useLegacySql", false, "dryRun", true))
                 .then().statusCode(400)
                 .body("error.message", equalTo("Field name zz does not exist in STRUCT<n INT64, m STRUCT<k STRING>>"));
@@ -3030,6 +3459,30 @@ class BigQueryDuckIntegrationTest {
                 "useLegacySql", false))
                 .then().statusCode(200)
                 .body("rows.collect { it.f[0].v.f[0].v }", equalTo(List.of("1", "2")));
+    }
+
+    @Test
+    @Order(5)
+    void orderByAStructFieldAfterASetOperationSortsLikeBigQuery() {
+        for (String[] c : new String[][] {
+                {"SELECT STRUCT(2 AS n) AS s UNION ALL SELECT STRUCT(1 AS n) ORDER BY s.n", "1,2"},
+                {"SELECT STRUCT(2 AS n, 'a' AS m) AS s UNION ALL SELECT STRUCT(1 AS n, 'b' AS m) ORDER BY s.m DESC",
+                        "1,2"},
+                {"SELECT STRUCT(3 AS n) AS s, 'x' AS k UNION ALL SELECT STRUCT(1 AS n), 'y'"
+                        + " UNION ALL SELECT STRUCT(2 AS n), 'z' ORDER BY s.n LIMIT 2 OFFSET 1", "2,3"},
+                {"WITH c AS (SELECT STRUCT(2 AS n) AS s) SELECT s FROM c UNION ALL SELECT STRUCT(1 AS n) ORDER BY s.n",
+                        "1,2"},
+                {"SELECT s FROM (SELECT STRUCT(3 AS n) AS s UNION ALL SELECT STRUCT(2 AS n) ORDER BY s.n LIMIT 1) t"
+                        + " UNION ALL SELECT STRUCT(1 AS n) ORDER BY s.n", "1,2"},
+        }) {
+            query(Map.of("query", c[0], "useLegacySql", false))
+                    .then().statusCode(200)
+                    .body("rows.collect { it.f[0].v.f[0].v }.join(',')", equalTo(c[1]));
+        }
+        query(Map.of("query", "SELECT STRUCT('B' AS m) AS s UNION ALL SELECT STRUCT('a' AS m) ORDER BY LOWER(s.m)",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.collect { it.f[0].v.f[0].v }", equalTo(List.of("a", "B")));
     }
 
     @Test
@@ -3100,6 +3553,9 @@ class BigQueryDuckIntegrationTest {
                 {"SELECT STRUCT(x + 1) AS s FROM UNNEST([2, 1]) x ORDER BY s.x", "x", "STRUCT<INT64>"},
                 {"SELECT STRUCT(x + 1, 'a' AS m) AS s FROM UNNEST([2, 1]) x ORDER BY s.x", "x", "STRUCT<INT64, m STRING>"},
                 {"SELECT STRUCT(x + 1, x AS n) AS s FROM UNNEST([2, 1]) x ORDER BY s.zz", "zz", "STRUCT<INT64, n INT64>"},
+                {"SELECT STRUCT(x + 1, x AS `select`) AS s FROM UNNEST([2, 1]) x ORDER BY s.zz", "zz", "STRUCT<INT64, `select` INT64>"},
+                {"SELECT STRUCT([STRUCT(x + 1)], x AS n) AS s FROM UNNEST([2, 1]) x ORDER BY s.zz", "zz",
+                        "STRUCT<ARRAY<STRUCT<INT64>>, n INT64>"},
                 {"SELECT STRUCT(x + 1, x AS n) AS s FROM UNNEST([2, 1]) x ORDER BY s._field_1", "_field_1",
                         "STRUCT<INT64, n INT64>"},
                 {"SELECT STRUCT(STRUCT(x + 1), x AS n) AS s FROM UNNEST([2, 1]) x ORDER BY s.zz", "zz",
@@ -3112,11 +3568,21 @@ class BigQueryDuckIntegrationTest {
                         "STRUCT<m STRUCT<_field_1 INT64>>"},
                 {"SELECT STRUCT(STRUCT(x + 1) AS m, x AS `m._field_1`) AS s FROM UNNEST([2, 1]) x ORDER BY s.zz", "zz",
                         "STRUCT<m STRUCT<INT64>, `m._field_1` INT64>"},
+                {"SELECT STRUCT(STRUCT(x + 1) AS m) AS s FROM UNNEST([2, 1]) x ORDER BY s.m._field_1", "_field_1",
+                        "STRUCT<INT64>"},
+                {"SELECT STRUCT(STRUCT(x + 1, x AS k) AS m, x AS n) AS s FROM UNNEST([2, 1]) x ORDER BY s.m._field_1",
+                        "_field_1", "STRUCT<INT64, k INT64>"},
+                {"SELECT STRUCT(STRUCT(STRUCT(x + 1) AS d) AS m) AS s FROM UNNEST([2, 1]) x ORDER BY s.m.d._field_1",
+                        "_field_1", "STRUCT<INT64>"},
         }) {
             query(Map.of("query", c[0], "useLegacySql", false))
                     .then().statusCode(400)
                     .body("error.message", equalTo("Field name " + c[1] + " does not exist in " + c[2]));
         }
+        query(Map.of("query", "SELECT STRUCT(STRUCT(x + 1, x AS k) AS m) AS s FROM UNNEST([2, 1]) x ORDER BY s.m.k",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.collect { it.f[0].v.f[0].v.f[1].v }", equalTo(List.of("1", "2")));
         query(Map.of("query", "SELECT STRUCT(t.n, t.m) AS s FROM (SELECT 2 AS n, 'a' AS m UNION ALL SELECT 1, 'b') t"
                 + " ORDER BY s.n", "useLegacySql", false))
                 .then().statusCode(200)
@@ -3786,6 +4252,262 @@ class BigQueryDuckIntegrationTest {
                 .then().statusCode(200)
                 .body("rows[0].f.v", equalTo(java.util.Arrays.asList("object", "array", "string", "number",
                         "number", "number", "number", "boolean", "null", null)));
+    }
+
+    @Test
+    @Order(5)
+    void arrayConcatAggAndHllSketchesCompose() {
+        query("""
+                {"query": "SELECT ARRAY_CONCAT_AGG(tags) AS tags FROM shop.users", "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields[0].type", equalTo("STRING"))
+                .body("schema.fields[0].mode", equalTo("REPEATED"))
+                .body("rows[0].f[0].v.v", equalTo(List.of("a", "b")));
+
+        query(Map.of("query", """
+                WITH sketches AS (SELECT HLL_COUNT.INIT(name, 20) AS sketch FROM shop.users)
+                SELECT HLL_COUNT.EXTRACT(sketch) AS extracted,
+                  (SELECT HLL_COUNT.MERGE(value) FROM UNNEST([sketch, sketch]) value) AS merged
+                FROM sketches
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of("INTEGER", "INTEGER")))
+                .body("rows[0].f.v", equalTo(List.of("3", "3")));
+
+        query(Map.of("query", """
+                SELECT HLL_COUNT.INIT(CAST(NULL AS STRING)) IS NULL AS init_all_null,
+                  HLL_COUNT.MERGE(CAST(NULL AS BYTES)) = 0 AS merge_all_null,
+                  HLL_COUNT.MERGE_PARTIAL(CAST(NULL AS BYTES)) IS NULL AS merge_partial_all_null
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("true", "true", "true")));
+    }
+
+    @Test
+    @Order(5)
+    void hllOperationsReadBigQueryCompatibleSketchBytes() {
+        query(Map.of("query", """
+                WITH sketches AS (
+                  SELECT FROM_BASE64('CHAQARgCIAuCBwsQARgPIBQyA9bwNQ==') AS sketch
+                )
+                SELECT HLL_COUNT.EXTRACT(sketch) AS extracted,
+                  (SELECT HLL_COUNT.MERGE(value)
+                   FROM UNNEST([sketch, FROM_BASE64('CHAQAhgCIAuCBw4QAhgPIBQyBr/IHISsGQ==')]) value) AS merged
+                FROM sketches
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("1", "3")));
+
+        // Precisions 21-24 are inside BigQuery's range, and each precision returns the sketch
+        // bytes live BigQuery produces for the same input.
+        query(Map.of("query", """
+                SELECT TO_BASE64(HLL_COUNT.INIT(x, 24)) AS sketch,
+                  TO_BASE64(HLL_COUNT.INIT(x, 21)) AS narrow,
+                  HLL_COUNT.EXTRACT(HLL_COUNT.INIT(x, 22)) AS estimated
+                FROM UNNEST([1, 2, 3]) AS x
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("CHAQAxgCIAiCBxUQAxgYIBkyDYOLnwjO2qkDsJ6/tQY="))
+                .body("rows[0].f[1].v", equalTo("CHAQAxgCIAiCBxQQAxgVIBkyDIOLnwjO2qkD8JrIXA=="))
+                .body("rows[0].f[2].v", equalTo("3"));
+
+        query(Map.of("query", "SELECT HLL_COUNT.INIT(x, 9) FROM UNNEST([1]) AS x", "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message",
+                        containsString("Argument 2 to HLL_COUNT.INIT must be between 10 and 24"));
+    }
+
+    @Test
+    @Order(5)
+    void groupedHllCountSurvivesTheStructStarRewrite() {
+        // Live BigQuery answers one row per b with the struct star expanded and the sketch beside it;
+        // the grouped rewrite has to see HLL_COUNT.INIT as an aggregate for that to hold.
+        query(Map.of("query", """
+                CREATE TEMP TABLE t AS
+                  SELECT STRUCT(1 AS a, 2 AS b) AS s, 10 AS id
+                  UNION ALL SELECT STRUCT(3 AS a, 4 AS b), 20;
+                SELECT t.s.* EXCEPT(a), HLL_COUNT.INIT(t.id) AS sketch
+                FROM t
+                GROUP BY ALL
+                ORDER BY b
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(2))
+                .body("rows[0].f[0].v", equalTo("2"))
+                .body("rows[0].f[1].v", notNullValue())
+                .body("rows[1].f[0].v", equalTo("4"))
+                .body("rows[1].f[1].v", notNullValue());
+
+        query(Map.of("query", """
+                CREATE TEMP TABLE id_rows AS
+                  SELECT 10 AS id UNION ALL SELECT 20;
+                SELECT HLL_COUNT.EXTRACT(HLL_COUNT.INIT(t.id)) AS distinct_ids FROM id_rows t
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("2"));
+    }
+
+    @Test
+    @Order(5)
+    void lengthAndFarmFingerprintMatchBigQuery() {
+        query(Map.of("query", """
+                SELECT LENGTH('hé') AS string_length,
+                  BYTE_LENGTH('hé') AS string_bytes,
+                  LENGTH(b'h\\xC3\\xA9') AS bytes_length,
+                  FARM_FINGERPRINT('1footrue') AS negative_hash,
+                  FARM_FINGERPRINT('2applefalse') AS positive_hash,
+                  FARM_FINGERPRINT(b'1footrue') AS bytes_hash,
+                  FARM_FINGERPRINT(CAST(NULL AS STRING)) AS null_hash
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of(
+                        "INTEGER", "INTEGER", "INTEGER", "INTEGER", "INTEGER", "INTEGER", "INTEGER")))
+                .body("rows[0].f[0].v", equalTo("2"))
+                .body("rows[0].f[1].v", equalTo("3"))
+                .body("rows[0].f[2].v", equalTo("3"))
+                .body("rows[0].f[3].v", equalTo("-1541654101129638711"))
+                .body("rows[0].f[4].v", equalTo("2794438866806483259"))
+                .body("rows[0].f[5].v", equalTo("-1541654101129638711"))
+                .body("rows[0].f[6].v", nullValue());
+    }
+
+    @Test
+    @Order(5)
+    void netIpFunctionsProduceCanonicalBytesAndStrings() {
+        query(Map.of("query", """
+                SELECT NET.SAFE_IP_FROM_STRING('123.123.123.123') AS ipv4,
+                  NET.IP_TRUNC(NET.SAFE_IP_FROM_STRING('1111:1111:1111:1111::'), 64) AS ipv6,
+                  NET.SAFE_IP_FROM_STRING('not-an-ip') AS malformed,
+                  NET.IP_TO_STRING(NET.IP_FROM_STRING('123.123.123.123')) AS ipv4_text,
+                  NET.IP_TO_STRING(NET.IP_FROM_STRING('1111:1111:1111:1111::')) AS ipv6_text
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of("BYTES", "BYTES", "BYTES", "STRING", "STRING")))
+                .body("rows[0].f[0].v", equalTo("e3t7ew=="))
+                .body("rows[0].f[1].v", equalTo("EREREREREREAAAAAAAAAAA=="))
+                .body("rows[0].f[2].v", nullValue())
+                .body("rows[0].f[3].v", equalTo("123.123.123.123"))
+                .body("rows[0].f[4].v", equalTo("1111:1111:1111:1111::"));
+
+        query(Map.of("query", "SELECT NET.IP_FROM_STRING('nope')", "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", containsString(
+                        "NET.IP_FROM_STRING() encountered an unparseable IP-address: nope"));
+
+        query(Map.of("query", "SELECT NET.IP_TO_STRING(b'\\x01\\x02\\x03')", "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", containsString("NET.IP_TO_STRING() encountered an invalid IP "
+                        + "address. Expected 4 (for IPv4) or 16 (for IPv6) bytes but got 3"));
+
+        query(Map.of("query", """
+                SELECT NET.IP_TO_STRING(NET.IP_TRUNC(NET.IP_FROM_STRING('10.0.0.1'), 33))
+                """, "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", containsString("The second argument of NET.IP_TRUNC() must be "
+                        + "between 0 and 8 * LENGTH(first argument); got 33"));
+    }
+
+    @Test
+    @Order(5)
+    void toJsonStringUsesBigQueryFormatting() throws Exception {
+        Response response = query(Map.of("query", """
+                WITH input AS (
+                  SELECT TIMESTAMP '2021-07-09 00:00:00+00' AS occurred_at,
+                    DATE '2021-07-10' AS event_date,
+                    TIME '03:04:05.123400' AS event_time,
+                    DATETIME '2021-07-11 06:07:08.123400' AS event_datetime,
+                    GENERATE_UUID() AS unique_key,
+                    '2021-07-09 00:00:00+00' AS timestamp_shaped_text
+                )
+                SELECT TO_JSON_STRING(row) AS json FROM input AS row
+                """, "useLegacySql", false));
+        response.then().statusCode(200).body("schema.fields[0].type", equalTo("STRING"));
+
+        JsonNode json = new ObjectMapper().readTree(response.jsonPath().getString("rows[0].f[0].v"));
+        assertEquals(Instant.parse("2021-07-09T00:00:00Z"), Instant.parse(json.path("occurred_at").asText()));
+        assertEquals("2021-07-10", json.path("event_date").asText());
+        assertEquals("03:04:05.123400", json.path("event_time").asText());
+        assertEquals("2021-07-11T06:07:08.123400", json.path("event_datetime").asText());
+        assertEquals(UUID.fromString(json.path("unique_key").asText()).toString(), json.path("unique_key").asText());
+        assertEquals("2021-07-09 00:00:00+00", json.path("timestamp_shaped_text").asText());
+
+        query(Map.of("query", """
+                SELECT TO_JSON_STRING(CAST(NULL AS STRING)) AS null_value,
+                  TO_JSON_STRING(STRUCT(1 AS id, [10, 20] AS coordinates), TRUE) AS pretty,
+                  TO_JSON_STRING(STRUCT(1 AS id), NULL) AS null_pretty,
+                  TO_JSON_STRING(CAST('9223372036854775808' AS HUGEINT)) AS huge_value
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("null"))
+                .body("rows[0].f[1].v", equalTo(
+                        "{\n  \"id\": 1,\n  \"coordinates\": [\n    10,\n    20\n  ]\n}"))
+                .body("rows[0].f[2].v", nullValue())
+                .body("rows[0].f[3].v", equalTo("\"9223372036854775808\""));
+
+        // A NUMERIC/BIGNUMERIC is a JSON string when it has a fractional part and a JSON number
+        // when it is integral, with the trailing zeros of the scale dropped.
+        query(Map.of("query", """
+                SELECT TO_JSON_STRING(NUMERIC '1.50') AS fractional,
+                  TO_JSON_STRING(NUMERIC '1.0') AS integral,
+                  TO_JSON_STRING(BIGNUMERIC '-0.500') AS negative,
+                  TO_JSON_STRING(STRUCT(NUMERIC '7.0' AS n)) AS nested
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("\"1.5\""))
+                .body("rows[0].f[1].v", equalTo("1"))
+                .body("rows[0].f[2].v", equalTo("\"-0.5\""))
+                .body("rows[0].f[3].v", equalTo("{\"n\":7}"));
+
+        // A NULL value serializes as the JSON text null whatever the pretty_print expression is:
+        // `NOT FALSE` must not read as `NOT (FALSE IS NULL)`, which would answer SQL NULL.
+        query(Map.of("query", """
+                SELECT TO_JSON_STRING(CAST(NULL AS STRING), NOT FALSE) AS negated,
+                  TO_JSON_STRING(CAST(NULL AS STRING), 1 = 1) AS compared,
+                  TO_JSON_STRING(CAST(NULL AS STRING), NOT TRUE) AS disabled
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("null"))
+                .body("rows[0].f[1].v", equalTo("null"))
+                .body("rows[0].f[2].v", equalTo("null"));
+    }
+
+    @Test
+    @Order(5)
+    void temporaryFunctionsComposeBlobOverloads() {
+        query(Map.of("query", """
+                CREATE TEMP FUNCTION check_bit_set(bs BYTES, idx INT64) RETURNS BOOL AS (
+                  BYTE_LENGTH(bs) > 0 AND
+                  BIT_COUNT(bs & (CONCAT(REPEAT(b'\\x00', BYTE_LENGTH(bs) - 1), b'\\x01') << idx)) != 0
+                );
+                SELECT check_bit_set(b'\\x10', 4) AS set_bit,
+                       check_bit_set(b'\\x10', 3) AS clear_bit,
+                       check_bit_set(b'', 4) AS empty_bytes
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(List.of("true", "false", "false")));
+
+        query(Map.of("query", """
+                CREATE TEMP FUNCTION check_bit_set(bs BYTES, idx INT64) RETURNS BOOL AS (
+                  BYTE_LENGTH(bs) > 0 AND
+                  BIT_COUNT(bs & (CONCAT(REPEAT(b'\\x00', BYTE_LENGTH(bs) - 1), b'\\x01') << idx)) != 0
+                );
+                WITH inputs AS (
+                  SELECT 'row1' AS row_id, b'\\x10' AS value
+                  UNION ALL SELECT 'row2', b''
+                  UNION ALL SELECT 'row3', CAST(NULL AS BYTES)
+                )
+                SELECT row_id,
+                  ARRAY_AGG(STRUCT(COALESCE(check_bit_set(value, 4), false) AS bit_set)) AS flags
+                FROM inputs
+                GROUP BY row_id
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows", hasSize(3));
+
+        query(Map.of("query", "SELECT REPEAT(b'x', -1)", "useLegacySql", false))
+                .then().statusCode(400)
+                .body("error.message", containsString("BYTES repeat count must not be negative"));
     }
 
     @Test

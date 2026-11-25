@@ -173,6 +173,7 @@ class BigQueryWriteGrpcIntegrationTest {
     private final class Connection implements AutoCloseable {
         private final BlockingQueue<Object> responses = new LinkedBlockingQueue<>();
         private final StreamObserver<AppendRowsRequest> requests;
+        private volatile boolean errorSeen;
 
         Connection() {
             requests = BigQueryWriteGrpc.newStub(channel).appendRows(new StreamObserver<>() {
@@ -206,6 +207,7 @@ class BigQueryWriteGrpcIntegrationTest {
         AppendRowsResponse await() throws Exception {
             Object response = responses.poll(30, TimeUnit.SECONDS);
             if (response instanceof Throwable t) {
+                errorSeen = true;
                 throw (Exception) t;
             }
             return (AppendRowsResponse) response;
@@ -214,6 +216,10 @@ class BigQueryWriteGrpcIntegrationTest {
         @Override
         public void close() throws Exception {
             requests.onCompleted();
+            if (errorSeen) {
+                // await() already returned the call's error, so no "completed" can follow.
+                return;
+            }
             assertEquals("completed", responses.poll(10, TimeUnit.SECONDS));
         }
     }

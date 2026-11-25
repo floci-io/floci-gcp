@@ -77,6 +77,9 @@ import java.util.stream.Collectors;
 public class BigQueryService {
 
     private static final Logger LOG = Logger.getLogger(BigQueryService.class);
+    /** The column types BigQuery accepts for a clustering column, in their GoogleSQL names. */
+    private static final Set<String> CLUSTERABLE_FIELD_TYPES = Set.of("BIGNUMERIC", "BOOL", "DATE", "DATETIME",
+            "GEOGRAPHY", "INT64", "NUMERIC", "RANGE", "STRING", "TIMESTAMP");
 
     private final StorageBackend<String, Dataset> datasetStore;
     private final StorageBackend<String, Table> tableStore;
@@ -907,9 +910,48 @@ public class BigQueryService {
             return job;
         }
 
+        SqlDialectTranslator.TableRef truncated = truncatedDestination(options);
+        if (truncated != null) {
+            // The job replaces its destination with what the query read. When the query reads the destination
+            // itself, an append acknowledged between the read and the replacement would be dropped, so
+            // writeLock is held across both, as CREATE OR REPLACE TABLE ... AS SELECT does: such an append
+            // lands either in the read or after the replacement. DML holds it across the sidecar round trip
+            // the same way; the sidecar's staging reads (storedRows) do not take it. Otherwise the query runs
+            // unlocked on the table metadata the check resolved.
+            SourceCheck sources = inProject(projectId, dataProjectId,
+                    () -> queryReadsTarget(dataProjectId, options.sql(), options, truncated));
+            if (sources.readsTarget()) {
+                synchronized (writeLock) {
+                    return runQuery(projectId, dataProjectId, options, job, jobLocation, null);
+                }
+            }
+            return runQuery(projectId, dataProjectId, options, job, jobLocation, sources.pinned());
+        }
+        return runQuery(projectId, dataProjectId, options, job, jobLocation, null);
+    }
+
+    /** The table a non dry run {@code WRITE_TRUNCATE} job replaces, or null for any other job. */
+    private SqlDialectTranslator.TableRef truncatedDestination(QueryOptions options) {
+        TableReference destination = options.destinationTable();
+        if (destination == null || options.dryRun() || !"WRITE_TRUNCATE".equals(options.writeDisposition())
+                || destination.getDatasetId() == null || destination.getDatasetId().isBlank()
+                || destination.getTableId() == null || destination.getTableId().isBlank()
+                || destination.getTableId().contains("$")
+                        && !PARTITION_DECORATOR.matcher(destination.getTableId()).matches()) {
+            // writeRows reports a malformed destination with its own error.
+            return null;
+        }
+        DecoratedDestination decorated = decoratedDestination(destination);
+        return decorated != null ? decorated.target()
+                : new SqlDialectTranslator.TableRef(destination.getDatasetId(), destination.getTableId());
+    }
+
+    /** {@code pinned}, when not null, holds the table metadata a source check resolved for the engine to stage. */
+    private StoredJob runQuery(String projectId, String dataProjectId, QueryOptions options, StoredJob job,
+                               JobLocation jobLocation, Map<String, Optional<Table>> pinned) {
         BigQuerySqlEngine.Result result = inProject(projectId, dataProjectId, () -> engine.execute(
                 request(dataProjectId, projectId, options.sql(), options, options.dryRun()),
-                tables(dataProjectId, jobLocation)));
+                tables(dataProjectId, jobLocation, pinned)));
         admitDestinationDataset(projectId, options, jobLocation);
         job.setLocation(jobLocation.resolved());
         job.setStatementType(result.statementType());
@@ -1052,15 +1094,24 @@ public class BigQueryService {
                     }
                 } else if (statement.querySql() != null) {
                     described = engine.execute(request(projectId, jobProjectId, statement.querySql(),
-                            options, true),
+                            queryParameters(statement, options), true),
                             tables(projectId, jobLocation));
                     rejectDuplicateQueryColumns(statement, described);
                     totalBytesProcessed = described.totalBytesProcessed();
                 }
                 if (statement.kind() == SqlDialectTranslator.StatementKind.CREATE_TABLE
                         && statement.copySource() == null) {
+                    Map<String, Object> evaluatedOptions = null;
+                    if (statement.options() != null) {
+                        evaluatedOptions = evaluateOptions(projectId, jobProjectId, statement.options(), options,
+                                jobLocation);
+                    }
                     Table candidate = createStatementTable(statement,
                             described != null ? described.schema() : null);
+                    if (evaluatedOptions != null) {
+                        applyTableOptions(candidate, evaluatedOptions);
+                        BigQueryMetadata.validateTable(candidate.getExtra(), schemaFields(candidate));
+                    }
                     if (existing.isPresent() && statement.orReplace()
                             && !samePartitioning(existing.get(), candidate)) {
                         throw QueryEngine.invalidQuery(
@@ -5091,13 +5142,31 @@ public class BigQueryService {
         }
         int from = Math.min(expression.firstParameter(), parameters.size());
         int to = Math.min(expression.firstParameter() + expression.parameterCount(), parameters.size());
-        return new QueryOptions(options.sql(), options.defaultDatasetId(), parameters.subList(from, to),
-                options.parameterMode(), options.dryRun(), options.useLegacySql(), options.destinationTable(),
-                options.writeDisposition(), options.createDisposition(), options.schemaUpdateOptions(),
-                options.timePartitioning(), options.rangePartitioning(), options.defaultProjectId(),
-                options.scriptIncompatibleOptions());
+        return withQueryParameters(options, parameters.subList(from, to));
     }
 
+    /**
+     * The parameters the query of a statement binds. A {@code ?} in the clause in front of {@code AS}
+     * takes the ones before it, so the query must not be handed those again.
+     */
+    private static QueryOptions queryParameters(SqlDialectTranslator.Statement statement, QueryOptions options) {
+        List<Map<String, Object>> parameters = options.queryParameters();
+        if (statement.queryFirstParameter() <= 0 || parameters == null || parameters.isEmpty()
+                || !options.positionalParameters()) {
+            return options;
+        }
+        return withQueryParameters(options, parameters.subList(
+                Math.min(statement.queryFirstParameter(), parameters.size()), parameters.size()));
+    }
+
+    private static QueryOptions withQueryParameters(QueryOptions options, List<Map<String, Object>> parameters) {
+        return new QueryOptions(options.sql(), options.defaultDatasetId(), parameters, options.parameterMode(),
+                options.dryRun(), options.useLegacySql(), options.destinationTable(), options.writeDisposition(),
+                options.createDisposition(), options.schemaUpdateOptions(), options.timePartitioning(),
+                options.rangePartitioning(), options.defaultProjectId(), options.scriptIncompatibleOptions());
+    }
+
+    @SuppressWarnings("unchecked")
     private static void applyTableOptions(Table table, Map<String, Object> options) {
         if (options.containsKey("description")) {
             table.setDescription((String) options.get("description"));
@@ -5119,6 +5188,44 @@ public class BigQueryService {
             } else {
                 table.getExtra().put("expirationTime", String.valueOf(expiration));
             }
+        }
+        if (options.containsKey("require_partition_filter")) {
+            if (!table.getExtra().containsKey("timePartitioning")
+                    && !table.getExtra().containsKey("rangePartitioning")) {
+                throw QueryEngine.invalidQuery("require_partition_filter value in table OPTIONS is only supported"
+                        + " for a CREATE TABLE statement with a PARTITION BY clause");
+            }
+            boolean required = Boolean.TRUE.equals(options.get("require_partition_filter"));
+            table.getExtra().put("requirePartitionFilter", required);
+            if (table.getExtra().get("timePartitioning") instanceof Map<?, ?> partitioning) {
+                Map<String, Object> updated = new LinkedHashMap<>((Map<String, Object>) partitioning);
+                if (required) {
+                    updated.put("requirePartitionFilter", true);
+                } else {
+                    updated.remove("requirePartitionFilter");
+                }
+                table.getExtra().put("timePartitioning", updated);
+            }
+        }
+        if (options.containsKey("partition_expiration_days")) {
+            if (!(table.getExtra().get("timePartitioning") instanceof Map<?, ?> partitioning)) {
+                throw QueryEngine.invalidQuery(table.getExtra().containsKey("rangePartitioning")
+                        ? "partition_expiration_days in table OPTIONS is only supported for time partitioned tables."
+                        : "partition_expiration_days value in table OPTIONS is only supported for a CREATE TABLE"
+                                + " statement with a PARTITION BY clause");
+            }
+            BigDecimal days = (BigDecimal) options.get("partition_expiration_days");
+            if (days.signum() <= 0) {
+                throw QueryEngine.invalidQuery(
+                        "partition_expiration_days value in table OPTIONS must be positive");
+            }
+            Map<String, Object> updated = new LinkedHashMap<>((Map<String, Object>) partitioning);
+            updated.put("expirationMs", String.valueOf(Math.max(1L,
+                    days.multiply(BigDecimal.valueOf(86_400_000L)).longValue())));
+            table.getExtra().put("timePartitioning", updated);
+        }
+        if (options.containsKey("kms_key_name")) {
+            table.getExtra().put("encryptionConfiguration", Map.of("kmsKeyName", options.get("kms_key_name")));
         }
     }
 
@@ -5219,6 +5326,14 @@ public class BigQueryService {
         }
     }
 
+    private static void addTotalBytesProcessed(StoredJob job, long bytesProcessed) {
+        if (bytesProcessed <= 0) {
+            return;
+        }
+        long previous = job.getTotalBytesProcessed() != null ? Long.parseLong(job.getTotalBytesProcessed()) : 0L;
+        job.setTotalBytesProcessed(String.valueOf(Math.addExact(previous, bytesProcessed)));
+    }
+
     private static void clearStatementStatistics(StoredJob job) {
         job.setNumDmlAffectedRows(null);
         job.setDmlStats(null);
@@ -5260,7 +5375,8 @@ public class BigQueryService {
                                      JobLocation jobLocation, Map<String, Optional<Table>> pinned) {
         if (pinned == null && statement.copySource() == null && statement.querySql() != null
                 && !Thread.holdsLock(writeLock)) {
-            SourceCheck sources = queryReadsTarget(projectId, statement.querySql(), options, statement.target());
+            SourceCheck sources = queryReadsTarget(projectId, statement.querySql(),
+                    queryParameters(statement, options), statement.target());
             if (sources.readsTarget()) {
                 synchronized (writeLock) {
                     createFromStatement(projectId, jobProjectId, statement, options, job, jobLocation);
@@ -5292,7 +5408,7 @@ public class BigQueryService {
         StoredTableData copiedData = null;
         if (statement.kind() == SqlDialectTranslator.StatementKind.CREATE_VIEW) {
             BigQuerySqlEngine.Result described = engine.execute(request(projectId, jobProjectId, statement.querySql(),
-                    options, true), tables(projectId, jobLocation, pinned));
+                    queryParameters(statement, options), true), tables(projectId, jobLocation, pinned));
             rejectDuplicateQueryColumns(statement, described);
             Map<String, Object> definition = new LinkedHashMap<>();
             definition.put("query", statement.querySql());
@@ -5323,11 +5439,11 @@ public class BigQueryService {
         } else if (statement.querySql() != null) {
             // Query evaluation is read-only until the destination is published below.
             BigQuerySqlEngine.Result result = engine.execute(request(projectId, jobProjectId, statement.querySql(),
-                    options, false), tables(projectId, jobLocation, pinned));
+                    queryParameters(statement, options), false), tables(projectId, jobLocation, pinned));
             rejectDuplicateQueryColumns(statement, result);
             table.setSchema(result.schema());
             rows = result.rows();
-            job.setTotalBytesProcessed(String.valueOf(result.totalBytesProcessed()));
+            addTotalBytesProcessed(job, result.totalBytesProcessed());
         } else {
             table.setSchema(RowCodec.normalizeSchema(new TableSchema(statement.columns())));
         }
@@ -5337,8 +5453,14 @@ public class BigQueryService {
         if (statement.rangePartitioning() != null) {
             table.getExtra().put("rangePartitioning", new LinkedHashMap<>(statement.rangePartitioning()));
         }
+        applyTableClustering(table, statement.clusteringFields());
+        if (statement.copySource() == null && statement.options() != null) {
+            applyTableOptions(table, evaluateOptions(projectId, jobProjectId, statement.options(), options,
+                    jobLocation));
+        }
         BigQueryMetadata.validateTable(table.getExtra(), schemaFields(table));
         validateCreateTablePartitioning(statement, table);
+        validateCreateTableClustering(statement, table);
         synchronized (writeLock) {
             Dataset currentDestinationDataset = getDataset(projectId, target.datasetId());
             Optional<Table> currentTable = tableStore.get(tableKey(target.datasetId(), target.tableId()));
@@ -5460,9 +5582,56 @@ public class BigQueryService {
         if (statement.rangePartitioning() != null) {
             table.getExtra().put("rangePartitioning", new LinkedHashMap<>(statement.rangePartitioning()));
         }
+        applyTableClustering(table, statement.clusteringFields());
         BigQueryMetadata.validateTable(table.getExtra(), schemaFields(table));
         validateCreateTablePartitioning(statement, table);
+        validateCreateTableClustering(statement, table);
         return table;
+    }
+
+    private static void validateCreateTableClustering(SqlDialectTranslator.Statement statement, Table table) {
+        if (statement.clusteringFields() == null) {
+            return;
+        }
+        List<TableFieldSchema> fields = schemaFields(table);
+        Set<String> seen = new HashSet<>();
+        for (String clusteringField : statement.clusteringFields()) {
+            TableFieldSchema field = fields.stream()
+                    .filter(candidate -> candidate.getName() != null
+                            && candidate.getName().equalsIgnoreCase(clusteringField))
+                    .findFirst().orElse(null);
+            if (field == null) {
+                throw QueryEngine.invalidQuery("Unrecognized name: " + clusteringField);
+            }
+            String type = InformationSchema.dataType(field);
+            if ("REPEATED".equals(field.getMode()) || "RECORD".equals(field.getType())
+                    || "STRUCT".equals(field.getType())) {
+                throw QueryEngine.invalidQuery("CLUSTER BY columns may only have simple types, but column "
+                        + field.getName() + " has type " + type);
+            }
+            if ("FLOAT64".equals(type)) {
+                throw QueryEngine.invalidQuery("CLUSTER BY expression may not be a floating point type");
+            }
+            if ("JSON".equals(type)) {
+                throw QueryEngine.invalidQuery("CLUSTER BY expression must be groupable, but type is JSON");
+            }
+            if (!CLUSTERABLE_FIELD_TYPES.contains(type.toUpperCase(Locale.ROOT))) {
+                throw QueryEngine.invalidQuery("Field " + field.getName() + " has type " + type
+                        + ", which is not supported for clustering.");
+            }
+            if (!seen.add(field.getName().toLowerCase(Locale.ROOT))) {
+                String name = field.getName();
+                throw QueryEngine.invalidQuery(statement.querySql() != null
+                        ? "Same column cannot be used multiple times as clustering column: '" + name + "'"
+                        : "Field can only appear once in clustering fields. Invalid field: " + name + ".");
+            }
+        }
+    }
+
+    private static void applyTableClustering(Table table, List<String> fields) {
+        if (fields != null) {
+            table.getExtra().put("clustering", Map.of("fields", fields));
+        }
     }
 
     private static void validateCreateTablePartitioning(SqlDialectTranslator.Statement statement, Table table) {

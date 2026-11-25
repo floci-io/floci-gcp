@@ -520,3 +520,65 @@ setup() {
     count=$(tofu state list 2>/dev/null | wc -l | tr -d ' ')
     [ "$count" -ge 20 ]
 }
+
+@test "OpenTofu: Monitoring notification channel created and enabled" {
+    run gcp_curl "${FLOCI_ENDPOINT}/v3/projects/${FLOCI_PROJECT}/notificationChannels"
+    assert_success
+    assert_output --partial '"displayName":"floci-compat-email-tofu"'
+    assert_output --partial '"enabled":true'
+}
+
+@test "OpenTofu: Monitoring alert policy created with its channel and condition name" {
+    run gcp_curl "${FLOCI_ENDPOINT}/v3/projects/${FLOCI_PROJECT}/alertPolicies"
+    assert_success
+    assert_output --partial '"displayName":"floci-compat-cpu-tofu"'
+    assert_output --partial '/conditions/'
+    assert_output --partial '"mimeType":"text/markdown"'
+}
+
+@test "OpenTofu: Monitoring alerting resources plan no changes after apply" {
+    run tofu plan -detailed-exitcode \
+        -target=google_monitoring_notification_channel.email -target=google_monitoring_alert_policy.cpu \
+        -var="endpoint=${FLOCI_ENDPOINT}" -var="project=${FLOCI_PROJECT}" \
+        -input=false -no-color
+    assert_success
+}
+
+@test "OpenTofu: log-based counter metric created with its default unit" {
+    run gcp_curl "${FLOCI_ENDPOINT}/v2/projects/${FLOCI_PROJECT}/metrics/floci_compat%2Ferrors_tofu"
+    assert_success
+    assert_output --partial '"name":"floci_compat/errors_tofu"'
+    assert_output --partial '"unit":"1"'
+    assert_output --partial '"type":"logging.googleapis.com/user/floci_compat/errors_tofu"'
+}
+
+@test "OpenTofu: log-based distribution metric keeps its bucket options" {
+    run gcp_curl "${FLOCI_ENDPOINT}/v2/projects/${FLOCI_PROJECT}/metrics/floci_compat_latency_tofu"
+    assert_success
+    assert_output --partial '"valueType":"DISTRIBUTION"'
+    assert_output --partial '"numFiniteBuckets":3'
+}
+
+@test "OpenTofu: log-based metrics plan no changes after apply" {
+    run tofu plan -detailed-exitcode \
+        -target=google_logging_metric.errors -target=google_logging_metric.latency \
+        -var="endpoint=${FLOCI_ENDPOINT}" -var="project=${FLOCI_PROJECT}" \
+        -input=false -no-color
+    assert_success
+}
+
+@test "OpenTofu: Monitoring uptime check created with server defaults" {
+    run gcp_curl "${FLOCI_ENDPOINT}/v3/projects/${FLOCI_PROJECT}/uptimeCheckConfigs"
+    assert_success
+    assert_output --partial '"displayName":"floci-compat-health-tofu"'
+    assert_output --partial '"period":"300s"'
+    assert_output --partial '"requestMethod":"GET"'
+}
+
+@test "OpenTofu: Monitoring uptime check plans no changes after apply" {
+    run tofu plan -detailed-exitcode \
+        -target=google_monitoring_uptime_check_config.health \
+        -var="endpoint=${FLOCI_ENDPOINT}" -var="project=${FLOCI_PROJECT}" \
+        -input=false -no-color
+    assert_success
+}

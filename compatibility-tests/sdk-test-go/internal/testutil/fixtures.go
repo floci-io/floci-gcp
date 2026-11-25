@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"cloud.google.com/go/datastore"
 	"cloud.google.com/go/firestore"
@@ -132,6 +133,22 @@ func KMSClient(ctx context.Context) *kms.KeyManagementClient {
 	client, err := kms.NewKeyManagementClient(ctx, option.WithGRPCConn(conn))
 	if err != nil {
 		panic("failed to create kms client: " + err.Error())
+	}
+	return client
+}
+
+// KMSRESTClient returns a Cloud KMS client that speaks the REST transport to the emulator.
+// Reads FLOCI_GCP_ENDPOINT (e.g. http://localhost:4588). The REST client marshals request
+// bodies with enum numbers, which the gRPC client never exercises.
+func KMSRESTClient(ctx context.Context) *kms.KeyManagementClient {
+	endpoint := os.Getenv("FLOCI_GCP_ENDPOINT")
+	if endpoint == "" {
+		endpoint = "http://localhost:4588"
+	}
+	client, err := kms.NewKeyManagementRESTClient(ctx,
+		option.WithEndpoint(strings.TrimRight(endpoint, "/")), option.WithoutAuthentication())
+	if err != nil {
+		panic("failed to create kms rest client: " + err.Error())
 	}
 	return client
 }

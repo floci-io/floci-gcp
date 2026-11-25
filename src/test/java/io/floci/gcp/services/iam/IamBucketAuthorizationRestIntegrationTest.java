@@ -2,8 +2,8 @@ package io.floci.gcp.services.iam;
 
 import io.floci.gcp.services.credentials.CredentialTokenService;
 import io.floci.gcp.services.iam.model.StoredPolicy;
+import io.floci.gcp.testing.IamEnforceProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
@@ -17,7 +17,7 @@ import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 @QuarkusTest
-@TestProfile(IamBucketAuthorizationRestIntegrationTest.EnforceAuthorizationProfile.class)
+@TestProfile(IamEnforceProfile.class)
 class IamBucketAuthorizationRestIntegrationTest {
 
     @Inject
@@ -188,12 +188,5 @@ class IamBucketAuthorizationRestIntegrationTest {
     private static Map<String, Object> policyBody() {
         return Map.of("version", 1, "bindings", List.of(Map.of(
                 "role", "roles/storage.admin", "members", List.of("allUsers"))));
-    }
-
-    public static class EnforceAuthorizationProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci-gcp.services.iam.authorization-mode", "enforce");
-        }
     }
 }

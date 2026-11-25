@@ -6,6 +6,7 @@ import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.core.storage.PersistentStorage;
 import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.core.storage.WalStorage;
+import io.floci.gcp.testing.ThreadStates;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -20,8 +21,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -164,11 +165,16 @@ class ProjectRegistryTest {
                 p.setLabels(Map.of("writer", "first"));
             }));
             assertTrue(firstInside.await(5, TimeUnit.SECONDS));
-            Future<?> second = pool.submit(() -> registry.update("mix-proj", p -> {
-                p.setName("second");
-                p.setLabels(Map.of("writer", "second"));
-            }));
-            assertThrows(TimeoutException.class, () -> second.get(300, TimeUnit.MILLISECONDS));
+            AtomicReference<Thread> secondThread = new AtomicReference<>();
+            Future<?> second = pool.submit(() -> {
+                secondThread.set(Thread.currentThread());
+                registry.update("mix-proj", p -> {
+                    p.setName("second");
+                    p.setLabels(Map.of("writer", "second"));
+                });
+            });
+            ThreadStates.awaitBlockedOrDone(secondThread, second);
+            assertFalse(second.isDone());
 
             releaseFirst.countDown();
             first.get(5, TimeUnit.SECONDS);

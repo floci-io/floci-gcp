@@ -3,6 +3,7 @@ package io.floci.gcp.services.iam;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.services.iam.model.StoredPolicy;
+import io.floci.gcp.testing.ThreadStates;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -13,10 +14,11 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -46,13 +48,12 @@ class IamBucketLifecycleServiceTest {
             }));
             assertTrue(bucketDeleted.await(5, TimeUnit.SECONDS));
 
-            CountDownLatch writerStarted = new CountDownLatch(1);
+            AtomicReference<Thread> writerThread = new AtomicReference<>();
             Future<?> writer = executor.submit(() -> {
-                writerStarted.countDown();
+                writerThread.set(Thread.currentThread());
                 iamService.setPolicy(RESOURCE, policy("roles/storage.objectViewer"));
             });
-            assertTrue(writerStarted.await(5, TimeUnit.SECONDS));
-            assertBlocked(writer);
+            assertBlocked(writerThread, writer);
 
             allowDeleteToFinish.countDown();
             assertTrue(deletion.get(5, TimeUnit.SECONDS));
@@ -81,16 +82,15 @@ class IamBucketLifecycleServiceTest {
                     () -> iamService.setPolicy(RESOURCE, policy("roles/storage.objectViewer")));
             assertTrue(policyStore.putStarted.await(5, TimeUnit.SECONDS));
 
-            CountDownLatch deletionStarted = new CountDownLatch(1);
+            AtomicReference<Thread> deleter = new AtomicReference<>();
             Future<Boolean> deletion = executor.submit(() -> {
-                deletionStarted.countDown();
+                deleter.set(Thread.currentThread());
                 return lifecycleService.deleteBucketIfEmpty(BUCKET, () -> {
                     bucketExists.set(false);
                     return true;
                 });
             });
-            assertTrue(deletionStarted.await(5, TimeUnit.SECONDS));
-            assertBlocked(deletion);
+            assertBlocked(deleter, deletion);
 
             policyStore.allowPut.countDown();
             writer.get(5, TimeUnit.SECONDS);
@@ -123,13 +123,12 @@ class IamBucketLifecycleServiceTest {
                     }));
             assertTrue(bucketCreated.await(5, TimeUnit.SECONDS));
 
-            CountDownLatch writerStarted = new CountDownLatch(1);
+            AtomicReference<Thread> writerThread = new AtomicReference<>();
             Future<?> writer = executor.submit(() -> {
-                writerStarted.countDown();
+                writerThread.set(Thread.currentThread());
                 iamService.setPolicy(RESOURCE, policy("roles/storage.objectViewer"));
             });
-            assertTrue(writerStarted.await(5, TimeUnit.SECONDS));
-            assertBlocked(writer);
+            assertBlocked(writerThread, writer);
 
             allowCreateToFinish.countDown();
             assertEquals(BUCKET, creation.get(5, TimeUnit.SECONDS));
@@ -163,9 +162,9 @@ class IamBucketLifecycleServiceTest {
                     () -> iamService.setPolicy(RESOURCE, policy("roles/storage.objectViewer")));
             assertTrue(missingBucketChecked.await(5, TimeUnit.SECONDS));
 
-            CountDownLatch creationStarted = new CountDownLatch(1);
+            AtomicReference<Thread> creator = new AtomicReference<>();
             Future<String> creation = executor.submit(() -> {
-                creationStarted.countDown();
+                creator.set(Thread.currentThread());
                 return lifecycleService.createBucket(
                         BUCKET,
                         null,
@@ -175,8 +174,7 @@ class IamBucketLifecycleServiceTest {
                             return BUCKET;
                         });
             });
-            assertTrue(creationStarted.await(5, TimeUnit.SECONDS));
-            assertBlocked(creation);
+            assertBlocked(creator, creation);
 
             allowMissingCheckToFinish.countDown();
             ExecutionException failure = assertThrows(
@@ -214,8 +212,9 @@ class IamBucketLifecycleServiceTest {
         return policy;
     }
 
-    private static void assertBlocked(Future<?> future) {
-        assertThrows(TimeoutException.class, () -> future.get(100, TimeUnit.MILLISECONDS));
+    private static void assertBlocked(AtomicReference<Thread> thread, Future<?> future) throws InterruptedException {
+        ThreadStates.awaitBlockedOrDone(thread, future);
+        assertFalse(future.isDone());
     }
 
     private static void await(CountDownLatch latch) {

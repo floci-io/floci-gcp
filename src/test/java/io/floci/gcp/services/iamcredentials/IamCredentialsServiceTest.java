@@ -10,6 +10,7 @@ import io.floci.gcp.services.iam.IamService;
 import io.floci.gcp.services.iam.SigningKeyFixtures;
 import io.floci.gcp.services.iam.model.StoredServiceAccount;
 import io.floci.gcp.services.iam.model.StoredSigningKey;
+import io.floci.gcp.testing.ThreadStates;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
@@ -166,8 +167,8 @@ class IamCredentialsServiceTest {
         racing.createServiceAccount("p1", "signer", "", "");
         String firstId = racing.getServiceAccount("p1", SIGNER).getUniqueId();
         String firstKey = racing.signingKeyId("p1", SIGNER);
-        // Another request replaces the account right after a read. Inside the lock deletion takes it
-        // has to wait, so give it a moment rather than waiting for it.
+        // Another request replaces the account right after a read. Deletion has to wait inside the lock
+        // it takes, so wait until it blocks or finishes rather than joining it.
         Thread replacing = new Thread(() -> {
             racing.deleteServiceAccount("p1", SIGNER);
             racing.createServiceAccount("p1", "signer", "", "");
@@ -175,7 +176,7 @@ class IamCredentialsServiceTest {
         onSecondRead[0] = () -> {
             replacing.start();
             try {
-                replacing.join(500);
+                ThreadStates.awaitBlockedOrDone(replacing);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }

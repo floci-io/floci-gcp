@@ -11,6 +11,7 @@ import io.floci.gcp.services.iam.authorization.IamIdentityKind;
 import io.floci.gcp.services.iam.authorization.IamPermissionCheck;
 import io.floci.gcp.services.iam.authorization.IamRequestIdentity;
 import io.floci.gcp.services.iam.model.StoredPolicy;
+import io.floci.gcp.testing.ThreadStates;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -21,12 +22,13 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -155,21 +157,30 @@ class GcsIamAuthorizationServiceTest {
         try {
             Future<?> copy;
             Future<?> policyWriter;
+            AtomicReference<Thread> copier = new AtomicReference<>();
+            AtomicReference<Thread> writer = new AtomicReference<>();
             synchronized (storageMutationLock) {
-                copy = executor.submit(() -> authorizationService.authorizeObjectCopy(
-                        null, "source", "source.txt", "destination", "destination.txt",
-                        requireOverwritePermission -> {
-                            mutationReady.countDown();
-                            synchronized (storageMutationLock) {
-                                return null;
-                            }
-                        }));
+                copy = executor.submit(() -> {
+                    copier.set(Thread.currentThread());
+                    return authorizationService.authorizeObjectCopy(
+                            null, "source", "source.txt", "destination", "destination.txt",
+                            requireOverwritePermission -> {
+                                mutationReady.countDown();
+                                synchronized (storageMutationLock) {
+                                    return null;
+                                }
+                            });
+                });
                 assertTrue(mutationReady.await(5, TimeUnit.SECONDS));
 
-                policyWriter = executor.submit(
-                        () -> iamService.setPolicy("projects/test-project", objectAdminPolicy()));
-                assertThrows(TimeoutException.class, () -> policyWriter.get(100, TimeUnit.MILLISECONDS));
-                assertThrows(TimeoutException.class, () -> copy.get(100, TimeUnit.MILLISECONDS));
+                policyWriter = executor.submit(() -> {
+                    writer.set(Thread.currentThread());
+                    iamService.setPolicy("projects/test-project", objectAdminPolicy());
+                });
+                ThreadStates.awaitBlockedOrDone(writer, policyWriter);
+                ThreadStates.awaitBlockedOrDone(copier, copy);
+                assertFalse(policyWriter.isDone());
+                assertFalse(copy.isDone());
             }
             copy.get(5, TimeUnit.SECONDS);
             policyWriter.get(5, TimeUnit.SECONDS);
@@ -191,20 +202,29 @@ class GcsIamAuthorizationServiceTest {
         try {
             Future<?> completion;
             Future<?> policyWriter;
+            AtomicReference<Thread> completer = new AtomicReference<>();
+            AtomicReference<Thread> writer = new AtomicReference<>();
             synchronized (storageMutationLock) {
-                completion = executor.submit(() -> authorizationService.authorizeMultipartCompletion(
-                        null, "bucket", "object.txt", requireOverwritePermission -> {
-                            mutationReady.countDown();
-                            synchronized (storageMutationLock) {
-                                return null;
-                            }
-                        }));
+                completion = executor.submit(() -> {
+                    completer.set(Thread.currentThread());
+                    return authorizationService.authorizeMultipartCompletion(
+                            null, "bucket", "object.txt", requireOverwritePermission -> {
+                                mutationReady.countDown();
+                                synchronized (storageMutationLock) {
+                                    return null;
+                                }
+                            });
+                });
                 assertTrue(mutationReady.await(5, TimeUnit.SECONDS));
 
-                policyWriter = executor.submit(
-                        () -> iamService.setPolicy("buckets/bucket", objectAdminPolicy()));
-                assertThrows(TimeoutException.class, () -> policyWriter.get(100, TimeUnit.MILLISECONDS));
-                assertThrows(TimeoutException.class, () -> completion.get(100, TimeUnit.MILLISECONDS));
+                policyWriter = executor.submit(() -> {
+                    writer.set(Thread.currentThread());
+                    iamService.setPolicy("buckets/bucket", objectAdminPolicy());
+                });
+                ThreadStates.awaitBlockedOrDone(writer, policyWriter);
+                ThreadStates.awaitBlockedOrDone(completer, completion);
+                assertFalse(policyWriter.isDone());
+                assertFalse(completion.isDone());
             }
             completion.get(5, TimeUnit.SECONDS);
             policyWriter.get(5, TimeUnit.SECONDS);
@@ -255,14 +275,14 @@ class GcsIamAuthorizationServiceTest {
                 return "published";
             }));
             assertTrue(publishing.await(5, TimeUnit.SECONDS));
-            CountDownLatch revoking = new CountDownLatch(1);
+            AtomicReference<Thread> revoker = new AtomicReference<>();
             Future<?> revoke = executor.submit(() -> {
-                revoking.countDown();
+                revoker.set(Thread.currentThread());
                 iam.setPolicy("projects/test-project", new StoredPolicy());
             });
             try {
-                assertTrue(revoking.await(5, TimeUnit.SECONDS));
-                assertThrows(TimeoutException.class, () -> revoke.get(100, TimeUnit.MILLISECONDS));
+                ThreadStates.awaitBlockedOrDone(revoker, revoke);
+                assertFalse(revoke.isDone());
             } finally {
                 release.countDown();
             }

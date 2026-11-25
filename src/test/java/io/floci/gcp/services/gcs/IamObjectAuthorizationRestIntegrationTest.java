@@ -3,8 +3,8 @@ package io.floci.gcp.services.gcs;
 import io.floci.gcp.services.credentials.CredentialTokenService;
 import io.floci.gcp.services.iam.IamService;
 import io.floci.gcp.services.iam.model.StoredPolicy;
+import io.floci.gcp.testing.IamEnforceProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
@@ -29,7 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
-@TestProfile(IamObjectAuthorizationRestIntegrationTest.EnforceAuthorizationProfile.class)
+@TestProfile(IamEnforceProfile.class)
 class IamObjectAuthorizationRestIntegrationTest {
 
     private static final DateTimeFormatter V4_DATE_FORMATTER = DateTimeFormatter
@@ -550,11 +550,5 @@ class IamObjectAuthorizationRestIntegrationTest {
                 + "Content-Type: text/plain\r\n\r\n"
                 + "content\r\n"
                 + "--" + boundary + "--\r\n";
-    }
-
-    public static class EnforceAuthorizationProfile implements QuarkusTestProfile {
-        @Override public Map<String, String> getConfigOverrides() {
-            return Map.of("floci-gcp.services.iam.authorization-mode", "enforce");
-        }
     }
 }

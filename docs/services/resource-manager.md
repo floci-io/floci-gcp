@@ -58,6 +58,24 @@ match and `labels.color:*` matches any project with that label. The supported fi
 `name`, `id`, `labels.<key>`, `parent.type`, `parent.id` and `lifecycleState`. Any other
 field returns `400 INVALID_ARGUMENT`.
 
+## Project IAM policy
+
+`setIamPolicy` applies the request's `updateMask` (REST `updateMask`, a comma-separated string; gRPC
+`update_mask` on the shared IAM policy mixin). Without one it uses the API's default, `bindings, etag`
+([projects.setIamPolicy](https://docs.cloud.google.com/resource-manager/reference/rest/v1/projects/setIamPolicy)):
+the bindings are replaced and anything else the policy holds is kept. Mask paths are `version`,
+`bindings`, `etag` and `auditConfigs` (`audit_configs` over gRPC); any other path fails with
+`INVALID_ARGUMENT`, as [AIP-161](https://google.aip.dev/161) asks of writes.
+
+The policy's `auditConfigs` (`service`, `auditLogConfigs` with `logType` and `exemptedMembers`) is stored
+and returned by `getIamPolicy` on projects, and on folders, organizations and billing accounts through the
+mixin. It changes only when `auditConfigs` is in the mask; "If you remove the auditConfigs section entirely
+from your new policy, then setIamPolicy doesn't change the existing Data Access audit logs configuration"
+([Enable Data Access audit logs](https://docs.cloud.google.com/logging/docs/audit/configure-data-access)).
+An `auditConfigs` entry with an unknown field or log type fails with `INVALID_ARGUMENT`. Policies of other
+resources (service accounts, topics, buckets) keep no `auditConfigs`. The configuration is stored only:
+the emulator writes no Data Access audit logs.
+
 ## Projects you never created
 
 By default, every project ID that appears in a request is registered as an `ACTIVE`

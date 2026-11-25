@@ -23,6 +23,7 @@ import io.floci.gcp.services.cloudrun.CloudRunExecutionCoordinator.TaskHandle;
 import io.floci.gcp.services.cloudrun.CloudRunExecutionCoordinator.TaskOutcome;
 import io.floci.gcp.services.iam.IamService;
 import io.floci.gcp.services.operations.LongRunningOperationsService;
+import io.floci.gcp.testing.ThreadStates;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
@@ -470,7 +471,7 @@ class CloudRunJobsServiceTest {
                 }
             });
             deleter.set(thread);
-            awaitParked(thread);
+            ThreadStates.awaitParkedOrDone(thread);
         };
 
         Operation run = service.runJob(JOB, "{}");
@@ -586,23 +587,6 @@ class CloudRunJobsServiceTest {
         } catch (RuntimeException e) {
             return e;
         }
-    }
-
-    private static void awaitParked(Thread thread) {
-        for (int i = 0; i < 500; i++) {
-            Thread.State state = thread.getState();
-            if (state == Thread.State.TIMED_WAITING || state == Thread.State.WAITING
-                    || state == Thread.State.BLOCKED || state == Thread.State.TERMINATED) {
-                return;
-            }
-            try {
-                Thread.sleep(10);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new AssertionError("Interrupted while waiting for the racing request", e);
-            }
-        }
-        throw new AssertionError("The racing request never parked");
     }
 
     private static EmulatorConfig dockerConfig() {

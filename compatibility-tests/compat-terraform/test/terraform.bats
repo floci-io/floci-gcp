@@ -522,3 +522,65 @@ setup() {
     count=$(terraform state list 2>/dev/null | wc -l | tr -d ' ')
     [ "$count" -ge 20 ]
 }
+
+@test "Terraform: Monitoring notification channel created and enabled" {
+    run gcp_curl "${FLOCI_ENDPOINT}/v3/projects/${FLOCI_PROJECT}/notificationChannels"
+    assert_success
+    assert_output --partial '"displayName":"floci-compat-email"'
+    assert_output --partial '"enabled":true'
+}
+
+@test "Terraform: Monitoring alert policy created with its channel and condition name" {
+    run gcp_curl "${FLOCI_ENDPOINT}/v3/projects/${FLOCI_PROJECT}/alertPolicies"
+    assert_success
+    assert_output --partial '"displayName":"floci-compat-cpu"'
+    assert_output --partial '/conditions/'
+    assert_output --partial '"mimeType":"text/markdown"'
+}
+
+@test "Terraform: Monitoring alerting resources plan no changes after apply" {
+    run terraform plan -detailed-exitcode \
+        -target=google_monitoring_notification_channel.email -target=google_monitoring_alert_policy.cpu \
+        -var="endpoint=${FLOCI_ENDPOINT}" -var="project=${FLOCI_PROJECT}" \
+        -input=false -no-color
+    assert_success
+}
+
+@test "Terraform: log-based counter metric created with its default unit" {
+    run gcp_curl "${FLOCI_ENDPOINT}/v2/projects/${FLOCI_PROJECT}/metrics/floci_compat%2Ferrors"
+    assert_success
+    assert_output --partial '"name":"floci_compat/errors"'
+    assert_output --partial '"unit":"1"'
+    assert_output --partial '"type":"logging.googleapis.com/user/floci_compat/errors"'
+}
+
+@test "Terraform: log-based distribution metric keeps its bucket options" {
+    run gcp_curl "${FLOCI_ENDPOINT}/v2/projects/${FLOCI_PROJECT}/metrics/floci_compat_latency"
+    assert_success
+    assert_output --partial '"valueType":"DISTRIBUTION"'
+    assert_output --partial '"numFiniteBuckets":3'
+}
+
+@test "Terraform: log-based metrics plan no changes after apply" {
+    run terraform plan -detailed-exitcode \
+        -target=google_logging_metric.errors -target=google_logging_metric.latency \
+        -var="endpoint=${FLOCI_ENDPOINT}" -var="project=${FLOCI_PROJECT}" \
+        -input=false -no-color
+    assert_success
+}
+
+@test "Terraform: Monitoring uptime check created with server defaults" {
+    run gcp_curl "${FLOCI_ENDPOINT}/v3/projects/${FLOCI_PROJECT}/uptimeCheckConfigs"
+    assert_success
+    assert_output --partial '"displayName":"floci-compat-health"'
+    assert_output --partial '"period":"300s"'
+    assert_output --partial '"requestMethod":"GET"'
+}
+
+@test "Terraform: Monitoring uptime check plans no changes after apply" {
+    run terraform plan -detailed-exitcode \
+        -target=google_monitoring_uptime_check_config.health \
+        -var="endpoint=${FLOCI_ENDPOINT}" -var="project=${FLOCI_PROJECT}" \
+        -input=false -no-color
+    assert_success
+}

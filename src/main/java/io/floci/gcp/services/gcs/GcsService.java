@@ -749,6 +749,8 @@ public class GcsService {
             checkObjectMutable(existing);
         }
         long generation = nextGeneration();
+        GcsObjectMeta replaced = null;
+        String replacedEventType = null;
 
         if (isVersioningEnabled(bucket)) {
             if (existing != null) {
@@ -758,12 +760,20 @@ public class GcsService {
                 archived.setTimeDeleted(now);
                 objectDataStore.get(key).ifPresent(oldData -> objectDataStore.put(archiveKey, oldData));
                 objectMetaStore.put(archiveKey, archived);
+                replaced = archived;
+                replacedEventType = "OBJECT_ARCHIVE";
             }
         } else if (existing != null) {
             // Soft delete "preserves objects and buckets that get deleted or overwritten"
             // (https://cloud.google.com/storage/docs/soft-delete), so the replaced live object is
             // retained before the new generation takes its key.
             softDelete(bucket, objectName, existing);
+            replaced = cloneMeta(existing);
+            replaced.setTimeDeleted(now);
+            replacedEventType = "OBJECT_DELETE";
+        }
+        if (existing == null || existing.getGeneration() == null) {
+            replaced = null;
         }
 
         GcsObjectMeta meta = new GcsObjectMeta();
@@ -815,7 +825,18 @@ public class GcsService {
 
         objectDataStore.put(key, data);
         objectMetaStore.put(key, meta);
-        publishNotificationEvent(bucket, objectName, meta, "OBJECT_FINALIZE");
+        // "Replacing an existing object with a new one of the same name triggers two separate
+        // events: OBJECT_FINALIZE for the new version of the object and either OBJECT_ARCHIVE or
+        // OBJECT_DELETE for the replaced object"
+        // (https://cloud.google.com/storage/docs/pubsub-notifications#replacing_objects).
+        if (replaced != null) {
+            publishNotificationEvent(bucket, objectName, meta, "OBJECT_FINALIZE",
+                    Map.of("overwroteGeneration", replaced.getGeneration()));
+            publishNotificationEvent(bucket, objectName, replaced, replacedEventType,
+                    Map.of("overwrittenByGeneration", meta.getGeneration()));
+        } else {
+            publishNotificationEvent(bucket, objectName, meta, "OBJECT_FINALIZE");
+        }
         if (eventarcServiceInstance != null && eventarcServiceInstance.isResolvable()) {
             try {
                 eventarcServiceInstance.get().onGcsEvent(bucket, objectName, meta, "google.cloud.storage.object.v1.finalized");
@@ -1019,15 +1040,24 @@ public class GcsService {
         if (live.getTimeDeleted() == null) {
             checkObjectMutable(live);
         }
+        GcsObjectMeta eventMeta = cloneMeta(live);
+        if (eventMeta.getTimeDeleted() == null) {
+            eventMeta.setTimeDeleted(nowTimestamp());
+        }
+        // OBJECT_DELETE "does not include objects that become noncurrent (see OBJECT_ARCHIVE)"
+        // (https://cloud.google.com/storage/docs/pubsub-notifications#events).
+        String eventType = "OBJECT_DELETE";
         if (isVersioningEnabled(bucket)) {
             String archiveKey = key + "\0" + live.getGeneration();
             GcsObjectMeta archived = cloneMeta(live);
             archived.setIsLatest(false);
             if (archived.getTimeDeleted() == null) {
-                archived.setTimeDeleted(nowTimestamp());
+                archived.setTimeDeleted(eventMeta.getTimeDeleted());
             }
             objectDataStore.get(key).ifPresent(oldData -> objectDataStore.put(archiveKey, oldData));
             objectMetaStore.put(archiveKey, archived);
+            eventMeta = archived;
+            eventType = "OBJECT_ARCHIVE";
         } else if (retainSoftDeleted) {
             // Only an unversioned bucket soft-deletes here. With versioning, "The live version
             // becomes a noncurrent version and keeps the same generation number"
@@ -1039,7 +1069,7 @@ public class GcsService {
         objectMetaStore.delete(key);
         objectDataStore.delete(key);
         if (deletedMeta != null) {
-            publishNotificationEvent(bucket, objectName, deletedMeta, "OBJECT_DELETE");
+            publishNotificationEvent(bucket, objectName, eventMeta, eventType);
             if (eventarcServiceInstance != null && eventarcServiceInstance.isResolvable()) {
                 try {
                     eventarcServiceInstance.get().onGcsEvent(bucket, objectName, deletedMeta, "google.cloud.storage.object.v1.deleted");
@@ -1527,6 +1557,7 @@ public class GcsService {
         long mg = Long.parseLong(meta.getMetageneration() != null ? meta.getMetageneration() : "1");
         meta.setMetageneration(String.valueOf(mg + 1));
         objectMetaStore.put(key, meta);
+        publishNotificationEvent(bucket, objectName, meta, "OBJECT_METADATA_UPDATE");
         return meta;
     }
 
@@ -2388,13 +2419,26 @@ public class GcsService {
 
     private void publishNotificationEvent(String bucket, String objectName,
             GcsObjectMeta meta, String eventType) {
+        publishNotificationEvent(bucket, objectName, meta, eventType, Map.of());
+    }
+
+    /**
+     * Publishes one event to each matching notification config with the attributes "contained in
+     * all notifications" (https://cloud.google.com/storage/docs/pubsub-notifications#attributes),
+     * the config's custom attributes, and the replacement attributes in {@code extraAttributes}.
+     */
+    private void publishNotificationEvent(String bucket, String objectName,
+            GcsObjectMeta meta, String eventType, Map<String, String> extraAttributes) {
         if (pubSubService == null) return;
         String prefix = bucket + ":";
         List<StoredNotification> notifications = notificationStore.scan(k -> k.startsWith(prefix));
         if (notifications.isEmpty()) return;
+        String eventTime = nowTimestamp();
 
         for (StoredNotification notif : notifications) {
-            if (notif.getEventTypes() != null && !notif.getEventTypes().contains(eventType)) {
+            // event_types: "If empty, sent notifications for all event types." (storage v1 discovery)
+            if (notif.getEventTypes() != null && !notif.getEventTypes().isEmpty()
+                    && !notif.getEventTypes().contains(eventType)) {
                 continue;
             }
             String namePrefix = notif.getObjectNamePrefix();
@@ -2402,7 +2446,12 @@ public class GcsService {
                 continue;
             }
             try {
-                PubsubMessage.Builder msg = PubsubMessage.newBuilder()
+                PubsubMessage.Builder msg = PubsubMessage.newBuilder();
+                if (notif.getCustomAttributes() != null) {
+                    msg.putAllAttributes(notif.getCustomAttributes());
+                }
+                msg.putAttributes("notificationConfig",
+                                "projects/_/buckets/" + bucket + "/notificationConfigs/" + notif.getId())
                         .putAttributes("eventType", eventType)
                         .putAttributes("payloadFormat", notif.getPayloadFormat() != null
                                 ? notif.getPayloadFormat() : "JSON_API_V1")
@@ -2410,8 +2459,8 @@ public class GcsService {
                         .putAttributes("objectId", objectName)
                         .putAttributes("objectGeneration",
                                 meta.getGeneration() != null ? meta.getGeneration() : "0")
-                        .putAttributes("notificationConfig", notif.getSelfLink() != null
-                                ? notif.getSelfLink() : bucket + "/notificationConfigs/" + notif.getId());
+                        .putAttributes("eventTime", eventTime)
+                        .putAllAttributes(extraAttributes);
 
                 if ("JSON_API_V1".equals(notif.getPayloadFormat()) || notif.getPayloadFormat() == null) {
                     byte[] payload = MAPPER.writeValueAsBytes(meta);

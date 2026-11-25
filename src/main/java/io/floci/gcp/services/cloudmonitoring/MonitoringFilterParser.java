@@ -28,7 +28,16 @@ final class MonitoringFilterParser {
                 || object.startsWith("resource.labels.")),
         METRIC_DESCRIPTORS(object -> object.equals("project") || object.equals("metric.type")),
         // The proto allows labels here ("resource.label:id"); a descriptor has keys but no values to compare.
-        RESOURCE_DESCRIPTORS(object -> object.equals("resource.type"));
+        RESOURCE_DESCRIPTORS(object -> object.equals("resource.type")),
+        NOTIFICATION_CHANNELS(object -> object.equals("type") || object.equals("display_name")
+                || object.equals("description") || object.equals("enabled") || object.equals("verification_status")
+                || object.startsWith("labels.") || object.startsWith("user_labels.")),
+        ALERT_POLICIES(object -> object.equals("display_name") || object.equals("enabled")
+                || object.equals("combiner") || object.equals("severity") || object.startsWith("user_labels.")
+                || object.equals("documentation.content") || object.equals("notification_channels")),
+        ALERTS(object -> object.equals("state") || object.equals("open_time") || object.equals("close_time")
+                || object.equals("policy.name") || object.equals("policy.display_name")
+                || object.equals("resource.type") || object.equals("metric.type"));
 
         private final Predicate<String> objects;
 

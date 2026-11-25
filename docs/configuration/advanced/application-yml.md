@@ -110,6 +110,10 @@ floci-gcp:
       enabled: true
     monitoring:
       enabled: true
+      alerting-enabled: true          # evaluate alert policies and send notifications
+      evaluation-interval-seconds: 30
+      uptime-checks-enabled: true     # run uptime checks and write uptime_check series
+      uptime-tick-interval-seconds: 10
     scheduler:
       enabled: true
       invocation-enabled: true        # background dispatcher fires due jobs

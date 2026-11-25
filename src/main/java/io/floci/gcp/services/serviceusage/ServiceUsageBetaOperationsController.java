@@ -11,7 +11,7 @@ import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
-/** Polls the operations {@code generateServiceIdentity} returns, under the v1beta1 prefix it uses. */
+/** Polls the operations the v1beta1 {@code services} methods return, under the v1beta1 prefix they use. */
 @Path("/v1beta1/operations")
 @ApplicationScoped
 @Produces(MediaType.APPLICATION_JSON)

@@ -1,5 +1,6 @@
 package io.floci.gcp.services.iam.model;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.util.ArrayList;
@@ -15,6 +16,9 @@ public class StoredPolicy {
     // Empty means "no etag provided"; IamService assigns one on write. Reads of an
     // unset policy surface GCP's well-known empty-policy etag "ACAB" instead.
     private String etag = "";
+    // proto3 JSON objects of google.iam.v1.AuditConfig; null when the policy has none.
+    @JsonInclude(JsonInclude.Include.NON_EMPTY)
+    private List<Map<String, Object>> auditConfigs;
 
     public StoredPolicy() {}
 
@@ -27,6 +31,9 @@ public class StoredPolicy {
     public String getEtag() { return etag; }
     public void setEtag(String etag) { this.etag = etag; }
 
+    public List<Map<String, Object>> getAuditConfigs() { return auditConfigs; }
+    public void setAuditConfigs(List<Map<String, Object>> auditConfigs) { this.auditConfigs = auditConfigs; }
+
     /** A deep copy, so a caller holding a read policy cannot change the stored one without a write. */
     @SuppressWarnings("unchecked")
     public StoredPolicy copy() {
@@ -34,6 +41,7 @@ public class StoredPolicy {
         copy.version = version;
         copy.etag = etag;
         copy.bindings = bindings == null ? null : (List<Map<String, Object>>) deepCopy(bindings);
+        copy.auditConfigs = auditConfigs == null ? null : (List<Map<String, Object>>) deepCopy(auditConfigs);
         return copy;
     }
 

@@ -25,6 +25,12 @@ import com.google.logging.v2.LogEntry;
 import com.google.logging.v2.LogSink;
 import com.google.logging.v2.LoggingServiceV2Grpc;
 import com.google.logging.v2.WriteLogEntriesRequest;
+import com.google.monitoring.v3.AlertPolicyServiceGrpc;
+import com.google.monitoring.v3.ListAlertPoliciesRequest;
+import com.google.monitoring.v3.ListNotificationChannelsRequest;
+import com.google.monitoring.v3.ListUptimeCheckConfigsRequest;
+import com.google.monitoring.v3.NotificationChannelServiceGrpc;
+import com.google.monitoring.v3.UptimeCheckServiceGrpc;
 import com.google.protobuf.Any;
 import com.google.pubsub.v1.GetTopicRequest;
 import com.google.pubsub.v1.PublisherGrpc;
@@ -247,6 +253,50 @@ class ServiceUsageEnforcementIntegrationTest {
 
         enable(project, "pubsub.googleapis.com");
         assertEquals(topic.getName(), publisher.createTopic(topic).getName());
+    }
+
+    @Test
+    void alertPolicyAndNotificationChannelGrpcCallsAreGatedOnMonitoring() {
+        String project = "su-enforce-alerting";
+        disable(project, "monitoring.googleapis.com");
+        AlertPolicyServiceGrpc.AlertPolicyServiceBlockingStub policies = AlertPolicyServiceGrpc.newBlockingStub(channel)
+                .withDeadlineAfter(10, TimeUnit.SECONDS);
+        NotificationChannelServiceGrpc.NotificationChannelServiceBlockingStub channels =
+                NotificationChannelServiceGrpc.newBlockingStub(channel).withDeadlineAfter(10, TimeUnit.SECONDS);
+        ListAlertPoliciesRequest listPolicies = ListAlertPoliciesRequest.newBuilder()
+                .setName("projects/" + project).build();
+        ListNotificationChannelsRequest listChannels = ListNotificationChannelsRequest.newBuilder()
+                .setName("projects/" + project).build();
+
+        StatusRuntimeException policyError = assertThrows(StatusRuntimeException.class,
+                () -> policies.listAlertPolicies(listPolicies));
+        assertEquals(Status.Code.PERMISSION_DENIED, policyError.getStatus().getCode());
+        assertEquals("monitoring.googleapis.com", errorInfo(policyError).getMetadataOrThrow("service"));
+        StatusRuntimeException channelError = assertThrows(StatusRuntimeException.class,
+                () -> channels.listNotificationChannels(listChannels));
+        assertEquals(Status.Code.PERMISSION_DENIED, channelError.getStatus().getCode());
+        assertEquals("monitoring.googleapis.com", errorInfo(channelError).getMetadataOrThrow("service"));
+
+        enable(project, "monitoring.googleapis.com");
+        assertEquals(0, policies.listAlertPolicies(listPolicies).getAlertPoliciesCount());
+        assertEquals(0, channels.listNotificationChannels(listChannels).getNotificationChannelsCount());
+    }
+
+    @Test
+    void uptimeCheckGrpcCallsAreGatedOnMonitoring() {
+        String project = "su-enforce-uptime";
+        disable(project, "monitoring.googleapis.com");
+        UptimeCheckServiceGrpc.UptimeCheckServiceBlockingStub uptime = UptimeCheckServiceGrpc.newBlockingStub(channel)
+                .withDeadlineAfter(10, TimeUnit.SECONDS);
+        ListUptimeCheckConfigsRequest list = ListUptimeCheckConfigsRequest.newBuilder()
+                .setParent("projects/" + project).build();
+
+        StatusRuntimeException error = assertThrows(StatusRuntimeException.class, () -> uptime.listUptimeCheckConfigs(list));
+        assertEquals(Status.Code.PERMISSION_DENIED, error.getStatus().getCode());
+        assertEquals("monitoring.googleapis.com", errorInfo(error).getMetadataOrThrow("service"));
+
+        enable(project, "monitoring.googleapis.com");
+        assertEquals(0, uptime.listUptimeCheckConfigs(list).getUptimeCheckConfigsCount());
     }
 
     @Test
@@ -824,6 +874,63 @@ class ServiceUsageEnforcementIntegrationTest {
                         .createReadSession(CreateReadSessionRequest.newBuilder()
                                 .setParent("projects/" + project).build()));
         assertNotEquals(Status.Code.PERMISSION_DENIED, read.getStatus().getCode());
+    }
+
+    /** An encoded colon names a resource, not a verb (see ServiceUsageEncodedVerbIntegrationTest). */
+    @Test
+    void encodedVerbIsNotGatedAsAnIamCall() {
+        String project = "su-enforce-encoded";
+        String service = "/v1/projects/" + project + "/services/pubsub.googleapis.com";
+
+        for (String verb : List.of("%3Aenable", "%3aenable")) {
+            given().urlEncodingEnabled(false).contentType("application/json").body("{}")
+                    .when().post(service + verb)
+                    .then().statusCode(404)
+                    .body(containsString("Resource not found"));
+        }
+        given().when().get(service).then().statusCode(200).body("state", equalTo("DISABLED"));
+
+        enable(project, "pubsub.googleapis.com");
+        given().when().get(service).then().statusCode(200).body("state", equalTo("ENABLED"));
+    }
+
+    @Test
+    void encodedVerbOnAnEnabledApiIsNotFoundWhileTheLiteralVerbWorks() {
+        String project = "su-enforce-encoded-other";
+        enable(project, "secretmanager.googleapis.com");
+        String secret = "/v1/projects/" + project + "/secrets/s1";
+        given().urlEncodingEnabled(false).contentType("application/json").body("{\"replication\":{\"automatic\":{}}}")
+                .when().post("/v1/projects/" + project + "/secrets?secretId=s1")
+                .then().statusCode(200);
+        String version = "{\"payload\":{\"data\":\"eA==\"}}";
+
+        given().urlEncodingEnabled(false).contentType("application/json").body(version)
+                .when().post(secret + "%3AaddVersion")
+                .then().statusCode(404)
+                .body(containsString("Resource not found"));
+        given().urlEncodingEnabled(false).contentType("application/json").body(version)
+                .when().post(secret + ":addVersion")
+                .then().statusCode(200);
+    }
+
+    @Test
+    void encodedCustomMethodOnTheProjectSegmentChecksThatProject() {
+        String project = "su-enforce-encoded-datastore";
+        byte[] lookup = LookupRequest.newBuilder().setProjectId(project).build().toByteArray();
+
+        disable(project, "datastore.googleapis.com");
+        for (String colon : List.of(":", "%3A", "%3a")) {
+            given().urlEncodingEnabled(false).contentType("application/x-protobuf").body(lookup)
+                    .when().post("/v1/projects/" + project + colon + "lookup")
+                    .then().statusCode(403);
+        }
+
+        enable(project, "datastore.googleapis.com");
+        for (String colon : List.of(":", "%3A", "%3a")) {
+            given().urlEncodingEnabled(false).contentType("application/x-protobuf").body(lookup)
+                    .when().post("/v1/projects/" + project + colon + "lookup")
+                    .then().statusCode(200);
+        }
     }
 
     private static ErrorInfo errorInfo(StatusRuntimeException error) {

@@ -3,11 +3,14 @@ package io.floci.gcp.services.pubsub;
 import com.google.protobuf.Empty;
 import com.google.protobuf.FieldMask;
 import com.google.protobuf.Timestamp;
+import com.google.protobuf.util.Durations;
 import com.google.pubsub.v1.AcknowledgeRequest;
+import com.google.pubsub.v1.BigQueryConfig;
 import com.google.pubsub.v1.CreateSnapshotRequest;
 import com.google.pubsub.v1.DeadLetterPolicy;
 import com.google.pubsub.v1.DeleteSnapshotRequest;
 import com.google.pubsub.v1.DeleteSubscriptionRequest;
+import com.google.pubsub.v1.ExpirationPolicy;
 import com.google.pubsub.v1.GetSnapshotRequest;
 import com.google.pubsub.v1.GetSubscriptionRequest;
 import com.google.pubsub.v1.ListSnapshotsRequest;
@@ -37,9 +40,11 @@ import io.floci.gcp.core.common.PageToken;
 import io.floci.gcp.services.iam.authorization.IamGrpcDeliveryAuthorization;
 import io.floci.gcp.services.pubsub.model.StoredSnapshot;
 import io.floci.gcp.services.pubsub.model.StoredSubscription;
+import io.grpc.Context;
 import io.grpc.stub.StreamObserver;
 import org.jboss.logging.Logger;
 
+import java.text.ParseException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -66,9 +71,12 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
             DeadLetterPolicy deadLetterPolicy = request.getDeadLetterPolicy();
             StoredSubscription stored = service.createSubscription(
                     request.getName(), request.getTopic(), request.getAckDeadlineSeconds(),
-                    null, false, null, request.getFilter(),
+                    request.getLabelsMap(), request.getRetainAckedMessages(),
+                    request.hasMessageRetentionDuration()
+                            ? Durations.toString(request.getMessageRetentionDuration()) : null,
+                    request.getFilter(),
                     request.hasPushConfig() ? request.getPushConfig().getPushEndpoint() : null,
-                    null, null,
+                    storedBigQueryConfig(request), storedExpirationPolicy(request),
                     SubscriptionRetryPolicy.toStored(request.hasRetryPolicy(), request.getRetryPolicy()),
                     deadLetterPolicy.getDeadLetterTopic(), deadLetterPolicy.getMaxDeliveryAttempts(),
                     request.getEnableMessageOrdering(), request.getEnableExactlyOnceDelivery());
@@ -210,29 +218,39 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
                 new AtomicReference<>();
         AtomicBoolean closed = new AtomicBoolean(false);
         Object deliveryLock = new Object();
+        Context.current().addListener(context -> {
+            synchronized (deliveryLock) {
+                closeStreamingPull(unregisterRef, closed);
+            }
+        }, Runnable::run);
 
         return new StreamObserver<>() {
             @Override
             public void onNext(StreamingPullRequest request) {
                 try {
-                    if (request.getStreamAckDeadlineSeconds() > 0) {
-                        streamAckDeadlineSeconds.set(request.getStreamAckDeadlineSeconds());
-                    }
-                    if (!request.getSubscription().isEmpty()) {
-                        String sub = request.getSubscription();
-                        subscriptionRef.set(sub);
-                        deliveryAuthorizationRef.set(IamGrpcDeliveryAuthorization.current());
-                        Runnable previous = unregisterRef.getAndSet(
-                                service.registerMessageListener(
-                                        sub,
-                                        () -> deliverStreamingMessages(
-                                                sub, responseObserver, unregisterRef, closed, deliveryLock,
-                                                deliveryAuthorizationRef.get(), StreamingPullRequest.getDefaultInstance(),
-                                                streamAckDeadlineSeconds.get())));
-                        if (previous != null) {
-                            previous.run();
+                    synchronized (deliveryLock) {
+                        if (closed.get()) {
+                            return;
                         }
-                        LOG.infof("streamingPull opened subscription=%s", sub);
+                        if (request.getStreamAckDeadlineSeconds() > 0) {
+                            streamAckDeadlineSeconds.set(request.getStreamAckDeadlineSeconds());
+                        }
+                        if (!request.getSubscription().isEmpty()) {
+                            String sub = request.getSubscription();
+                            subscriptionRef.set(sub);
+                            deliveryAuthorizationRef.set(IamGrpcDeliveryAuthorization.current());
+                            Runnable previous = unregisterRef.getAndSet(
+                                    service.registerMessageListener(
+                                            sub,
+                                            () -> deliverStreamingMessages(
+                                                    sub, responseObserver, unregisterRef, closed, deliveryLock,
+                                                    deliveryAuthorizationRef.get(), StreamingPullRequest.getDefaultInstance(),
+                                                    streamAckDeadlineSeconds.get())));
+                            if (previous != null) {
+                                previous.run();
+                            }
+                            LOG.infof("streamingPull opened subscription=%s", sub);
+                        }
                     }
                     String sub = subscriptionRef.get();
                     if (sub == null) {
@@ -492,14 +510,49 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
         if (stored.getPushEndpoint() != null) {
             builder.setPushConfig(PushConfig.newBuilder().setPushEndpoint(stored.getPushEndpoint()).build());
         }
-        if (stored.getMessageRetentionDuration() != null
-                && stored.getMessageRetentionDuration().endsWith("s")) {
+        if (stored.getMessageRetentionDuration() != null) {
             try {
-                long seconds = Long.parseLong(stored.getMessageRetentionDuration()
-                        .substring(0, stored.getMessageRetentionDuration().length() - 1));
-                builder.setMessageRetentionDuration(
-                        com.google.protobuf.Duration.newBuilder().setSeconds(seconds).build());
-            } catch (NumberFormatException ignored) {}
+                builder.setMessageRetentionDuration(Durations.parse(stored.getMessageRetentionDuration()));
+            } catch (ParseException e) {
+                LOG.debugf(e, "Ignoring invalid message retention duration for subscription %s: %s",
+                        stored.getName(), stored.getMessageRetentionDuration());
+            }
+        }
+        if (stored.getBigQueryConfig() != null) {
+            Map<String, Object> config = stored.getBigQueryConfig();
+            BigQueryConfig.Builder bigQuery = BigQueryConfig.newBuilder().setState(BigQueryConfig.State.ACTIVE);
+            if (config.containsKey("table")) {
+                bigQuery.setTable(stringValue(config, "table"));
+            }
+            if (config.containsKey("useTopicSchema")) {
+                bigQuery.setUseTopicSchema(booleanValue(config, "useTopicSchema"));
+            }
+            if (config.containsKey("useTableSchema")) {
+                bigQuery.setUseTableSchema(booleanValue(config, "useTableSchema"));
+            }
+            if (config.containsKey("writeMetadata")) {
+                bigQuery.setWriteMetadata(booleanValue(config, "writeMetadata"));
+            }
+            if (config.containsKey("dropUnknownFields")) {
+                bigQuery.setDropUnknownFields(booleanValue(config, "dropUnknownFields"));
+            }
+            if (config.containsKey("serviceAccountEmail")) {
+                bigQuery.setServiceAccountEmail(stringValue(config, "serviceAccountEmail"));
+            }
+            builder.setBigqueryConfig(bigQuery.build());
+        }
+        if (stored.getExpirationPolicy() != null) {
+            Object ttl = stored.getExpirationPolicy().get("ttl");
+            if (ttl != null) {
+                try {
+                    builder.setExpirationPolicy(ExpirationPolicy.newBuilder()
+                            .setTtl(Durations.parse(ttl.toString()))
+                            .build());
+                } catch (ParseException e) {
+                    LOG.debugf(e, "Ignoring invalid expiration TTL for subscription %s: %s",
+                            stored.getName(), ttl);
+                }
+            }
         }
         if (stored.getDeadLetterTopic() != null) {
             builder.setDeadLetterPolicy(DeadLetterPolicy.newBuilder()
@@ -512,6 +565,50 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
             builder.setRetryPolicy(retryPolicy);
         }
         return builder.build();
+    }
+
+    private static Map<String, Object> storedBigQueryConfig(Subscription request) {
+        if (!request.hasBigqueryConfig()) {
+            return null;
+        }
+        BigQueryConfig config = request.getBigqueryConfig();
+        Map<String, Object> stored = new LinkedHashMap<>();
+        if (!config.getTable().isEmpty()) {
+            stored.put("table", config.getTable());
+        }
+        if (config.getUseTopicSchema()) {
+            stored.put("useTopicSchema", true);
+        }
+        if (config.getUseTableSchema()) {
+            stored.put("useTableSchema", true);
+        }
+        if (config.getWriteMetadata()) {
+            stored.put("writeMetadata", true);
+        }
+        if (config.getDropUnknownFields()) {
+            stored.put("dropUnknownFields", true);
+        }
+        if (!config.getServiceAccountEmail().isEmpty()) {
+            stored.put("serviceAccountEmail", config.getServiceAccountEmail());
+        }
+        return stored;
+    }
+
+    private static Map<String, Object> storedExpirationPolicy(Subscription request) {
+        if (!request.hasExpirationPolicy() || !request.getExpirationPolicy().hasTtl()) {
+            return null;
+        }
+        return Map.of("ttl", Durations.toString(request.getExpirationPolicy().getTtl()));
+    }
+
+    private static String stringValue(Map<String, Object> values, String key) {
+        Object value = values.get(key);
+        return value == null ? "" : value.toString();
+    }
+
+    private static boolean booleanValue(Map<String, Object> values, String key) {
+        Object value = values.get(key);
+        return value instanceof Boolean bool ? bool : value != null && Boolean.parseBoolean(value.toString());
     }
 
 }

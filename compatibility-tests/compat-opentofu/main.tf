@@ -410,3 +410,103 @@ resource "google_cloud_run_v2_worker_pool" "compat" {
 output "cloud_run_worker_pool_name" {
   value = google_cloud_run_v2_worker_pool.compat.name
 }
+
+resource "google_monitoring_notification_channel" "email" {
+  display_name = "floci-compat-email-tofu"
+  type         = "email"
+  labels = {
+    email_address = "ops@example.com"
+  }
+  user_labels = {
+    team = "compat"
+  }
+}
+
+resource "google_monitoring_alert_policy" "cpu" {
+  display_name          = "floci-compat-cpu-tofu"
+  combiner              = "OR"
+  notification_channels = [google_monitoring_notification_channel.email.name]
+
+  conditions {
+    display_name = "cpu above 90%"
+    condition_threshold {
+      filter          = "metric.type=\"custom.googleapis.com/floci_compat_cpu\" AND resource.type=\"global\""
+      comparison      = "COMPARISON_GT"
+      threshold_value = 0.9
+      duration        = "60s"
+      aggregations {
+        alignment_period   = "60s"
+        per_series_aligner = "ALIGN_MEAN"
+      }
+    }
+  }
+
+  documentation {
+    content = "The compat CPU is high."
+  }
+
+  user_labels = {
+    team = "compat"
+  }
+}
+
+resource "google_logging_metric" "errors" {
+  name   = "floci_compat/errors_tofu"
+  filter = "resource.type=\"global\" AND severity>=ERROR"
+
+  metric_descriptor {
+    metric_kind = "DELTA"
+    value_type  = "INT64"
+    labels {
+      key = "method"
+    }
+  }
+  label_extractors = {
+    method = "EXTRACT(jsonPayload.method)"
+  }
+}
+
+resource "google_logging_metric" "latency" {
+  name            = "floci_compat_latency_tofu"
+  filter          = "resource.type=\"global\""
+  value_extractor = "EXTRACT(jsonPayload.latency)"
+
+  metric_descriptor {
+    metric_kind = "DELTA"
+    value_type  = "DISTRIBUTION"
+    unit        = "ms"
+  }
+  bucket_options {
+    linear_buckets {
+      num_finite_buckets = 3
+      width              = 10
+      offset             = 0
+    }
+  }
+}
+
+resource "google_monitoring_uptime_check_config" "health" {
+  display_name = "floci-compat-health-tofu"
+  timeout      = "10s"
+  period       = "300s"
+
+  http_check {
+    path         = "/_floci-gcp/health"
+    port         = 4588
+    use_ssl      = false
+    validate_ssl = false
+  }
+
+  monitored_resource {
+    type = "uptime_url"
+    labels = {
+      project_id = var.project
+      host       = "floci-gcp"
+    }
+  }
+
+  content_matchers {
+    content = "status"
+    matcher = "CONTAINS_STRING"
+  }
+}

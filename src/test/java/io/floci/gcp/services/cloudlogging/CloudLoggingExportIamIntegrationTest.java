@@ -4,8 +4,9 @@ import io.floci.gcp.services.credentials.CredentialTokenService;
 import io.floci.gcp.services.gcs.GcsService;
 import io.floci.gcp.services.iam.IamService;
 import io.floci.gcp.services.iam.model.StoredPolicy;
+import io.floci.gcp.services.pubsub.PubSubService;
+import io.floci.gcp.testing.IamEnforceProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
@@ -19,7 +20,7 @@ import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.*;
 
 @QuarkusTest
-@TestProfile(CloudLoggingExportIamIntegrationTest.EnforceProfile.class)
+@TestProfile(IamEnforceProfile.class)
 class CloudLoggingExportIamIntegrationTest {
     @Inject
     GcsService storage;
@@ -29,6 +30,8 @@ class CloudLoggingExportIamIntegrationTest {
     CredentialTokenService tokens;
     @Inject
     CloudLoggingSinkService sinks;
+    @Inject
+    PubSubService pubsub;
 
     @Test
     void exportUsesWriterGrantAndDestinationProjectRatherThanIngestionCaller() {
@@ -99,6 +102,31 @@ class CloudLoggingExportIamIntegrationTest {
         }
     }
 
+    @Test
+    void pubSubExportNeedsThePublisherGrantForTheWriterIdentity() {
+        String id = "pubsub-iam-" + UUID.randomUUID();
+        String parent = "projects/test-project";
+        String topic = parent + "/topics/" + id;
+        String subscription = parent + "/subscriptions/" + id;
+        String log = parent + "/logs/" + id;
+        pubsub.createTopic(topic);
+        pubsub.createSubscription(subscription, topic, 10);
+        String writer = given().queryParam("uniqueWriterIdentity", true).contentType("application/json")
+                .body(Map.of("name", id, "destination", "pubsub.googleapis.com/" + topic, "filter", "logName=\"" + log + "\""))
+                .post("/v2/" + parent + "/sinks").then().statusCode(200).extract().path("writerIdentity");
+        try {
+            write(log, "Bearer external-token");
+            assertTrue(pubsub.pull(subscription, 10).isEmpty(), "An ungranted writer must not publish");
+            iam.setPolicy(topic, grant(writer, "roles/pubsub.publisher"));
+            write(log, "Bearer external-token");
+            assertEquals(1, pubsub.pull(subscription, 10).size());
+        } finally {
+            sinks.deleteSink(parent + "/sinks/" + id);
+            pubsub.deleteSubscription(subscription);
+            pubsub.deleteTopic(topic);
+        }
+    }
+
     private void write(String log, String authorization) {
         given().urlEncodingEnabled(false).header("Authorization", authorization).contentType("application/json")
                 .body(Map.of("logName", log, "entries", List.of(Map.of("textPayload", "accepted"))))
@@ -109,12 +137,5 @@ class CloudLoggingExportIamIntegrationTest {
         StoredPolicy policy = new StoredPolicy();
         policy.setBindings(List.of(Map.of("role", role, "members", List.of(member))));
         return policy;
-    }
-
-    public static class EnforceProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci-gcp.services.iam.authorization-mode", "enforce");
-        }
     }
 }

@@ -924,6 +924,88 @@ class FirestoreServiceTest {
                 .build();
     }
 
+    @Test
+    void nameEqualityFiltersCompareTheDocumentName() {
+        for (String id : List.of("a", "b", "c")) {
+            service.applyWrite(topLevelValueDocument(id, "n", Value.newBuilder().setIntegerValue(1).build()),
+                    Instant.now());
+        }
+
+        assertEquals(List.of("b"), ids(runTopLevelFilter("__name__",
+                StructuredQuery.FieldFilter.Operator.EQUAL, customerReference("b"))));
+        assertEquals(List.of("a", "c"), ids(runTopLevelFilter("__name__",
+                StructuredQuery.FieldFilter.Operator.NOT_EQUAL, customerReference("b"))));
+        assertEquals(List.of("a", "c"), ids(runTopLevelFilter("__name__",
+                StructuredQuery.FieldFilter.Operator.IN, references("a", "c"))));
+        assertEquals(List.of("b"), ids(runTopLevelFilter("__name__",
+                StructuredQuery.FieldFilter.Operator.NOT_IN, references("a", "c"))));
+    }
+
+    @Test
+    void nameRangeFiltersCompareTheDocumentName() {
+        for (String id : List.of("a", "b", "c")) {
+            service.applyWrite(topLevelValueDocument(id, "n", Value.newBuilder().setIntegerValue(1).build()),
+                    Instant.now());
+        }
+
+        assertEquals(List.of("a"), ids(runTopLevelFilter("__name__",
+                StructuredQuery.FieldFilter.Operator.LESS_THAN, customerReference("b"))));
+        assertEquals(List.of("a", "b"), ids(runTopLevelFilter("__name__",
+                StructuredQuery.FieldFilter.Operator.LESS_THAN_OR_EQUAL, customerReference("b"))));
+        assertEquals(List.of("c"), ids(runTopLevelFilter("__name__",
+                StructuredQuery.FieldFilter.Operator.GREATER_THAN, customerReference("b"))));
+        assertEquals(List.of("b", "c"), ids(runTopLevelFilter("__name__",
+                StructuredQuery.FieldFilter.Operator.GREATER_THAN_OR_EQUAL, customerReference("b"))));
+    }
+
+    @Test
+    void kindlessDescendantQueryBoundedByNameFindsACollectionSubtree() {
+        // The shape of the query that recursiveDelete() sends for a collection.
+        for (String path : List.of("customers/a", "customers/a/orders/o1", "other/z")) {
+            service.applyWrite(Write.newBuilder()
+                    .setUpdate(Document.newBuilder().setName(DB + "/documents/" + path)
+                            .putFields("n", Value.newBuilder().setIntegerValue(1).build()))
+                    .build(), Instant.now());
+        }
+        String min = "__id-9223372036854775808__";
+        StructuredQuery query = StructuredQuery.newBuilder()
+                .addFrom(StructuredQuery.CollectionSelector.newBuilder().setAllDescendants(true))
+                .setWhere(StructuredQuery.Filter.newBuilder()
+                        .setCompositeFilter(StructuredQuery.CompositeFilter.newBuilder()
+                                .setOp(StructuredQuery.CompositeFilter.Operator.AND)
+                                .addFilters(nameFilter(StructuredQuery.FieldFilter.Operator.GREATER_THAN_OR_EQUAL,
+                                        DB + "/documents/customers/" + min))
+                                .addFilters(nameFilter(StructuredQuery.FieldFilter.Operator.LESS_THAN,
+                                        DB + "/documents/customers\0/" + min))))
+                .build();
+
+        List<String> names = service.runQuery(DB + "/documents", query).stream()
+                .map(StoredDocument::getName).toList();
+
+        assertEquals(List.of(DB + "/documents/customers/a", DB + "/documents/customers/a/orders/o1"), names);
+    }
+
+    private static Value customerReference(String id) {
+        return Value.newBuilder().setReferenceValue(DB + "/documents/customers/" + id).build();
+    }
+
+    private static Value references(String... ids) {
+        ArrayValue.Builder array = ArrayValue.newBuilder();
+        for (String id : ids) {
+            array.addValues(customerReference(id));
+        }
+        return Value.newBuilder().setArrayValue(array).build();
+    }
+
+    private static StructuredQuery.Filter nameFilter(StructuredQuery.FieldFilter.Operator operator, String name) {
+        return StructuredQuery.Filter.newBuilder()
+                .setFieldFilter(StructuredQuery.FieldFilter.newBuilder()
+                        .setField(StructuredQuery.FieldReference.newBuilder().setFieldPath("__name__"))
+                        .setOp(operator)
+                        .setValue(Value.newBuilder().setReferenceValue(name)))
+                .build();
+    }
+
     private List<StoredDocument> runTopLevelFilter(String fieldPath,
             StructuredQuery.FieldFilter.Operator operator, Value value) {
         StructuredQuery query = StructuredQuery.newBuilder()

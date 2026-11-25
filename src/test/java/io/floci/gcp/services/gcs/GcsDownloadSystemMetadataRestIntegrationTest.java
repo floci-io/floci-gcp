@@ -245,6 +245,40 @@ class GcsDownloadSystemMetadataRestIntegrationTest {
                 .then().statusCode(200).extract().response(), content.length());
     }
 
+    /**
+     * A transcoded read ignores {@code Range}, and GCS does not advertise ranges on a response that
+     * does not honor them: the XML read of the stored bytes advertises {@code bytes}, the gunzipped
+     * read advertises nothing. The 2019 XML recording behind google-cloud-go's storage.replay shows
+     * the same split: its gunzipped answer carries no {@code Accept-Ranges}, its stored-gzip
+     * {@code 206} carries {@code bytes}.
+     */
+    @Test
+    void transcodedReadDoesNotAdvertiseRanges() throws IOException {
+        String content = "hello transcoded ranges";
+        gzipUpload("ranges-gz-obj", content);
+
+        given()
+                .header("Accept-Encoding", "gzip;q=0")
+                .when().get("/" + BUCKET + "/ranges-gz-obj")
+                .then().statusCode(200)
+                .header("Accept-Ranges", nullValue())
+                .header("Content-Encoding", nullValue())
+                .body(equalTo(content));
+
+        given()
+                .header("Accept-Encoding", "gzip;q=0")
+                .when().head("/" + BUCKET + "/ranges-gz-obj")
+                .then().statusCode(200)
+                .header("Accept-Ranges", nullValue());
+
+        given()
+                .header("Accept-Encoding", "gzip")
+                .when().get("/" + BUCKET + "/ranges-gz-obj")
+                .then().statusCode(200)
+                .header("Accept-Ranges", equalTo("bytes"))
+                .header("Content-Encoding", equalTo("gzip"));
+    }
+
     private static Map<String, Object> gzipUpload(String objectName, String content) throws IOException {
         ByteArrayOutputStream gzipped = new ByteArrayOutputStream();
         try (GZIPOutputStream gzip = new GZIPOutputStream(gzipped)) {

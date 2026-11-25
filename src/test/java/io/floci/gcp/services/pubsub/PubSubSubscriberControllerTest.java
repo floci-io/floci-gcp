@@ -4,7 +4,9 @@ import com.google.protobuf.ByteString;
 import com.google.protobuf.Empty;
 import com.google.protobuf.FieldMask;
 import com.google.protobuf.Timestamp;
+import com.google.pubsub.v1.BigQueryConfig;
 import com.google.pubsub.v1.DeadLetterPolicy;
+import com.google.pubsub.v1.ExpirationPolicy;
 import com.google.pubsub.v1.GetSubscriptionRequest;
 import com.google.pubsub.v1.ModifyAckDeadlineRequest;
 import com.google.pubsub.v1.PubsubMessage;
@@ -48,9 +50,11 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
@@ -71,6 +75,116 @@ class PubSubSubscriberControllerTest {
                 IamServices.inMemory(),
                 clock);
         controller = new PubSubSubscriberController(service);
+    }
+
+    @Test
+    void cancelledContextPreventsLateRequestsFromRegisteringAListener() throws Exception {
+        PubSubService observed = spy(service);
+        Context.CancellableContext context = Context.current().withCancellation();
+        RecordingObserver<StreamingPullResponse> responses = new RecordingObserver<>();
+        StreamObserver<StreamingPullRequest> requests = context.call(
+                () -> new PubSubSubscriberController(observed).streamingPull(responses));
+        context.cancel(null);
+
+        requests.onNext(StreamingPullRequest.newBuilder()
+                .setSubscription("projects/p1/subscriptions/s1").build());
+
+        verify(observed, never()).registerMessageListener(any(), any());
+        assertTrue(responses.values.isEmpty());
+        assertNull(responses.error.get());
+    }
+
+    @Test
+    void contextCancellationUnregistersListenerAndPreservesOutstandingLease() throws Exception {
+        String topic = "projects/p1/topics/t1";
+        String subscription = "projects/p1/subscriptions/s1";
+        service.createTopic(topic);
+        service.createSubscription(subscription, topic, 10);
+        PubSubService observed = spy(service);
+        AtomicInteger unregisters = new AtomicInteger();
+        doAnswer(invocation -> {
+            Runnable unregister = (Runnable) invocation.callRealMethod();
+            return (Runnable) () -> {
+                unregister.run();
+                unregisters.incrementAndGet();
+            };
+        }).when(observed).registerMessageListener(eq(subscription), any());
+        Context.CancellableContext context = Context.current().withCancellation();
+        RecordingObserver<StreamingPullResponse> responses = new RecordingObserver<>();
+        StreamObserver<StreamingPullRequest> requests = context.call(
+                () -> new PubSubSubscriberController(observed).streamingPull(responses));
+        requests.onNext(StreamingPullRequest.newBuilder().setSubscription(subscription)
+                .setStreamAckDeadlineSeconds(10).build());
+        observed.publish(topic, List.of(PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("unacked")).build()));
+        ReceivedMessage first = responses.values.getFirst().getReceivedMessages(0);
+
+        context.cancel(null);
+        requests.onNext(StreamingPullRequest.newBuilder().setSubscription(subscription).build());
+        requests.onError(Status.CANCELLED.asException());
+        requests.onCompleted();
+        assertEquals(1, unregisters.get(), "cleanup should run exactly once");
+
+        observed.publish(topic, List.of(PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("recovery")).build()));
+        assertEquals(1, responses.values.size(), "the cancelled stream must not consume newly published messages");
+        List<ReceivedMessage> recovery = observed.pull(subscription, 10);
+        assertEquals(1, recovery.size());
+        assertEquals("recovery", recovery.getFirst().getMessage().getData().toStringUtf8());
+        observed.acknowledge(subscription, List.of(recovery.getFirst().getAckId()));
+        assertTrue(observed.pull(subscription, 10).isEmpty());
+
+        clock.advance(Duration.ofSeconds(10));
+        observed.expireLeases();
+        List<ReceivedMessage> redelivery = observed.pull(subscription, 10);
+        assertEquals(1, redelivery.size());
+        assertEquals(first.getMessage().getMessageId(), redelivery.getFirst().getMessage().getMessageId());
+        assertNotEquals(first.getAckId(), redelivery.getFirst().getAckId());
+    }
+
+    @Test
+    void cancellationDuringListenerRegistrationStillUnregistersTheListener() throws Exception {
+        String topic = "projects/p1/topics/t1";
+        String subscription = "projects/p1/subscriptions/s1";
+        service.createTopic(topic);
+        service.createSubscription(subscription, topic, 10);
+        PubSubService observed = spy(service);
+        CountDownLatch registered = new CountDownLatch(1);
+        CountDownLatch finishRegistration = new CountDownLatch(1);
+        CountDownLatch cancellationStarted = new CountDownLatch(1);
+        AtomicInteger unregisters = new AtomicInteger();
+        doAnswer(invocation -> {
+            Runnable unregister = (Runnable) invocation.callRealMethod();
+            registered.countDown();
+            assertTrue(finishRegistration.await(5, TimeUnit.SECONDS));
+            return (Runnable) () -> {
+                unregister.run();
+                unregisters.incrementAndGet();
+            };
+        }).when(observed).registerMessageListener(eq(subscription), any());
+        Context.CancellableContext context = Context.current().withCancellation();
+        context.addListener(ignored -> cancellationStarted.countDown(), Runnable::run);
+        RecordingObserver<StreamingPullResponse> responses = new RecordingObserver<>();
+        StreamObserver<StreamingPullRequest> requests = context.call(
+                () -> new PubSubSubscriberController(observed).streamingPull(responses));
+        try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            Future<?> registration = executor.submit(() -> requests.onNext(
+                    StreamingPullRequest.newBuilder().setSubscription(subscription).build()));
+            try {
+                assertTrue(registered.await(5, TimeUnit.SECONDS));
+                Future<?> cancellation = executor.submit(() -> context.cancel(null));
+                assertTrue(cancellationStarted.await(5, TimeUnit.SECONDS));
+                finishRegistration.countDown();
+                registration.get(5, TimeUnit.SECONDS);
+                cancellation.get(5, TimeUnit.SECONDS);
+                assertEquals(1, unregisters.get());
+                observed.publish(topic, List.of(PubsubMessage.newBuilder()
+                        .setData(ByteString.copyFromUtf8("recovery")).build()));
+                assertTrue(responses.values.isEmpty());
+                assertEquals(1, observed.pull(subscription, 10).size());
+            } finally {
+                finishRegistration.countDown();
+                context.cancel(null);
+            }
+        }
     }
 
     @Test
@@ -193,7 +307,7 @@ class PubSubSubscriberControllerTest {
                 .putAttributes("event_type", "nomatch")
                 .build()));
 
-        assertFalse(responseObserver.awaitValue(),
+        assertTrue(responseObserver.staysBelow(1),
                 "streaming pull should not deliver a message the filter excludes");
 
         service.publish(topic, List.of(PubsubMessage.newBuilder()
@@ -439,7 +553,7 @@ class PubSubSubscriberControllerTest {
                 .addModifyDeadlineSeconds(60)
                 .build());
 
-        assertFalse(responseObserver.awaitValues(2), "a lease extension must not redeliver the message");
+        assertTrue(responseObserver.staysBelow(2), "a lease extension must not redeliver the message");
         assertNull(responseObserver.error.get());
         assertTrue(service.pull(subscription, 10).isEmpty());
 
@@ -478,7 +592,7 @@ class PubSubSubscriberControllerTest {
         assertTrue(deadLetters.awaitValue(), "the dead letter should reach the dead-letter stream");
         assertEquals("5", deadLetters.values.get(0).getReceivedMessages(0).getMessage()
                 .getAttributesMap().get("CloudPubSubDeadLetterSourceDeliveryCount"));
-        assertFalse(responses.awaitValues(6), "a dead-lettered message must not come back on the source stream");
+        assertTrue(responses.staysBelow(6), "a dead-lettered message must not come back on the source stream");
         assertNull(responses.error.get());
         stream.onCompleted();
         deadLetterStream.onCompleted();
@@ -554,7 +668,7 @@ class PubSubSubscriberControllerTest {
 
         clock.advance(Duration.ofSeconds(9));
         service.expireLeases();
-        assertFalse(responseObserver.awaitValues(2), "the message must stay leased until the stream deadline");
+        assertTrue(responseObserver.staysBelow(2), "the message must stay leased until the stream deadline");
 
         clock.advance(Duration.ofSeconds(1));
         service.expireLeases();
@@ -718,6 +832,72 @@ class PubSubSubscriberControllerTest {
     }
 
     @Test
+    void createSubscriptionOverGrpcPreservesStorageAndRetentionSettings() {
+        service.createTopic("projects/p1/topics/t1");
+
+        RecordingObserver<Subscription> createObserver = new RecordingObserver<>();
+        controller.createSubscription(Subscription.newBuilder()
+                .setName("projects/p1/subscriptions/s1")
+                .setTopic("projects/p1/topics/t1")
+                .putLabels("team", "analytics")
+                .setRetainAckedMessages(true)
+                .setMessageRetentionDuration(com.google.protobuf.Duration.newBuilder().setSeconds(604800))
+                .setBigqueryConfig(BigQueryConfig.newBuilder()
+                        .setTable("p1.dataset.events")
+                        .setUseTableSchema(true)
+                        .setWriteMetadata(true)
+                        .setDropUnknownFields(true)
+                        .setServiceAccountEmail("writer@p1.iam.gserviceaccount.com"))
+                .setExpirationPolicy(ExpirationPolicy.newBuilder()
+                        .setTtl(com.google.protobuf.Duration.newBuilder().setSeconds(2678400)))
+                .build(), createObserver);
+
+        assertNull(createObserver.error.get());
+        Subscription created = createObserver.values.get(0);
+        assertEquals(Map.of("team", "analytics"), created.getLabelsMap());
+        assertTrue(created.getRetainAckedMessages());
+        assertEquals(604800, created.getMessageRetentionDuration().getSeconds());
+        assertEquals("p1.dataset.events", created.getBigqueryConfig().getTable());
+        assertTrue(created.getBigqueryConfig().getUseTableSchema());
+        assertTrue(created.getBigqueryConfig().getWriteMetadata());
+        assertTrue(created.getBigqueryConfig().getDropUnknownFields());
+        assertEquals("writer@p1.iam.gserviceaccount.com",
+                created.getBigqueryConfig().getServiceAccountEmail());
+        assertEquals(BigQueryConfig.State.ACTIVE, created.getBigqueryConfig().getState());
+        assertEquals(2678400, created.getExpirationPolicy().getTtl().getSeconds());
+        assertEquals(Map.of(
+                "table", "p1.dataset.events",
+                "useTableSchema", true,
+                "writeMetadata", true,
+                "dropUnknownFields", true,
+                "serviceAccountEmail", "writer@p1.iam.gserviceaccount.com"),
+                service.getSubscription("projects/p1/subscriptions/s1").getBigQueryConfig());
+
+        RecordingObserver<Subscription> getObserver = new RecordingObserver<>();
+        controller.getSubscription(GetSubscriptionRequest.newBuilder()
+                .setSubscription("projects/p1/subscriptions/s1").build(), getObserver);
+        assertNull(getObserver.error.get());
+        assertEquals(created, getObserver.values.get(0));
+    }
+
+    @Test
+    void getSubscriptionOverGrpcReturnsAServiceAccountStoredOverRest() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10,
+                null, false, null, null, null,
+                Map.of("serviceAccountEmail", "writer@p1.iam.gserviceaccount.com"),
+                null, null, null, 0, false, false);
+
+        RecordingObserver<Subscription> responseObserver = new RecordingObserver<>();
+        controller.getSubscription(GetSubscriptionRequest.newBuilder()
+                .setSubscription("projects/p1/subscriptions/s1").build(), responseObserver);
+
+        assertNull(responseObserver.error.get());
+        assertEquals("writer@p1.iam.gserviceaccount.com",
+                responseObserver.values.get(0).getBigqueryConfig().getServiceAccountEmail());
+    }
+
+    @Test
     void getSubscriptionOverGrpcReturnsARetryPolicyStoredOverRest() {
         service.createTopic("projects/p1/topics/t1");
         service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10,
@@ -858,6 +1038,16 @@ class PubSubSubscriberControllerTest {
 
         private boolean awaitValue() throws InterruptedException {
             return awaitValues(1);
+        }
+
+        /**
+         * True when fewer than {@code count} responses arrived. Stream delivery runs on the thread that publishes,
+         * nacks or expires leases, so anything due has already arrived; the short window only guards against a
+         * delivery that turned asynchronous.
+         */
+        private boolean staysBelow(int count) throws InterruptedException {
+            Thread.sleep(100);
+            return values.size() < count;
         }
 
         private boolean awaitValues(int count) throws InterruptedException {

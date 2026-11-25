@@ -194,6 +194,15 @@ class GcsNotificationTest {
                     BUCKET_NAME.equals(m.getMessage().getAttributesOrDefault("bucketId", "")));
             assertThat(hasBucket).isTrue();
 
+            String notificationConfig = "projects/_/buckets/" + BUCKET_NAME
+                    + "/notificationConfigs/" + createdNotification.getNotificationId();
+            assertThat(messages).allSatisfy(m -> {
+                Map<String, String> attributes = m.getMessage().getAttributesMap();
+                assertThat(attributes).containsEntry("env", "test");
+                assertThat(attributes).containsEntry("notificationConfig", notificationConfig);
+                assertThat(attributes.get("eventTime")).isNotBlank();
+            });
+
             List<String> ackIds = messages.stream().map(ReceivedMessage::getAckId).toList();
             subscriberStub.acknowledgeCallable().call(
                     AcknowledgeRequest.newBuilder()

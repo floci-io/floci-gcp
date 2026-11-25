@@ -144,6 +144,8 @@ regex, and nested parentheses are not supported; unrecognized clauses are ignore
 - `ListLogs`
 - `DeleteLog`
 - `CreateSink`, `GetSink`, `ListSinks`, `UpdateSink`, `DeleteSink` over gRPC and REST JSON
+- `CreateLogMetric`, `GetLogMetric`, `ListLogMetrics`, `UpdateLogMetric`, `DeleteLogMetric` over gRPC and REST JSON
+  (see [Log-based metrics](#log-based-metrics))
 
 ## Sink configuration
 
@@ -210,7 +212,8 @@ After accepting a non-dry-run `WriteLogEntries` request, both REST and gRPC inge
 active Cloud Storage sinks and route matching entries. Request defaults, timestamps, insert IDs,
 and labels are applied before routing. Enabled exclusions remove matching entries. Disabled sinks
 and disabled exclusions are respected. Deleting a log does not delete objects already exported.
-Pub/Sub and BigQuery destinations can be configured but do not receive deliveries.
+Pub/Sub and BigQuery destinations are delivered as described under [Pub/Sub export](#pubsub-export)
+and [BigQuery export](#bigquery-export).
 
 Each local write produces immutable JSON-array batches of protobuf-JSON `LogEntry` objects,
 grouped by log ID and UTC timestamp hour. URL-encoded log IDs are decoded in object paths:
@@ -336,9 +339,132 @@ and the [Logging query language](https://docs.cloud.google.com/logging/docs/view
 Live verification covered folder identity behavior and date-only timestamp comparisons at midnight UTC.
 Export file bytes and exact validation messages were not verified live.
 
+## Pub/Sub export
+
+Sinks whose destination is `pubsub.googleapis.com/projects/{project}/topics/{topic}` use the same
+routing as Cloud Storage sinks: the same filter subset, exclusions, `includeChildren` hierarchy,
+disabled flags and dry-run handling. Each routed entry is published as its own message, in the
+order the request supplied it, right after the write is accepted. The message data is the
+protobuf-JSON `LogEntry` (the same bytes a Cloud Storage export would hold for that entry, as a
+single object rather than an array), and the message carries the
+`logging.googleapis.com/timestamp` attribute with the entry's `timestamp`.
+
+Only entries received after the sink exists are published; nothing is backfilled when a sink is
+created or re-enabled. A missing topic, a denied writer, or a disabled Pub/Sub service is logged,
+does not fail the accepted write, and does not affect other sinks. The failed entries are not
+retried. Real Cloud Logging also writes a `logging.googleapis.com/sink_error` entry and emails the
+project owners for these errors; the emulator does neither.
+
+With `iam.authorization-mode=enforce`, grant the `writerIdentity` `roles/pubsub.publisher` on the
+topic or its project. Export checks `pubsub.topics.publish` against that principal. As with Cloud
+Storage delivery, the sink lock and then the topic and project policy locks are held through the
+check and the publication, so a revocation is ordered before or after it, never in between.
+
+Deviations: real Pub/Sub sinks deliver within about a minute and some sample messages carry
+additional `<service>/resource_type` and `<service>/resource_id` attributes; the emulator publishes
+synchronously and sets only the timestamp attribute. Semantics follow
+[Pub/Sub routing](https://docs.cloud.google.com/logging/docs/export/pubsub) and
+[sink troubleshooting](https://docs.cloud.google.com/logging/docs/export/troubleshoot).
+
+## BigQuery export
+
+Sinks whose destination is `bigquery.googleapis.com/projects/{project}/datasets/{dataset}` use the
+same routing as the other sinks and stream routed entries into the dataset right after the write is
+accepted. The dataset must exist; tables are created on demand, under the dataset's project even
+when the sink lives in another project.
+
+- Tables: one per log, named after the log ID with `-`, `.`, `/` and other unsupported characters
+  replaced by `_`, plus the entry timestamp's UTC date (`syslog_20170523`,
+  `compute_googleapis_com_activity_log_20171231`). With `bigqueryOptions.usePartitionedTables`
+  the suffix is dropped and the table is day-partitioned on the `timestamp` column.
+- Columns: `LogEntry` field names are kept (`logName`, `insertId`, `receiveTimestamp`, ...);
+  `timestamp` and `receiveTimestamp` are `TIMESTAMP`. The keys of `labels`, `resource.labels` and
+  `jsonPayload` are lowercased, unsupported characters become `_`, leading underscores are removed
+  and names are capped at 128 characters. JSON objects become `RECORD` columns, arrays `REPEATED`
+  columns, numbers `FLOAT`, booleans `BOOLEAN` and strings `STRING`. An array's columns cover the
+  keys of all its items. Null values, empty objects and empty arrays add no column and are left out
+  of the row.
+- Schema: the first entries of a table determine its schema, and later entries may add columns.
+  An entry whose field changes type, or whose array mixes item types or holds arrays, is written
+  instead to `export_errors_YYYYMMDD` (or `export_errors` for partitioned sinks) with `logEntry` (the entry as JSON), `schemaErrorDetail`,
+  `sink`, `logName`, `timestamp`, `receiveTimestamp`, `severity`, `insertId`, `trace` and
+  `resourceType`.
+
+A missing dataset or a disabled BigQuery service is logged, does not fail the accepted write, and
+does not affect other sinks. BigQuery has no IAM enforcement in the emulator, so the writer
+identity needs no `roles/bigquery.dataEditor` grant here. Inserts run under the sink lock; with the
+DuckDB sidecar they add a network round trip to the write.
+
+Deviations: real BigQuery sinks stream in small batches with some latency, shorten audit log
+payload names, store `protoPayload` and `httpRequest`, and email project owners on schema
+mismatches. The emulator inserts synchronously, has no `protoPayload` or `httpRequest` to store, and
+represents `labels` and `resource.labels` as `RECORD` columns keyed by label name (the saved
+documentation does not state their shape). Semantics follow
+[BigQuery routing](https://docs.cloud.google.com/logging/docs/export/bigquery).
+
+## Log-based metrics
+
+`MetricsServiceV2` is served on gRPC and on REST JSON at `/v2/projects/{project}/metrics`. A metric
+identifier may contain `/`; REST callers send it as `%2F` (`nginx%2Frequests`). `UpdateLogMetric`
+replaces the metric and creates it when it does not exist. Duplicate creates fail with
+`ALREADY_EXISTS`, missing metrics with `NOT_FOUND`.
+
+Validation follows the
+[LogMetric reference](https://cloud.google.com/logging/docs/reference/v2/rest/v2/projects.metrics):
+
+- `name` up to 100 characters from `A-Z a-z 0-9 _-.,+!*',()%/`, not starting with `/`; `filter`
+  required, up to 20,000 characters, in the same strict subset sinks use; `description` up to 8,000.
+- Without `metricDescriptor`, the metric is a counter: `DELTA`, `INT64`, no labels, unit `1`.
+  `metricDescriptor.name`, `type` and `description` are output only and are filled from the metric:
+  the type is `logging.googleapis.com/user/<name>`. Only `DELTA` with `INT64` or `DISTRIBUTION` is
+  accepted. Metric kind, value type and existing labels cannot change on update; new labels and
+  label descriptions can.
+- Up to 10 labels, keys `[a-zA-Z][a-zA-Z0-9_]*` other than `log` (the default label), types `STRING`,
+  `BOOL` or `INT64`. Every label needs an entry in `labelExtractors`, and every extractor needs a label.
+- Extractors are `EXTRACT(field)` or `REGEXP_EXTRACT(field, "regex")` with exactly one capture
+  group, over the fields the routing filter supports. The field is converted to a string first,
+  with whole numbers (also inside objects and lists) written as integers over both gRPC and REST. A
+  distribution needs `valueExtractor` and `bucketOptions` (linear, exponential or explicit), with at
+  most 200 buckets counting the underflow and overflow buckets.
+- `bucketName` is stored and must name a bucket in the metric's project; log buckets themselves
+  are not emulated, so it does not scope what the metric counts.
+
+### Points in Cloud Monitoring
+
+Each accepted, non-dry-run write is counted into every enabled metric of the entry's project, after
+sink export. Only entries received after the metric exists count; nothing is backfilled. Each
+series (metric labels plus the entry's monitored resource) gets one `DELTA` point per write: the
+number of matching entries for a counter, or a `Distribution` of the extracted values. Every series
+carries the default `log` label, the URL-encoded LOG_ID part of the entry's `logName`. A failed
+label extraction yields `""`, `0` or `false`; a value that fails extraction or conversion to a
+number is not recorded. Label values keep their first 1,024 characters.
+
+Creating or updating a metric upserts its descriptor in Cloud Monitoring (with the `log` label),
+so `ListTimeSeries` and `GetMetricDescriptor` for `logging.googleapis.com/user/<name>` work as for
+any metric. When Cloud Monitoring is disabled, metrics are still managed but record nothing.
+
+Deviations from real Logging, which flushes in-memory counters once a minute:
+
+- Points are written when entries arrive. A point's interval starts where the series' previous
+  point ended (one minute before the end for its first point), so intervals never overlap and an
+  aligned read (`ALIGN_DELTA` or `ALIGN_SUM` over 60s) gives the same totals. No zero points are
+  written for idle minutes.
+- Regular expressions use `java.util.regex`, not RE2. Each match runs under a step budget, so a
+  pattern that backtracks heavily (such as `(a+){10}$`) extracts nothing rather than stalling writes.
+- Deleting a metric leaves its Cloud Monitoring descriptor and points in place. Real Logging also
+  refuses to delete a metric an alerting policy uses; alerting policies are not emulated yet.
+- IAM: with enforcement on, `logging.logMetrics.{create,get,list,update,delete}` are checked on the
+  metric (create) or project (list), with `roles/logging.admin` and `roles/logging.configWriter`
+  granting all five and `roles/logging.viewer` and `roles/logging.privateLogViewer` get and list,
+  as the [Logging roles reference](https://docs.cloud.google.com/iam/docs/roles-permissions/logging) lists.
+
+Semantics follow the [log-based metrics overview](https://docs.cloud.google.com/logging/docs/logs-based-metrics),
+[labels](https://docs.cloud.google.com/logging/docs/logs-based-metrics/labels) and
+[distribution metrics](https://docs.cloud.google.com/logging/docs/logs-based-metrics/distribution-metrics).
+
 ## Not Yet Supported
 
 `TailLogEntries` (streaming), `protoPayload`/`httpRequest`/`operation`/`sourceLocation`/`split`
-fields, monitored-resource-descriptor catalog, log-based metrics (`MetricsServiceV2`), non-GCS sink export,
+fields, monitored-resource-descriptor catalog, log-based metric backfill,
 log buckets and other `ConfigServiceV2` methods, advanced filter operators, and retention/dedup
 semantics.

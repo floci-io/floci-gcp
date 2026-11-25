@@ -119,7 +119,11 @@ public class CloudMonitoringService {
                 .enabled(config.services().monitoring().enabled())
                 .storageKey("monitoring")
                 .protocol(ServiceProtocol.GRPC)
-                .resourceClasses(CloudMonitoringController.class, CloudMonitoringHttpController.class)
+                .resourceClasses(CloudMonitoringController.class, CloudMonitoringHttpController.class,
+                        AlertPolicyController.class, NotificationChannelController.class, AlertPoliciesHttpController.class,
+                        NotificationChannelsHttpController.class, NotificationChannelDescriptorsHttpController.class,
+                        AlertsHttpController.class, UptimeCheckController.class, UptimeChecksHttpController.class,
+                        UptimeCheckIpsHttpController.class)
                 .api("monitoring.googleapis.com", "Cloud Monitoring API")
                 .build());
         grpcServerManager.bind(new CloudMonitoringController(this));

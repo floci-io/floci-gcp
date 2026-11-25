@@ -1,5 +1,6 @@
 package io.floci.gcp.services.cloudfunctions;
 
+import io.floci.gcp.testing.GcsDisabledProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
@@ -11,7 +12,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 
 @QuarkusTest
-@TestProfile(CloudFunctionsGcsDisabledRestIntegrationTest.DisabledGcsProfile.class)
+@TestProfile(GcsDisabledProfile.class)
 class CloudFunctionsGcsDisabledRestIntegrationTest {
 
     @Test

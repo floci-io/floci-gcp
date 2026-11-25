@@ -7,25 +7,43 @@ on:
     paths:
       - 'src/**'
       - 'pom.xml'
+      - '.github/ci/**'
       - '.github/workflows/ci.yml'
   pull_request:
     paths:
       - 'src/**'
       - 'pom.xml'
+      - '.github/ci/**'
       - '.github/workflows/ci.yml'
 
 permissions:
   contents: read
 
+# A new push to a pull request cancels its older run: only the latest head matters there.
+# On main a running run is left to finish, so every merge gets a result; the concurrency
+# group still holds at most one pending run, so a burst of merges is tested once, at its
+# newest commit.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Hardcoded on purpose: strategy.job-total counts every matrix job, so adding an
+  # unrelated matrix entry later would change the modulus and silently leave part
+  # of the suite running in no shard. Keep in sync with the matrix below.
+  SHARD_TOTAL: 3
 
 jobs:
   test:
-    name: Build and Test
+    name: Build and Test (shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
+    # A runaway-job kill switch, not a budget. One job ran the whole suite in 14 to 20 minutes
+    # and was cancelled here at 20 on about a third of runs (#698); a shard runs about a third.
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@v7
 
@@ -38,29 +56,133 @@ jobs:
           # Path(s) specified in the action for caching do(es) not exist"), so every run
           # resolved dependencies cold. Explicit cache steps below do the same job.
 
-      # Restore on every run, save from main only. Actions caches are ref-scoped: a
-      # pull_request run's write lands in refs/pull/N/merge, which no other PR can read,
-      # so a PR save is a private duplicate of what main already publishes under this key.
+      # Restore on every shard, save from main only and from shard 1 only. Actions caches are
+      # ref-scoped: a pull_request run's write lands in refs/pull/N/merge, which no other PR can
+      # read, so a PR save is a private duplicate of what main already publishes under this key.
+      # With every shard saving, they would race the same key and all but one would fail.
       # This job is the repo's single cache writer; compatibility.yml and nightly.yml
       # restore the same key read-only.
       #
       # `hashFiles('pom.xml')`, not '**/pom.xml': the glob would also hash
       # compatibility-tests/sdk-test-java/pom.xml, a project this workflow never builds,
       # and an unrelated change there would bust the key.
-      - uses: actions/cache/restore@v6.1.0
+      - id: maven-cache
+        uses: actions/cache/restore@v6.1.0
         with:
           path: ~/.m2/repository
           key: maven-${{ runner.os }}-${{ hashFiles('pom.xml') }}
           restore-keys: |
             maven-${{ runner.os }}-
 
+      # Derived from test sources, not target/test-classes, so shard.txt exists before
+      # Compile. Every test is a top-level class in src/test/java, so the file name is the
+      # class name; the step after Compile fails the shard if that ever stops being true.
+      - name: Compute shard include list
+        run: |
+          cd src/test/java
+          find . \( -name '*Test.java' -o -name 'Test*.java' \
+                    -o -name '*Tests.java' -o -name '*TestCase.java' \) \
+            | sed 's|^\./||; s|\.java$||' | LC_ALL=C sort \
+            > "$GITHUB_WORKSPACE/all-classes.txt"
+          cd "$GITHUB_WORKSPACE"
+          python3 -m unittest discover -s .github/ci -p test_partition.py
+          .github/ci/partition.sh all-classes.txt "$SHARD_TOTAL" "${{ matrix.shard }}" > shard.txt
+          # An empty includesFile makes surefire fall back to its default includes
+          # and run the entire suite into this shard's timeout.
+          test -s shard.txt
+          echo "shard ${{ matrix.shard }}/$SHARD_TOTAL: $(wc -l < shard.txt) classes"
+
+      - name: Compile
+        run: mvn test-compile -B
+
+      # all-classes.txt is derived from file names, so a test class whose name differs from
+      # its file would drop out of both it and the shard union without the completeness check
+      # noticing. The compiled classes are the ground truth; fail here if the lists disagree.
+      - name: Verify shard list matches compiled test classes
+        run: |
+          cd target/test-classes
+          find . \( -name '*Test.class' -o -name 'Test*.class' \
+                    -o -name '*Tests.class' -o -name '*TestCase.class' \) \
+                  ! -name '*$*' \
+            | sed 's|^\./||; s|\.class$||' | LC_ALL=C sort \
+            > "$RUNNER_TEMP/compiled-classes.txt"
+          cd "$GITHUB_WORKSPACE"
+          cmp -s all-classes.txt "$RUNNER_TEMP/compiled-classes.txt" \
+            || { echo "::error::test class list from src/test/java differs from target/test-classes:"; diff all-classes.txt "$RUNNER_TEMP/compiled-classes.txt" | head -50; exit 1; }
+
+      # surefire.timeout bounds the test fork at 15 minutes, including deadlocks or blocking
+      # I/O that ignore JUnit's interrupt; the job ceiling also covers setup and compile.
+      # jacoco:prepare-agent sets the argLine surefire forks with, as `mvn test` does.
       - name: Run tests
-        run: mvn test -B
+        run: >
+          mvn jacoco:prepare-agent surefire:test jacoco:report -B
+          -Dsurefire.includesFile="$GITHUB_WORKSPACE/shard.txt"
+          -Dsurefire.failIfNoTests=true
+          -Dsurefire.timeout=900
 
       # `on.push.branches` is [main] only in this workflow, so `push` means main.
       # `always()` so a failed test run still saves the dependencies it resolved.
+      # Skipped on an exact hit: the key is immutable, so saving it again only fails to reserve it.
       - uses: actions/cache/save@v6.1.0
-        if: always() && github.event_name == 'push'
+        if: >-
+          always() && matrix.shard == 1 && github.event_name == 'push'
+          && steps.maven-cache.outputs.cache-hit != 'true'
         with:
           path: ~/.m2/repository
           key: maven-${{ runner.os }}-${{ hashFiles('pom.xml') }}
+
+      - name: Upload shard manifest and results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: shard-${{ matrix.shard }}
+          path: |
+            shard.txt
+            all-classes.txt
+            target/surefire-reports/
+          if-no-files-found: error
+
+  # The completeness gate: fails on any shard failure, any class assigned to two shards,
+  # or any class assigned to none, checked against the same commit's own class list, never
+  # a hardcoded count. Its name stays stable across re-sharding, so it is the check to
+  # require on main if one is ever required.
+  ci-summary:
+    name: CI summary
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: test
+    if: always()
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: shard-*
+          path: shards
+
+      - name: Verify shard partition is disjoint and complete
+        run: |
+          set -euo pipefail
+          ls -d shards/shard-*
+          ref=$(ls -d shards/shard-* | head -1)
+          for d in shards/shard-*; do
+            cmp -s "$ref/all-classes.txt" "$d/all-classes.txt" \
+              || { echo "::error::$d computed a different class list than $ref"; exit 1; }
+          done
+          dups=$(cat shards/shard-*/shard.txt | LC_ALL=C sort | uniq -d)
+          [ -z "$dups" ] || { echo "::error::classes assigned to more than one shard:"; echo "$dups"; exit 1; }
+          cat shards/shard-*/shard.txt | LC_ALL=C sort > union.txt
+          cmp -s union.txt "$ref/all-classes.txt" \
+            || { echo "::error::shard union differs from the full class list:"; diff union.txt "$ref/all-classes.txt" | head -50; exit 1; }
+          echo "partition verified: $(wc -l < union.txt) classes across $(ls -d shards/shard-* | wc -l) shards"
+
+      # Runs after a failed shard too, which is when the summary matters most.
+      - name: Test summary
+        if: always()
+        uses: test-summary/action@37b508cfee6d4d080eedd00b5bb240a6a784a6a5 # v2
+        with:
+          paths: 'shards/shard-*/target/surefire-reports/TEST-*.xml'
+
+      - name: Fail if any shard failed
+        if: always() && needs.test.result != 'success'
+        run: |
+          echo "shard matrix concluded: ${{ needs.test.result }}"
+          exit 1

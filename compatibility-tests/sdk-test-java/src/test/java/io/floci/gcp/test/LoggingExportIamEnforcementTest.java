@@ -44,6 +44,7 @@ class LoggingExportIamEnforcementTest {
         String parent = "projects/" + TestFixtures.projectId();
         String log = parent + "/logs/" + id;
         String callerEmail = "caller@" + id + ".iam.gserviceaccount.com";
+        TestFixtures.createServiceAccount(callerEmail);
         GenerateAccessTokenResponse token;
         try (IamCredentialsClient credentials = TestFixtures.iamCredentialsClient()) {
             token = credentials.generateAccessToken("projects/-/serviceAccounts/" + callerEmail,

@@ -3,8 +3,6 @@ package io.floci.gcp.services.iam;
 import io.floci.gcp.services.credentials.CredentialTokenService;
 import io.floci.gcp.services.iam.model.StoredServiceAccount;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
-import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
@@ -18,7 +16,6 @@ import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.startsWith;
 
 @QuarkusTest
-@TestProfile(IamServiceAccountDisabledEnforcementIntegrationTest.DisabledProfile.class)
 class IamServiceAccountDisabledEnforcementIntegrationTest {
 
     @Inject
@@ -65,12 +62,5 @@ class IamServiceAccountDisabledEnforcementIntegrationTest {
                 .body(Map.of("policy", Map.of()))
                 .when().post("/v1/" + account.getName() + ":setIamPolicy")
                 .then().statusCode(404);
-    }
-
-    public static class DisabledProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci-gcp.services.iam.authorization-mode", "disabled");
-        }
     }
 }

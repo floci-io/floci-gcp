@@ -1,9 +1,13 @@
 package io.floci.gcp.services.iam;
 
+import io.floci.gcp.config.EmulatorConfig;
+import io.floci.gcp.services.credentials.CredentialAuthenticationException;
 import io.floci.gcp.services.credentials.CredentialTokenService;
 import io.floci.gcp.services.credentials.StoredCredentialToken;
 import io.floci.gcp.services.iam.authorization.IamIdentityKind;
+import io.floci.gcp.services.iam.model.StoredServiceAccount;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 
 import java.util.Optional;
@@ -16,10 +20,19 @@ public class IamPrincipalResolver {
     private static final String SERVICE_ACCOUNT_RESOURCE_MARKER = "/serviceAccounts/";
 
     private final CredentialTokenService tokenService;
+    private final EmulatorConfig config;
+    private final Instance<IamService> accounts;
 
     @Inject
-    public IamPrincipalResolver(CredentialTokenService tokenService) {
+    public IamPrincipalResolver(CredentialTokenService tokenService, EmulatorConfig config,
+            Instance<IamService> accounts) {
         this.tokenService = tokenService;
+        this.config = config;
+        this.accounts = accounts;
+    }
+
+    IamPrincipalResolver(CredentialTokenService tokenService) {
+        this(tokenService, null, null);
     }
 
     public Resolution resolve(String authorization) {
@@ -35,9 +48,28 @@ public class IamPrincipalResolver {
             return Resolution.external();
         }
         if (token.get().getTokenKind() == StoredCredentialToken.TokenKind.DOWNSCOPED) {
-            return Resolution.downscopedToken(token.get().getPrincipal());
+            Resolution downscoped = Resolution.downscopedToken(token.get().getPrincipal());
+            requireEnabledAccount(downscoped.principal());
+            return downscoped;
         }
-        return Resolution.authenticated(IamPrincipal.serviceAccount(normalizeServiceAccount(token.get().getPrincipal())));
+        IamPrincipal principal = IamPrincipal.serviceAccount(normalizeServiceAccount(token.get().getPrincipal()));
+        requireEnabledAccount(principal);
+        return Resolution.authenticated(principal);
+    }
+
+    /**
+     * IAM {@code serviceAccounts.disable}: "Existing access tokens for the service account are rejected", and
+     * accepted again once the account is re-enabled. Only enforce mode evaluates identities.
+     */
+    private void requireEnabledAccount(IamPrincipal principal) {
+        if (config == null || accounts == null || !principal.isAuthenticated()
+                || config.services().iam().authorizationMode() != EmulatorConfig.IamAuthorizationMode.ENFORCE) {
+            return;
+        }
+        String email = principal.member().substring("serviceAccount:".length());
+        if (accounts.get().findServiceAccount(email).map(StoredServiceAccount::isDisabled).orElse(false)) {
+            throw CredentialAuthenticationException.accountStateInvalid();
+        }
     }
 
     private static Optional<String> bearerToken(String authorization) {

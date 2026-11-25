@@ -5,9 +5,11 @@ import io.floci.gcp.services.bigquery.model.TableFieldSchema;
 
 import java.math.BigDecimal;
 import java.time.DateTimeException;
+import java.time.ZoneId;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -61,7 +63,16 @@ final class SqlDialectTranslator {
      * An {@code alias.field} in ORDER BY naming a field the STRUCT select alias does not have, as written, and
      * whether it belongs to the outermost query, whose aliases are the result's columns.
      */
-    record MissingStructField(String alias, String field, boolean outermost, Set<List<String>> anonymousFields) {}
+    /**
+     * A field missing from a STRUCT select alias in ORDER BY; {@code parents} names the fields from the alias down to
+     * the struct that lacks it, empty when the alias itself does.
+     */
+    record MissingStructField(String alias, String field, boolean outermost, Set<List<String>> anonymousFields,
+                              List<String> parents) {
+        MissingStructField(String alias, String field, boolean outermost, Set<List<String>> anonymousFields) {
+            this(alias, field, outermost, anonymousFields, List.of());
+        }
+    }
 
     /**
      * The dotted paths, such as {@code s.zz}, left in the outermost query's ORDER BY once the translator has
@@ -130,7 +141,7 @@ final class SqlDialectTranslator {
      * (https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/lexical#reserved_keywords).
      * BigQuery rejects them as an implicit alias, so they are never rewritten to one.
      */
-    private static final Set<String> GOOGLESQL_RESERVED = Set.of(
+    static final Set<String> GOOGLESQL_RESERVED = Set.of(
             "ALL", "AND", "ANY", "ARRAY", "AS", "ASC", "ASSERT_ROWS_MODIFIED", "AT", "BETWEEN", "BY", "CASE",
             "CAST", "COLLATE", "CONTAINS", "CREATE", "CROSS", "CUBE", "CURRENT", "DEFAULT", "DEFINE", "DESC",
             "DISTINCT", "ELSE", "END", "ENUM", "ESCAPE", "EXCEPT", "EXCLUDE", "EXISTS", "EXTRACT", "FALSE",
@@ -148,8 +159,10 @@ final class SqlDialectTranslator {
     private static final Set<String> SHIMMED_FUNCTIONS = Set.of(
             "CAST", "SAFE_CAST", "EXTRACT", "STRUCT", "SAFE_DIVIDE", "IEEE_DIVIDE", "DIV", "IF", "COUNTIF", "CONCAT",
             "LOGICAL_AND", "LOGICAL_OR", "ARRAY_LENGTH", "ARRAY_REVERSE", "ARRAY_AGG", "ARRAY_CONCAT_AGG", "CONTAINS_SUBSTR",
-            "APPROX_COUNT_DISTINCT", "TO_HEX", "MD5", "SHA1", "SHA256", "RAND", "INITCAP", "ANY_VALUE",
-            "GENERATE_ARRAY", "GENERATE_DATE_ARRAY", "GENERATE_TIMESTAMP_ARRAY", "SPLIT", "FORMAT", "APPROX_QUANTILES",
+            "FARM_FINGERPRINT", "APPROX_COUNT_DISTINCT", "BYTE_LENGTH", "TO_HEX", "MD5", "SHA1", "SHA256",
+            "LENGTH", "RAND", "INITCAP", "ANY_VALUE",
+            "GENERATE_ARRAY", "GENERATE_DATE_ARRAY", "GENERATE_TIMESTAMP_ARRAY", "SPLIT", "FORMAT",
+            "APPROX_QUANTILES",
             "TO_JSON_STRING", "JSON_VALUE", "JSON_EXTRACT_SCALAR", "JSON_QUERY", "JSON_EXTRACT", "JSON_TYPE",
             "REGEXP_CONTAINS", "REGEXP_EXTRACT", "REGEXP_EXTRACT_ALL", "REGEXP_REPLACE", "CURRENT_TIMESTAMP",
             "CURRENT_DATE",
@@ -200,15 +213,29 @@ final class SqlDialectTranslator {
     private boolean needsUnicodeCaseFold;
     private final List<MissingStructField> missingStructFields = new ArrayList<>();
     /**
+     * The first token of each column path put in place of a renamed select alias in ORDER BY, with the alias and the
+     * number of names the path holds, so {@link #orderByFieldPaths} still reports the path from the alias.
+     */
+    private final Map<Token, RenamedPath> renamedPaths = new IdentityHashMap<>();
+
+    private record RenamedPath(String alias, int names) {}
+    /**
      * The {@code _field_<position>} keys of anonymous fields, per field map from {@link #googleSqlStructFields}.
      * Star expansion reads those keys, but no {@code alias.field} reference can name an anonymous field, as in
      * BigQuery, and the missing-field message writes it by type alone.
      */
     private final Map<Map<String, List<Token>>, Set<List<String>>> anonymousStructFields = new IdentityHashMap<>();
+
+    /** Decimal literals BigQuery types FLOAT64 here, rendered as DOUBLE; see {@link #typeDecimalLiterals}. */
+    private final Set<Token> floatLiterals = Collections.newSetFromMap(new IdentityHashMap<>());
     private boolean queryResult;
     private boolean scalarUdfBody;
     private boolean scalarUdfNamedTableSource;
     private Map<String, String> scalarUdfParameterAliases = Map.of();
+    /** Lowercase names of the temporary function's NUMERIC or BIGNUMERIC parameters, for decimal literal typing. */
+    private Set<String> numericUdfParameters = Set.of();
+    /** For each temporary function of the script, by lowercase name, whether each parameter is NUMERIC. */
+    private Map<String, List<Boolean>> numericFunctionParameters = Map.of();
 
     private List<Token> tokens;
     /** The {@code UNNEST} token of an unaliased MERGE source, rendered with {@link #mergeUnnestName} as its name. */
@@ -329,9 +356,20 @@ final class SqlDialectTranslator {
                                                             Set<String> temporaryTables,
                                                             Function<TableRef, Set<String>> columnsOf,
                                                             Function<TableRef, List<TableFieldSchema>> fieldsOf) {
+        return translateWithTemporaryTables(sql, projectId, jobProjectId, defaultDatasetId, parameters, temporaryTables,
+                columnsOf, fieldsOf, Map.of());
+    }
+
+    private static Translation translateWithTemporaryTables(String sql, String projectId, String jobProjectId,
+                                                            String defaultDatasetId, QueryParameters parameters,
+                                                            Set<String> temporaryTables,
+                                                            Function<TableRef, Set<String>> columnsOf,
+                                                            Function<TableRef, List<TableFieldSchema>> fieldsOf,
+                                                            Map<String, List<Boolean>> numericFunctionParameters) {
         SqlDialectTranslator translator = new SqlDialectTranslator(projectId, jobProjectId, defaultDatasetId,
                 parameters, temporaryTables);
         translator.columnsOf = columnsOf;
+        translator.numericFunctionParameters = numericFunctionParameters;
         translator.fieldsOf = fieldsOf;
         return translator.run(sql);
     }
@@ -356,9 +394,20 @@ final class SqlDialectTranslator {
                                                                Set<String> temporaryTables,
                                                                Function<TableRef, Set<String>> columnsOf,
                                                                Function<TableRef, List<TableFieldSchema>> fieldsOf) {
+        return translateDmlWithTemporaryTables(sql, projectId, jobProjectId, defaultDatasetId, parameters,
+                temporaryTables, columnsOf, fieldsOf, Map.of());
+    }
+
+    private static Translation translateDmlWithTemporaryTables(String sql, String projectId, String jobProjectId,
+                                                               String defaultDatasetId, QueryParameters parameters,
+                                                               Set<String> temporaryTables,
+                                                               Function<TableRef, Set<String>> columnsOf,
+                                                               Function<TableRef, List<TableFieldSchema>> fieldsOf,
+                                                               Map<String, List<Boolean>> numericFunctionParameters) {
         SqlDialectTranslator translator = new SqlDialectTranslator(projectId, jobProjectId, defaultDatasetId,
                 parameters, temporaryTables);
         translator.columnsOf = columnsOf;
+        translator.numericFunctionParameters = numericFunctionParameters;
         translator.fieldsOf = fieldsOf;
         return translator.runDml(sql);
     }
@@ -412,6 +461,7 @@ final class SqlDialectTranslator {
         Set<InformationSchema.Ref> informationSchema = new LinkedHashSet<>();
         Set<String> temporaryTables = new LinkedHashSet<>();
         Set<String> temporaryFunctions = new LinkedHashSet<>();
+        Map<String, List<Boolean>> numericFunctionParameters = new HashMap<>();
         StringBuilder setup = new StringBuilder();
         boolean needsUnicodeCaseFold = false;
         for (int i = 0; i < statements.size(); i++) {
@@ -427,8 +477,10 @@ final class SqlDialectTranslator {
                     throw invalidQuery("SQL functions with the same name but different signatures are "
                             + "currently unsupported; found " + definition.name());
                 }
+                numericFunctionParameters.put(definition.name().toLowerCase(Locale.ROOT),
+                        numericParameterPositions(statement));
                 Translation macro = translateTemporaryFunction(statement, projectId, jobProjectId, defaultDatasetId,
-                        parameters, temporaryTables, temporaryFunctions);
+                        parameters, temporaryTables, temporaryFunctions, numericFunctionParameters, fieldsOf);
                 setup.append(macro.sql()).append(";\n");
                 tables.addAll(macro.tables());
                 informationSchema.addAll(macro.informationSchema());
@@ -440,7 +492,7 @@ final class SqlDialectTranslator {
                     throw invalidQuery("A script must end with a query or DML statement.");
                 }
                 TemporaryTableTranslation temporary = translateTemporaryTable(statement, projectId, jobProjectId,
-                        defaultDatasetId, parameters, temporaryTables, columnsOf, fieldsOf);
+                        defaultDatasetId, parameters, temporaryTables, columnsOf, fieldsOf, numericFunctionParameters);
                 Translation table = temporary.translation();
                 setup.append(table.sql()).append(";\n");
                 tables.addAll(table.tables());
@@ -462,7 +514,8 @@ final class SqlDialectTranslator {
                 String temporaryTarget = temporaryDmlTarget(statement, temporaryTables);
                 if (temporaryTarget != null) {
                     Translation mutation = translateDmlWithTemporaryTables(statement, projectId, jobProjectId,
-                            defaultDatasetId, parameters, temporaryTables, columnsOf, fieldsOf);
+                            defaultDatasetId, parameters, temporaryTables, columnsOf, fieldsOf,
+                            numericFunctionParameters);
                     setup.append(mutation.sql()).append(";\n");
                     tables.addAll(mutation.tables());
                     informationSchema.addAll(mutation.informationSchema());
@@ -476,7 +529,7 @@ final class SqlDialectTranslator {
                             + "and DDL are not supported by the floci BigQuery emulator yet.");
                 }
                 Translation query = translateWithTemporaryTables(statement, projectId, jobProjectId,
-                        defaultDatasetId, parameters, temporaryTables, columnsOf, fieldsOf);
+                        defaultDatasetId, parameters, temporaryTables, columnsOf, fieldsOf, numericFunctionParameters);
                 setup.append(query.sql()).append(";\n");
                 tables.addAll(query.tables());
                 informationSchema.addAll(query.informationSchema());
@@ -488,9 +541,9 @@ final class SqlDialectTranslator {
                     temporaryTarget != null ? "_floci_temporary" : defaultDatasetId, temporaryTables);
             Translation query = finalStatement.isDml()
                     ? translateDmlWithTemporaryTables(statement, projectId, jobProjectId, defaultDatasetId, parameters,
-                            temporaryTables, columnsOf, fieldsOf)
+                            temporaryTables, columnsOf, fieldsOf, numericFunctionParameters)
                     : translateWithTemporaryTables(statement, projectId, jobProjectId, defaultDatasetId, parameters,
-                            temporaryTables, columnsOf, fieldsOf);
+                            temporaryTables, columnsOf, fieldsOf, numericFunctionParameters);
             return new ScriptTranslation(query.sql(), setup.toString(), tablesWith(tables, query.tables()),
                     informationSchemaWith(informationSchema, query.informationSchema()),
                     needsUnicodeCaseFold || query.needsUnicodeCaseFold(), query.duplicateOutputNames(),
@@ -1203,6 +1256,14 @@ final class SqlDialectTranslator {
                                                                       Set<String> temporaryTables,
                                                                       Function<TableRef, Set<String>> columnsOf,
                                                                       Function<TableRef, List<TableFieldSchema>> fieldsOf) {
+        return translateTemporaryTable(sql, projectId, jobProjectId, defaultDatasetId, parameters, temporaryTables,
+                columnsOf, fieldsOf, Map.of());
+    }
+
+    private static TemporaryTableTranslation translateTemporaryTable(
+            String sql, String projectId, String jobProjectId, String defaultDatasetId, QueryParameters parameters,
+            Set<String> temporaryTables, Function<TableRef, Set<String>> columnsOf,
+            Function<TableRef, List<TableFieldSchema>> fieldsOf, Map<String, List<Boolean>> numericFunctionParameters) {
         SqlDialectTranslator translator = new SqlDialectTranslator(projectId, jobProjectId, defaultDatasetId,
                 parameters);
         translator.tokens = new Lexer(sql).tokenize();
@@ -1258,7 +1319,8 @@ final class SqlDialectTranslator {
             queryEnd = close;
         }
         Translation query = translateWithTemporaryTables(translator.text(queryStart, queryEnd), projectId,
-                jobProjectId, defaultDatasetId, parameters, temporaryTables, columnsOf, fieldsOf);
+                jobProjectId, defaultDatasetId, parameters, temporaryTables, columnsOf, fieldsOf,
+                numericFunctionParameters);
         if (fields.isEmpty()) {
             translated.append(" AS (").append(query.sql()).append(')');
         } else {
@@ -1314,8 +1376,20 @@ final class SqlDialectTranslator {
                                                            String defaultDatasetId, QueryParameters parameters,
                                                            Set<String> temporaryTables,
                                                            Set<String> temporaryFunctions) {
+        return translateTemporaryFunction(sql, projectId, jobProjectId, defaultDatasetId, parameters, temporaryTables,
+                temporaryFunctions, Map.of(), ref -> null);
+    }
+
+    private static Translation translateTemporaryFunction(String sql, String projectId, String jobProjectId,
+                                                           String defaultDatasetId, QueryParameters parameters,
+                                                           Set<String> temporaryTables,
+                                                           Set<String> temporaryFunctions,
+                                                           Map<String, List<Boolean>> numericFunctionParameters,
+                                                           Function<TableRef, List<TableFieldSchema>> fieldsOf) {
         SqlDialectTranslator translator = new SqlDialectTranslator(projectId, jobProjectId, defaultDatasetId,
                 parameters, temporaryTables);
+        translator.numericFunctionParameters = Map.copyOf(numericFunctionParameters);
+        translator.fieldsOf = fieldsOf;
         translator.tokens = new Lexer(sql).tokenize();
         List<Integer> significant = translator.significantIndexes();
         TemporaryDeclaration declaration = temporaryDeclaration(sql, "FUNCTION");
@@ -1359,6 +1433,7 @@ final class SqlDialectTranslator {
                 .append(declaration.ifNotExists() ? "IF NOT EXISTS " : "")
                 .append(DuckTypes.quoteIdentifier(function.identifierText())).append('(');
         Map<String, String> parameterReferences = new HashMap<>();
+        Set<String> numericParameters = new HashSet<>();
         List<String> parameterValues = new ArrayList<>();
         List<String> parameterNames = new ArrayList<>();
         for (int i = 0; i < arguments.size(); i++) {
@@ -1381,10 +1456,14 @@ final class SqlDialectTranslator {
             String reference = anyType ? quotedParameterAlias : "CAST(" + quotedParameterAlias + " AS "
                     + translateType(argument.subList(1, argument.size())) + ")";
             parameterReferences.put(argument.getFirst().identifierText().toLowerCase(Locale.ROOT), reference);
+            if (numericParameter(reference)) {
+                numericParameters.add(argument.getFirst().identifierText().toLowerCase(Locale.ROOT));
+            }
             parameterValues.add(reference);
             parameterNames.add(DuckTypes.quoteIdentifier(argument.getFirst().identifierText()));
         }
         translator.scalarUdfParameterAliases = Map.copyOf(parameterReferences);
+        translator.numericUdfParameters = Set.copyOf(numericParameters);
         Translation expression = translator.translateExpression(body);
         boolean relationBinding = translator.scalarUdfNamedTableSource
                 || referencesTemporaryFunctionWithConcat(body, temporaryFunctions);
@@ -1392,6 +1471,9 @@ final class SqlDialectTranslator {
             // Bind scalar parameters in one-row relation scope. This keeps nested expressions composable and lets
             // DuckDB apply BigQuery's column-over-argument precedence when a named source exposes the same name.
             translator = new SqlDialectTranslator(projectId, defaultDatasetId, parameters, temporaryTables);
+            translator.numericUdfParameters = Set.copyOf(numericParameters);
+            translator.numericFunctionParameters = Map.copyOf(numericFunctionParameters);
+            translator.fieldsOf = fieldsOf;
             expression = translator.translateExpression(body);
         }
         String typedExpression = returnType == null ? expression.sql()
@@ -1458,6 +1540,7 @@ final class SqlDialectTranslator {
         tokens = new Lexer(expression).tokenize();
         rejectScripts();
         collectCteNames();
+        typeDecimalLiterals();
         rewriteTypedArrayLiterals();
         rewriteArraySubscripts();
         rewriteSelectAsStruct();
@@ -1585,6 +1668,40 @@ final class SqlDialectTranslator {
             statements.add(current.toString().trim());
         }
         return statements;
+    }
+
+    /** Whether each parameter of a CREATE TEMP FUNCTION statement is declared NUMERIC or BIGNUMERIC. */
+    private static List<Boolean> numericParameterPositions(String sql) {
+        List<Token> tokens = new Lexer(sql).tokenize();
+        int function = -1;
+        for (int i = 0; i < tokens.size() && function < 0; i++) {
+            if (tokens.get(i).isKeyword("FUNCTION")) {
+                function = i;
+            }
+        }
+        int open = -1;
+        for (int i = function + 1; function >= 0 && i < tokens.size() && open < 0; i++) {
+            if (tokens.get(i).isPunct("(")) {
+                open = i;
+            }
+        }
+        int close = -1;
+        int depth = 0;
+        for (int i = open; open >= 0 && i < tokens.size() && close < 0; i++) {
+            if (tokens.get(i).isPunct("(")) {
+                depth++;
+            } else if (tokens.get(i).isPunct(")") && --depth == 0) {
+                close = i;
+            }
+        }
+        if (close < 0) {
+            return List.of();
+        }
+        List<Boolean> numeric = new ArrayList<>();
+        for (List<Token> argument : splitArguments(tokens, open + 1, close)) {
+            numeric.add(argument.size() >= 2 && NUMERIC_TYPE_NAMES.contains(argument.get(1).upper()));
+        }
+        return numeric;
     }
 
     static List<List<Token>> splitArguments(List<Token> tokens, int from, int to) {
@@ -1788,19 +1905,22 @@ final class SqlDialectTranslator {
      * of a plain {@code CREATE TABLE}, already in BigQuery schema form. {@code options} are the
      * {@code SET OPTIONS} of an {@code ALTER TABLE}/{@code ALTER VIEW} or the overrides of
      * {@code CREATE TABLE COPY}, by option name; a null value clears the option.
+     * {@code queryFirstParameter} is the number of positional parameters the clause in front of
+     * {@code AS} already takes, so the query's own {@code ?} start after them.
      */
     record Statement(StatementKind kind, String statementType, TableRef target, String datasetTarget,
                      boolean orReplace, boolean ifNotExists, boolean ifExists, boolean cascade,
                      boolean materialized, String querySql, List<TableFieldSchema> columns,
                      Map<String, Object> options, TableRef copySource,
                      Map<String, Object> timePartitioning, Map<String, Object> rangePartitioning,
-                     PartitionExpression partitionExpression) {
+                     PartitionExpression partitionExpression, List<String> clusteringFields,
+                     int queryFirstParameter) {
 
         Statement(StatementKind kind, String statementType, TableRef target, String datasetTarget,
                   boolean orReplace, boolean ifNotExists, boolean ifExists, boolean cascade,
                   boolean materialized, String querySql, List<TableFieldSchema> columns) {
             this(kind, statementType, target, datasetTarget, orReplace, ifNotExists, ifExists, cascade,
-                    materialized, querySql, columns, null, null, null, null, null);
+                    materialized, querySql, columns, null, null, null, null, null, null, 0);
         }
 
         Statement(StatementKind kind, String statementType, TableRef target, String datasetTarget,
@@ -1808,7 +1928,7 @@ final class SqlDialectTranslator {
                   boolean materialized, String querySql, List<TableFieldSchema> columns,
                   Map<String, Object> options) {
             this(kind, statementType, target, datasetTarget, orReplace, ifNotExists, ifExists, cascade,
-                    materialized, querySql, columns, options, null, null, null, null);
+                    materialized, querySql, columns, options, null, null, null, null, null, 0);
         }
 
         Statement(StatementKind kind, String statementType, TableRef target, String datasetTarget,
@@ -1818,7 +1938,7 @@ final class SqlDialectTranslator {
                   PartitionExpression partitionExpression) {
             this(kind, statementType, target, datasetTarget, orReplace, ifNotExists, ifExists, cascade,
                     materialized, querySql, columns, null, null, timePartitioning, rangePartitioning,
-                    partitionExpression);
+                    partitionExpression, null, 0);
         }
 
         Statement(StatementKind kind, String statementType, TableRef target, String datasetTarget,
@@ -1829,7 +1949,7 @@ final class SqlDialectTranslator {
                   PartitionExpression partitionExpression) {
             this(kind, statementType, target, datasetTarget, orReplace, ifNotExists, ifExists, cascade,
                     materialized, querySql, columns, null, copySource, timePartitioning, rangePartitioning,
-                    partitionExpression);
+                    partitionExpression, null, 0);
         }
 
         boolean isDml() {
@@ -1839,8 +1959,8 @@ final class SqlDialectTranslator {
 
         Statement withQuerySql(String sql) {
             return new Statement(kind, statementType, target, datasetTarget, orReplace, ifNotExists, ifExists,
-                    cascade, materialized, sql, columns, copySource, timePartitioning, rangePartitioning,
-                    partitionExpression);
+                    cascade, materialized, sql, columns, options, copySource, timePartitioning, rangePartitioning,
+                    partitionExpression, clusteringFields, queryFirstParameter);
         }
 
     }
@@ -1903,12 +2023,26 @@ final class SqlDialectTranslator {
             throw invalidQuery("Syntax error: Unexpected end of script");
         }
         tokens = new Lexer(sql).tokenize();
+        rejectBracedConstructors();
         stripTrailingSemicolons();
         rejectScripts();
         validateStarReplacementWindows();
         quoteOffsetIdentifiers();
         quoteKeywordFieldNames();
         parenthesizeIntervalValues();
+    }
+
+    /**
+     * BigQuery rejects a braced constructor ({@code {'a': 1}}) with {@code Braced constructors are not supported},
+     * where DuckDB reads it as a struct literal. Only the user's SQL is checked: the translator writes its own struct
+     * literals with braces later, as text.
+     */
+    private void rejectBracedConstructors() {
+        for (Token token : tokens) {
+            if (token.isPunct("{")) {
+                throw invalidQuery("Braced constructors are not supported");
+            }
+        }
     }
 
     private void validateStarReplacementWindows() {
@@ -2366,11 +2500,11 @@ final class SqlDialectTranslator {
                         if (!tokens.get(afterSource).isKeyword("OPTIONS")) {
                             throw invalidQuery("Syntax error: Unexpected tokens after COPY source table.");
                         }
-                        options = tableOptions(afterSource);
+                        options = tableOptions(afterSource, OptionContext.COPY);
                     }
                     return new Statement(StatementKind.CREATE_TABLE, "CREATE_TABLE_COPY", target, null,
                             orReplace, ifNotExists, false, false, false, null, null, options,
-                            resolveTable(source.segments()), null, null, null);
+                            resolveTable(source.segments()), null, null, null, null, 0);
                 }
                 int asIndex = topLevelAsSelect(path.end());
                 if (asIndex >= 0) {
@@ -2379,23 +2513,34 @@ final class SqlDialectTranslator {
                             && !partitioning.timeMetadata().containsKey("field")) {
                         throw invalidQuery("CREATE TABLE AS SELECT does not support ingestion-time partitioning");
                     }
+                    List<String> clusteringFields = createTableClustering(path.end(), asIndex);
+                    int options = topLevelKeyword(path.end(), asIndex, "OPTIONS");
+                    Map<String, Object> tableOptions = options >= 0
+                            ? tableOptions(options, OptionContext.CREATE_TABLE, asIndex) : null;
                     return new Statement(StatementKind.CREATE_TABLE, "CREATE_TABLE_AS_SELECT", target, null,
                             orReplace, ifNotExists, false, false, false, text(asIndex + 1, tokens.size()), null,
-                            partitioning != null ? partitioning.timeMetadata() : null,
+                            tableOptions, null, partitioning != null ? partitioning.timeMetadata() : null,
                             partitioning != null ? partitioning.rangeMetadata() : null,
-                            partitioning != null ? partitioning.expression() : null);
+                            partitioning != null ? partitioning.expression() : null, clusteringFields,
+                            positionalParametersBefore(asIndex));
                 }
                 int open = nextSignificant(path.end(), tokens.size());
                 if (open < 0 || !tokens.get(open).isPunct("(")) {
                     throw invalidQuery("CREATE TABLE needs a column list, AS SELECT, or COPY source_table");
                 }
-                List<TableFieldSchema> columns = columnDefinitions(open, matchingParen(open));
-                PartitionSpec partitioning = createTablePartitioning(matchingParen(open) + 1, tokens.size());
+                int close = matchingParen(open);
+                List<TableFieldSchema> columns = columnDefinitions(open, close);
+                int suffixStart = close + 1;
+                PartitionSpec partitioning = createTablePartitioning(suffixStart, tokens.size());
+                List<String> clusteringFields = createTableClustering(suffixStart, tokens.size());
+                int options = topLevelKeyword(suffixStart, tokens.size(), "OPTIONS");
+                Map<String, Object> tableOptions = options >= 0
+                        ? tableOptions(options, OptionContext.CREATE_TABLE) : null;
                 return new Statement(StatementKind.CREATE_TABLE, "CREATE_TABLE", target, null, orReplace,
-                        ifNotExists, false, false, false, null, columns,
+                        ifNotExists, false, false, false, null, columns, tableOptions, null,
                         partitioning != null ? partitioning.timeMetadata() : null,
                         partitioning != null ? partitioning.rangeMetadata() : null,
-                        partitioning != null ? partitioning.expression() : null);
+                        partitioning != null ? partitioning.expression() : null, clusteringFields, 0);
             }
             case "VIEW" -> {
                 TableRef target = resolveTable(path.segments());
@@ -2464,10 +2609,23 @@ final class SqlDialectTranslator {
     private static final Set<String> ALTERABLE_OPTIONS = Set.of("description", "friendly_name", "labels",
             "expiration_timestamp");
 
+    /**
+     * BigQuery table options the emulator takes on CREATE TABLE and CREATE TABLE AS SELECT. The first
+     * three are stored in the Table resource, the rest are accepted and ignored; ALTER SET OPTIONS and
+     * CREATE TABLE COPY still reject them.
+     */
+    private static final Set<String> BIGQUERY_TABLE_OPTIONS = Set.of("partition_expiration_days",
+            "require_partition_filter", "kms_key_name", "default_rounding_mode", "enable_change_history",
+            "max_staleness", "enable_fine_grained_mutations", "storage_uri", "file_format", "table_format",
+            "tags");
+
     private static final Set<String> UNSUPPORTED_TABLE_OPTIONS = Set.of("partition_expiration_days",
             "require_partition_filter", "kms_key_name", "default_rounding_mode", "enable_change_history",
             "max_staleness", "enable_fine_grained_mutations", "storage_uri", "file_format", "table_format",
             "tags", "privacy_policy");
+
+    /** Which statement reads an option list: only CREATE TABLE and CREATE TABLE AS SELECT take the extras. */
+    private enum OptionContext { CREATE_TABLE, ALTER, COPY }
 
     /** {@code ALTER {TABLE|VIEW} [IF EXISTS] name SET OPTIONS (name = value, ...)}. */
     private Statement classifyAlter(List<Integer> sig) {
@@ -2492,20 +2650,25 @@ final class SqlDialectTranslator {
         }
         return new Statement(object.equals("TABLE") ? StatementKind.ALTER_TABLE : StatementKind.ALTER_VIEW,
                 "ALTER_" + object, target, null, false, false, ifExists, false, false, null, null,
-                tableOptions(options));
+                tableOptions(options, OptionContext.ALTER));
     }
 
-    private Map<String, Object> tableOptions(int options) {
-        int open = nextSignificant(options + 1, tokens.size());
+    private Map<String, Object> tableOptions(int options, OptionContext context) {
+        return tableOptions(options, context, tokens.size());
+    }
+
+    private Map<String, Object> tableOptions(int options, OptionContext context, int end) {
+        int open = nextSignificant(options + 1, end);
         if (open < 0 || !tokens.get(open).isPunct("(")) {
             throw invalidQuery("Syntax error: Expected \"(\" after OPTIONS");
         }
         int close = matchingParen(open);
-        int trailing = nextSignificant(close + 1, tokens.size());
+        int trailing = nextSignificant(close + 1, end);
         if (trailing >= 0) {
             throw invalidQuery("Syntax error: Unexpected \"" + tokens.get(trailing).text + "\"");
         }
         Map<String, Object> values = new LinkedHashMap<>();
+        List<String> optionNames = new ArrayList<>();
         int depth = 0;
         int start = open + 1;
         int positionalBefore = 0;
@@ -2514,7 +2677,8 @@ final class SqlDialectTranslator {
             if (k == close || (depth == 0 && t.isPunct(","))) {
                 List<Token> item = significant(start, k);
                 if (!item.isEmpty()) {
-                    readOption(item, values, positionalBefore);
+                    readOption(item, values, positionalBefore, context);
+                    optionNames.add(item.getFirst().text.toLowerCase(Locale.ROOT));
                     positionalBefore += (int) item.stream()
                             .filter(token -> token.kind == Kind.POSITIONAL_PARAM).count();
                 }
@@ -2525,22 +2689,36 @@ final class SqlDialectTranslator {
                 depth--;
             }
         }
+        Set<String> seen = new HashSet<>();
+        for (String name : optionNames) {
+            if (!seen.add(name)) {
+                throw invalidQuery("'" + name + "' is specified more than once in table OPTIONS");
+            }
+        }
         return values;
     }
 
-    private static void readOption(List<Token> item, Map<String, Object> values, int positionalBefore) {
+    private static void readOption(List<Token> item, Map<String, Object> values, int positionalBefore,
+                                   OptionContext context) {
         if (item.size() < 3 || item.get(0).kind != Kind.IDENT || !item.get(1).isPunct("=")) {
             throw invalidQuery("Syntax error: Expected an option assignment in OPTIONS");
         }
         String name = item.get(0).text.toLowerCase(Locale.ROOT);
+        List<Token> value = item.subList(2, item.size());
+        boolean nullValue = value.size() == 1 && value.getFirst().isKeyword("NULL");
         if (UNSUPPORTED_TABLE_OPTIONS.contains(name)) {
-            throw invalidQuery("Option " + name + " is not supported by the floci BigQuery emulator yet.");
+            if (context != OptionContext.CREATE_TABLE || !BIGQUERY_TABLE_OPTIONS.contains(name)) {
+                throw invalidQuery("Option " + name + " is not supported by the floci BigQuery emulator yet.");
+            }
+            if (!nullValue) {
+                readBigQueryTableOption(name, value, values);
+            }
+            return;
         }
         if (!ALTERABLE_OPTIONS.contains(name)) {
             throw invalidQuery("Unknown option: " + name);
         }
-        List<Token> value = item.subList(2, item.size());
-        if (value.size() == 1 && value.getFirst().isKeyword("NULL")) {
+        if (nullValue) {
             values.put(name, null);
             return;
         }
@@ -2548,9 +2726,57 @@ final class SqlDialectTranslator {
             case "description", "friendly_name" -> values.put(name, isLiteral(value) ? stringOption(name, value)
                     : optionExpression(name, value, positionalBefore));
             case "labels" -> values.put(name, labelsOption(value));
-            default -> values.put(name, isLiteral(value) || isTimestampLiteral(value) ? timestampOption(value)
-                    : optionExpression(name, value, positionalBefore));
+            case "expiration_timestamp" -> values.put(name,
+                    isLiteral(value) || isTimestampLiteral(value) || context == OptionContext.COPY
+                            ? timestampOption(value)
+                            : optionExpression(name, value, positionalBefore));
+            default -> throw new IllegalStateException("Unhandled ALTER TABLE option: " + name);
         }
+    }
+
+    /**
+     * The values the Table resource has a field for are kept; an expression the emulator does not
+     * evaluate leaves the option unset, which is what the emulator did with the whole list before.
+     */
+    private static void readBigQueryTableOption(String name, List<Token> value, Map<String, Object> values) {
+        switch (name) {
+            case "require_partition_filter" -> {
+                if (value.size() == 1 && value.getFirst().isKeyword("TRUE")) {
+                    values.put(name, Boolean.TRUE);
+                } else if (value.size() == 1 && value.getFirst().isKeyword("FALSE")) {
+                    values.put(name, Boolean.FALSE);
+                }
+            }
+            case "partition_expiration_days" -> {
+                BigDecimal days = null;
+                try {
+                    days = numericOption(value);
+                } catch (NumberFormatException expected) {
+                    // A numeric literal BigDecimal cannot read stays unset, like any other expression value.
+                }
+                if (days != null) {
+                    values.put(name, days);
+                }
+            }
+            case "kms_key_name" -> {
+                if (value.size() == 1 && value.getFirst().kind == Kind.STRING) {
+                    values.put(name, value.getFirst().value);
+                }
+            }
+            default -> { }
+        }
+    }
+
+    /** A numeric literal, optionally signed; null for anything else. */
+    private static BigDecimal numericOption(List<Token> value) {
+        if (value.size() == 1 && value.getFirst().kind == Kind.NUMBER) {
+            return new BigDecimal(value.getFirst().text);
+        }
+        if (value.size() == 2 && (value.getFirst().isPunct("-") || value.getFirst().isPunct("+"))
+                && value.get(1).kind == Kind.NUMBER) {
+            return new BigDecimal(value.getFirst().text + value.get(1).text);
+        }
+        return null;
     }
 
     private static boolean isLiteral(List<Token> value) {
@@ -2797,6 +3023,60 @@ final class SqlDialectTranslator {
         throw invalidQuery("Unsupported PARTITION BY expression in CREATE TABLE: " + expression);
     }
 
+    private List<String> createTableClustering(int from, int to) {
+        int cluster = topLevelKeyword(from, to, "CLUSTER");
+        if (cluster < 0) {
+            return null;
+        }
+        int by = nextSignificant(cluster + 1, to);
+        if (by < 0 || !tokens.get(by).isKeyword("BY")) {
+            throw invalidQuery("Syntax error: Expected BY after CLUSTER");
+        }
+        int options = topLevelKeyword(by + 1, to, "OPTIONS");
+        int end = options >= 0 ? options : to;
+        List<String> fields = new ArrayList<>();
+        int start = by + 1;
+        int depth = 0;
+        for (int index = start; index <= end; index++) {
+            Token token = index < end ? tokens.get(index) : null;
+            if (index == end || depth == 0 && token.isPunct(",")) {
+                List<Token> field = significant(start, index);
+                if (field.isEmpty()) {
+                    throw invalidQuery("Syntax error: Expected a column name in CLUSTER BY");
+                }
+                if (field.size() != 1 || field.getFirst().kind != Kind.IDENT
+                        && field.getFirst().kind != Kind.QIDENT) {
+                    throw invalidQuery("Entries in the CLUSTER BY clause must be column names");
+                }
+                fields.add(field.getFirst().identifierText());
+                start = index + 1;
+            } else if (token.isPunct("(") || token.isPunct("[")) {
+                depth++;
+            } else if (token.isPunct(")") || token.isPunct("]")) {
+                depth--;
+            }
+        }
+        if (fields.size() > 4) {
+            throw invalidQuery(fields.size() + " clustering fields specified, exceeding the limit of 4.");
+        }
+        return List.copyOf(fields);
+    }
+
+    /**
+     * How many positional parameters the text before {@code end} already binds. The {@code ?} of an
+     * {@code OPTIONS} list come before the query of a {@code CREATE TABLE ... AS}, so they take the
+     * parameters the query would otherwise read.
+     */
+    private int positionalParametersBefore(int end) {
+        int count = 0;
+        for (int index = 0; index < end; index++) {
+            if (tokens.get(index).kind == Kind.POSITIONAL_PARAM) {
+                count++;
+            }
+        }
+        return count;
+    }
+
     private static String unquoteIdentifier(String identifier) {
         return identifier.startsWith("`") && identifier.endsWith("`")
                 ? identifier.substring(1, identifier.length() - 1).replace("``", "`") : identifier;
@@ -2821,8 +3101,11 @@ final class SqlDialectTranslator {
         bindPositionalParameters();
         collectCteNames();
         coerceLowercaseTemporalParameters();
+        typeDecimalLiterals();
         rewriteTypedArrayLiterals();
         rewriteTypedStructConstructors();
+        // After the typed constructors, whose STRUCT<a INT64, b INT64> commas would split a select item.
+        groupBySelectAliasPositions();
         rewriteArraySubscripts();
         rewriteSelectAsStruct();
         List<Integer> sig = significantIndexes();
@@ -3853,6 +4136,7 @@ final class SqlDialectTranslator {
         queryResult = true;
         collectCteNames();
         coerceLowercaseTemporalParameters();
+        typeDecimalLiterals();
         topLevelOutputNames = topLevelOutputNames();
         duplicateOutputNames = duplicateNames(topLevelOutputNames);
         validateSelectNameAmbiguity();
@@ -3866,6 +4150,8 @@ final class SqlDialectTranslator {
         nameNestedDuplicateOutputs();
         rewriteTypedArrayLiterals();
         rewriteTypedStructConstructors();
+        // After the typed constructors, whose STRUCT<a INT64, b INT64> commas would split a select item.
+        groupBySelectAliasPositions();
         rewriteArraySubscripts();
         // SELECT AS STRUCT renders its fields to text, so queries nested in them must be rewritten first.
         quoteImplicitSelectAliases();
@@ -3886,6 +4172,7 @@ final class SqlDialectTranslator {
         orderNanLikeBigQuery();
         wrapDuplicateOutputNames();
         String replacementStarExclusion = replacementStarExclusion();
+        wrapSetOperationsOrderedByField();
         String rendered = render(0, tokens.size()).trim();
         if (replacementStarExclusion != null) {
             rendered = "SELECT *" + replacementStarExclusion + " FROM (" + rendered
@@ -3901,11 +4188,19 @@ final class SqlDialectTranslator {
      * cannot see into, and the engine names the struct's type from the query without its ORDER BY.
      */
     private OrderByFieldPaths orderByFieldPaths(String replacementStarExclusion) {
+        int depth = 0;
+        int first = nextSignificant(0, tokens.size());
+        int closing = previousSignificantBefore(tokens.size());
+        while (first >= 0 && closing > first && tokens.get(first).isPunct("(") && matchingParen(first) == closing) {
+            depth++;
+            first = nextSignificant(first + 1, closing);
+            closing = previousSignificantBefore(closing);
+        }
         int order = -1;
         int by = -1;
         for (int i = tokens.size() - 1; i >= 0 && order < 0; i--) {
             by = nextSignificant(i + 1, tokens.size());
-            if (tokens.get(i).isKeyword("ORDER") && parenthesisDepth(i) == 0 && by >= 0
+            if (tokens.get(i).isKeyword("ORDER") && parenthesisDepth(i) == depth && by >= 0
                     && tokens.get(by).isKeyword("BY")) {
                 order = i;
             }
@@ -3913,9 +4208,14 @@ final class SqlDialectTranslator {
         if (order < 0) {
             return null;
         }
-        int end = clauseEnd(by + 1, 0);
+        int end = clauseEnd(by + 1, depth);
         List<List<String>> paths = new ArrayList<>();
         for (int i = by + 1; i < end; i++) {
+            if (tokens.get(i).isPunct("(") && isQuery(i + 1, matchingParen(i))) {
+                // A subquery reads its own FROM, not the outer result.
+                i = matchingParen(i);
+                continue;
+            }
             int before = previousSignificantBefore(i);
             if (!isIdentifierToken(i) || before > by && tokens.get(before).isPunct(".")) {
                 continue;
@@ -3930,6 +4230,12 @@ final class SqlDialectTranslator {
                 dot = nextSignificant(last + 1, end);
                 next = dot < 0 ? -1 : nextSignificant(dot + 1, end);
             }
+            RenamedPath renamed = renamedPaths.get(tokens.get(i));
+            if (renamed != null && path.size() > renamed.names()) {
+                List<String> fromAlias = new ArrayList<>(List.of(renamed.alias()));
+                fromAlias.addAll(path.subList(renamed.names(), path.size()));
+                path = fromAlias;
+            }
             if (path.size() > 1) {
                 paths.add(List.copyOf(path));
             }
@@ -3938,7 +4244,9 @@ final class SqlDialectTranslator {
         if (paths.isEmpty()) {
             return null;
         }
-        String withoutOrderBy = (render(0, order) + render(end, tokens.size())).trim();
+        // A statement wrapped in parentheses is described from inside them.
+        int stop = depth > 0 ? closing + 1 : tokens.size();
+        String withoutOrderBy = (render(depth > 0 ? first : 0, order) + render(end, Math.max(end, stop))).trim();
         if (replacementStarExclusion != null) {
             withoutOrderBy = "SELECT *" + replacementStarExclusion + " FROM (" + withoutOrderBy
                     + ") AS \"_floci_star_replace\"";
@@ -4889,13 +5197,12 @@ final class SqlDialectTranslator {
                 continue;
             }
             Token token = tokens.get(i);
-            if (token.kind != Kind.IDENT || isPrecededByDot(i)
-                    || !STRUCT_STAR_AGGREGATES.contains(token.upper())) {
+            if (token.kind != Kind.IDENT || isPrecededByDot(i)) {
                 i++;
                 continue;
             }
-            int open = nextSignificant(i + 1, end);
-            if (open < 0 || !tokens.get(open).isPunct("(")) {
+            int open = aggregateCallOpen(i, end);
+            if (open < 0) {
                 i++;
                 continue;
             }
@@ -6954,7 +7261,7 @@ final class SqlDialectTranslator {
             }
             int close = matchingParen(i);
             int after = close < 0 ? -1 : nextSignificant(close + 1, tokens.size());
-            return STRUCT_STAR_AGGREGATES.contains(name)
+            return isAggregateCallName(call)
                     && (after < 0 || !tokens.get(after).isKeyword("OVER"));
         }
         return false;
@@ -7181,6 +7488,57 @@ final class SqlDialectTranslator {
             "APPROX_COUNT_DISTINCT", "APPROX_QUANTILES", "APPROX_TOP_COUNT", "APPROX_TOP_SUM", "STDDEV",
             "STDDEV_POP", "STDDEV_SAMP", "VAR_POP", "VAR_SAMP", "VARIANCE", "CORR", "COVAR_POP", "COVAR_SAMP");
 
+    /** The HLL counters that aggregate; {@code HLL_COUNT.EXTRACT} is a scalar and is not one of them. */
+    private static final Set<String> HLL_COUNT_AGGREGATES = Set.of("INIT", "MERGE", "MERGE_PARTIAL");
+
+    /**
+     * The opening parenthesis of the aggregate call that starts at token {@code start}, or -1. GoogleSQL
+     * spells the HLL counters with a qualifier, so their call starts at {@code HLL_COUNT} rather than at
+     * the function name, which a bare set membership test would miss.
+     */
+    private int aggregateCallOpen(int start, int end) {
+        if (start < 0 || start >= tokens.size() || tokens.get(start).kind != Kind.IDENT) {
+            return -1;
+        }
+        String name = tokens.get(start).upper();
+        int function = start;
+        if (name.equals("HLL_COUNT")) {
+            int dot = nextSignificant(start + 1, end);
+            if (dot < 0 || !tokens.get(dot).isPunct(".")) {
+                return -1;
+            }
+            function = nextSignificant(dot + 1, end);
+            if (function < 0 || function >= tokens.size()
+                    || !HLL_COUNT_AGGREGATES.contains(tokens.get(function).upper())) {
+                return -1;
+            }
+        } else if (!STRUCT_STAR_AGGREGATES.contains(name)) {
+            return -1;
+        }
+        int open = nextSignificant(function + 1, end);
+        return open >= 0 && open < end && tokens.get(open).isPunct("(") ? open : -1;
+    }
+
+    /** True when the call whose function name sits at {@code function} is an aggregate, HLL counters included. */
+    private boolean isAggregateCallName(int function) {
+        if (function < 0 || function >= tokens.size()) {
+            return false;
+        }
+        String name = tokens.get(function).upper();
+        if (STRUCT_STAR_AGGREGATES.contains(name)) {
+            return true;
+        }
+        if (!HLL_COUNT_AGGREGATES.contains(name)) {
+            return false;
+        }
+        int dot = significantBefore(function);
+        if (dot < 0 || !tokens.get(dot).isPunct(".")) {
+            return false;
+        }
+        int qualifier = significantBefore(dot);
+        return qualifier >= 0 && tokens.get(qualifier).upper().equals("HLL_COUNT");
+    }
+
     /**
      * Rejects a star over an aggregate that cannot produce a STRUCT. BigQuery errors before expansion, and
      * letting DuckDB do it would return rows for {@code MAX(t.s).*} instead.
@@ -7201,13 +7559,20 @@ final class SqlDialectTranslator {
             return;
         }
         Token token = tokens.get(first);
-        if (token.kind != Kind.IDENT || !STRUCT_STAR_AGGREGATES.contains(token.upper())
-                || token.isKeyword("ANY_VALUE")) {
+        if (token.kind != Kind.IDENT || token.isKeyword("ANY_VALUE")) {
             return;
         }
-        int open = nextSignificant(first + 1, operand[1]);
-        if (open < 0 || !tokens.get(open).isPunct("(")) {
+        int open = aggregateCallOpen(first, operand[1]);
+        if (open < 0) {
             return;
+        }
+        if (token.upper().equals("HLL_COUNT")) {
+            // BigQuery names the type the counter returns: MERGE estimates in INT64, the sketch
+            // forms in BYTES.
+            int hllDot = nextSignificant(first + 1, operand[1]);
+            int counter = hllDot < 0 ? -1 : nextSignificant(hllDot + 1, operand[1]);
+            String type = counter >= 0 && tokens.get(counter).upper().equals("MERGE") ? "INT64" : "BYTES";
+            throw invalidQuery("Dot-star is not supported for type " + type);
         }
         int close = matchingParen(open);
         int afterCall = close < 0 ? -1 : nextNonSpace(close + 1, operand[1]);
@@ -7280,13 +7645,12 @@ final class SqlDialectTranslator {
     private boolean structStarAggregates(int start, int end) {
         for (int i = start; i < end; i++) {
             Token token = tokens.get(i);
-            if (token.kind != Kind.IDENT || !STRUCT_STAR_AGGREGATES.contains(token.upper())
-                    || insideNestedQuery(i, start)) {
+            if (token.kind != Kind.IDENT || isPrecededByDot(i) || insideNestedQuery(i, start)) {
                 // An aggregate inside a nested query belongs to that query, not to this one.
                 continue;
             }
-            int next = nextSignificant(i + 1, end);
-            if (next >= 0 && tokens.get(next).isPunct("(")) {
+            int next = aggregateCallOpen(i, end);
+            if (next >= 0) {
                 // A call, not an alias: `sum.s.*` reads a source named `sum`, it does not aggregate. A call
                 // followed by OVER is a window function, which computes per row rather than per group.
                 int close = matchingParen(next);
@@ -8766,6 +9130,95 @@ final class SqlDialectTranslator {
                 validateSourceReferences(select);
             }
         }
+    }
+
+    /**
+     * BigQuery resolves a bare {@code GROUP BY} name to a select alias before a source column: "aliases override
+     * names in the corresponding FROM clause". DuckDB binds the source column first, so {@code SELECT MOD(id, 2)
+     * AS id ... GROUP BY id} groups by {@code t.id}, and a name two joined sources expose is ambiguous. A bare name
+     * that one select item outputs from another expression is therefore replaced by that item's position.
+     */
+    private void groupBySelectAliasPositions() {
+        for (int select = 0; select < tokens.size(); select++) {
+            if (tokens.get(select).isKeyword("SELECT")) {
+                groupBySelectAliasPositions(select);
+            }
+        }
+    }
+
+    private void groupBySelectAliasPositions(int select) {
+        List<int[]> items = selectItems(select);
+        // Positions after a star depend on its expansion, which is not known here.
+        if (items == null || items.stream().anyMatch(this::expandsStar)) {
+            return;
+        }
+        int depth = parenthesisDepth(select);
+        int tailStart = items.getLast()[1];
+        int end = structStarArmEnd(tailStart, structStarQueryEnd(select), depth);
+        end = structStarSetOperationTail(select, tailStart, end, depth);
+        int group = structStarClauseStart(tailStart, end, depth, "GROUP");
+        int by = group < 0 ? -1 : nextSignificant(group + 1, end);
+        if (by < 0 || !tokens.get(by).isKeyword("BY")) {
+            return;
+        }
+        for (int[] groupItem : topLevelRanges(by + 1, Math.min(clauseEnd(by + 1, depth), end), depth)) {
+            int name = nextSignificant(groupItem[0], groupItem[1]);
+            if (name < 0 || significant(groupItem[0], groupItem[1]).size() != 1 || !isName(tokens.get(name))
+                    || tokens.get(name).isKeyword(ALL)) {
+                continue;
+            }
+            int position = selectAliasPosition(items, tokens.get(name).identifierText());
+            if (position > 0) {
+                tokens.set(name, new Token(Kind.NUMBER, String.valueOf(position), null));
+            }
+        }
+    }
+
+    /**
+     * The 1-based position of the one select item that outputs {@code name} from an expression other than the
+     * column of that name, or -1. An item that is that column itself ({@code SELECT id}) resolves the same either
+     * way, a name several items output is ambiguous, and an aggregate or window item cannot be grouped by, so
+     * those keep the name as written. Only an alias or a column path names an output: {@code SELECT id - id}
+     * has no alias, so its trailing {@code id} is not one.
+     */
+    private int selectAliasPosition(List<int[]> items, String name) {
+        int found = -1;
+        for (int index = 0; index < items.size(); index++) {
+            int[] item = items.get(index);
+            if (namesOutput(item) && name.equalsIgnoreCase(outputNameText(item[0], item[1]))) {
+                if (found >= 0) {
+                    return -1;
+                }
+                found = index;
+            }
+        }
+        if (found < 0) {
+            return -1;
+        }
+        int[] item = items.get(found);
+        int as = topLevelAs(item[0], item[1]);
+        int alias = as >= 0 ? as : implicitSelectAlias(item[0], item[1]);
+        int expressionEnd = alias >= 0 ? alias : item[1];
+        List<Token> expression = significant(item[0], expressionEnd);
+        boolean sameColumn = expression.size() == 1 && isName(expression.getFirst())
+                && expression.getFirst().identifierText().equalsIgnoreCase(name);
+        int first = nextSignificant(item[0], expressionEnd);
+        if (sameColumn || first < 0 || structStarAggregates(first, expressionEnd)
+                || hasWindowExpression(item[0], expressionEnd)) {
+            return -1;
+        }
+        return found + 1;
+    }
+
+    /** True when a select item names its column: an explicit or implicit alias, or a column path. */
+    private boolean namesOutput(int[] item) {
+        if (topLevelAs(item[0], item[1]) >= 0 || implicitSelectAlias(item[0], item[1]) >= 0) {
+            return true;
+        }
+        List<Token> significant = significant(item[0], item[1]);
+        // nameAnonymousColumns appends " AS <name>" as a single raw token.
+        return !significant.isEmpty()
+                && (parenthesizedPath(significant) != null || significant.getLast().kind == Kind.RAW);
     }
 
     private void validateSourceReferences(int select) {
@@ -10421,13 +10874,752 @@ final class SqlDialectTranslator {
             "DATETIME_ADD", "DATETIME_SUB", "DATETIME_TRUNC", "DATE_ADD", "DATE_SUB", "DATE_TRUNC", "PARSE_TIMESTAMP",
             "PARSE_DATETIME", "PARSE_DATE", "TIMESTAMP_SECONDS", "TIMESTAMP_MILLIS", "TIMESTAMP_MICROS");
 
+    private static final Set<String> NUMERIC_TYPE_NAMES = Set.of("NUMERIC", "BIGNUMERIC", "DECIMAL", "BIGDECIMAL");
+    private static final Set<String> NUMERIC_KEEPING_FUNCTIONS = Set.of("SUM", "MIN", "MAX", "ANY_VALUE", "ABS",
+            "ROUND", "TRUNC", "CEIL", "CEILING", "FLOOR");
+    private static final Set<String> COMMON_TYPE_FUNCTIONS = Set.of("COALESCE", "IFNULL", "IF", "GREATEST", "LEAST",
+            "NULLIF");
+    private static final Set<String> MULTIPLICATIVE = Set.of("*", "/");
+    private static final Set<String> ADDITIVE = Set.of("+", "-");
+
     /**
-     * BigQuery coerces a STRING parameter written like a timestamp with a lowercase {@code t} separator or
-     * {@code z} zone ({@code 2014-09-27t12:30:00z}) when it is compared with a TIMESTAMP, DATETIME or DATE.
-     * DuckDB cannot parse the lowercase forms, so such a parameter is rendered as the uppercased literal, which
-     * DuckDB casts implicitly as it does an uppercase one, but only where the other side of the comparison (or of
-     * a BETWEEN) is temporal as written: a typed literal, a temporal function or CAST, or a table column of that
-     * type. Read anywhere else, the value stays the STRING the caller passed.
+     * BigQuery types a decimal literal ({@code 0.5}, {@code 1.5e2}) FLOAT64, where DuckDB reads it as a DECIMAL,
+     * but it coerces such a literal to NUMERIC where it meets a NUMERIC value: {@code CAST(1 AS NUMERIC) + 0.5} and
+     * {@code COALESCE(n, 0.5)} are NUMERIC, {@code 2 * 0.5} and {@code STRUCT(x + 0.5)} are FLOAT64. Each chain is
+     * evaluated as BigQuery evaluates it, products before sums and each left to right, so a literal is NUMERIC only
+     * where the value it meets at that point is: {@code 0.1 + 0.2 + n} is FLOAT64, {@code 0.5 + n + 0.25} NUMERIC. A
+     * literal alone on its side takes NUMERIC from the other side of a comparison, an {@code IN} list or
+     * {@code BETWEEN}, or another value of a {@code COALESCE}-like call, an array literal or {@code CASE} results;
+     * parentheses that only group it are looked through. Visibly NUMERIC means a NUMERIC or BIGNUMERIC column, cast,
+     * typed literal, query or temporary function parameter, or SUM, MIN, MAX, ABS, ROUND, TRUNC, CEIL or FLOOR of
+     * one. A bare value of INSERT ... VALUES or of an UPDATE or MERGE SET keeps its DECIMAL, so DuckDB casts it to the
+     * column exactly, as does a {@code TABLESAMPLE} percentage.
+     */
+    private void typeDecimalLiterals() {
+        for (int i = 0; i < tokens.size(); i++) {
+            Token token = tokens.get(i);
+            String text = token.kind == Kind.NUMBER ? token.text.toLowerCase(Locale.ROOT) : "";
+            if ((text.contains(".") || text.contains("e")) && !keepsDecimal(i)) {
+                floatLiterals.add(token);
+            }
+        }
+    }
+
+    private boolean keepsDecimal(int literal) {
+        int next = nextSignificant(literal + 1, tokens.size());
+        if (next >= 0 && tokens.get(next).isKeyword("PERCENT") || assignedValue(signedStart(literal), literal)) {
+            return true;
+        }
+        int[] group = literalGroup(literal);
+        if (group[0] != literal && assignedValue(group[0], group[1])) {
+            return true;
+        }
+        List<int[]> operands = new ArrayList<>();
+        List<String> operators = new ArrayList<>();
+        operandChain(group[0], group[1], operands, operators);
+        Map<Integer, Boolean> decisions = new HashMap<>();
+        List<Typed> sides = chainSides(operands, operators, decisions);
+        if (sides.size() > 1) {
+            for (int s = 0; s < sides.size(); s++) {
+                if (sides.get(s).type() == DecimalType.LITERAL) {
+                    boolean numeric = false;
+                    for (int o = 0; o < sides.size(); o++) {
+                        numeric |= o != s && sides.get(o).type() == DecimalType.NUMERIC;
+                    }
+                    decisions.put(sides.get(s).literal(), numeric);
+                }
+            }
+        } else if (sides.getFirst().type() == DecimalType.LITERAL) {
+            decisions.put(sides.getFirst().literal(), siblingNumeric(group[0], group[1])
+                    || comparedNumeric(group[0], group[1]) || numericTarget(group[0], group[1]));
+        }
+        return decisions.getOrDefault(literal, false);
+    }
+
+    /** What an operand or a partial result is to a decimal literal: NUMERIC, FLOAT64, anything else, or a literal. */
+    private enum DecimalType { NUMERIC, FLOAT, OTHER, LITERAL }
+
+    /** A {@link DecimalType}, with the token of the decimal literal when it is one whose type is still open. */
+    private record Typed(DecimalType type, int literal) {
+        static final Typed NUMERIC = new Typed(DecimalType.NUMERIC, -1);
+        static final Typed FLOAT = new Typed(DecimalType.FLOAT, -1);
+        static final Typed OTHER = new Typed(DecimalType.OTHER, -1);
+    }
+
+    /** The decimal literal at {@code literal}, widened over a sign and the parentheses that only group it. */
+    private int[] literalGroup(int literal) {
+        int start = signedStart(literal);
+        int end = literal;
+        while (true) {
+            int open = significantBefore(start);
+            int close = nextSignificant(end + 1, tokens.size());
+            int name = open < 0 ? -1 : significantBefore(open);
+            if (open < 0 || close < 0 || !tokens.get(open).isPunct("(") || matchingParen(open) != close
+                    || !groupingParenthesis(open) || name >= 0 && (tokens.get(name).isKeyword("IN")
+                    || tokens.get(name).isKeyword("VALUES")) || typeAngleOpen(name) >= 0) {
+                return new int[] {start, end};
+            }
+            start = signedStart(open);
+            end = close;
+        }
+    }
+
+    /**
+     * Types the chain's comparison sides, each a sum of products evaluated left to right as BigQuery does, and
+     * records in {@code decisions} which decimal literals meet a NUMERIC value on the way.
+     */
+    private List<Typed> chainSides(List<int[]> operands, List<String> operators, Map<Integer, Boolean> decisions) {
+        List<Typed> sides = new ArrayList<>();
+        int from = 0;
+        for (int k = 0; k <= operators.size(); k++) {
+            if (k == operators.size() || COMPARISON_OPERATORS.contains(operators.get(k))) {
+                List<Typed> terms = new ArrayList<>();
+                int termStart = from;
+                for (int f = from; f <= k; f++) {
+                    if (f == k || ADDITIVE.contains(operators.get(f))) {
+                        List<Typed> factors = new ArrayList<>();
+                        for (int g = termStart; g <= f; g++) {
+                            factors.add(operandType(operands.get(g)[0], operands.get(g)[1]));
+                        }
+                        terms.add(sequenceType(factors, decisions));
+                        termStart = f + 1;
+                    }
+                }
+                sides.add(sequenceType(terms, decisions));
+                from = k + 1;
+            }
+        }
+        return sides;
+    }
+
+    /**
+     * Folds operands joined by operators of one precedence, left to right: a decimal literal is NUMERIC only where the
+     * value it meets so far is, so {@code 0.1 + 0.2 + n} is FLOAT64 and {@code 0.5 + n + 0.25} NUMERIC.
+     */
+    private static Typed sequenceType(List<Typed> items, Map<Integer, Boolean> decisions) {
+        Typed result = items.getFirst();
+        for (int k = 1; k < items.size(); k++) {
+            Typed next = items.get(k);
+            boolean nextLiteral = next.type() == DecimalType.LITERAL;
+            result = switch (result.type()) {
+                case LITERAL -> {
+                    boolean numeric = next.type() == DecimalType.NUMERIC;
+                    decisions.put(result.literal(), numeric);
+                    if (nextLiteral) {
+                        decisions.put(next.literal(), false);
+                    }
+                    yield numeric ? Typed.NUMERIC : Typed.FLOAT;
+                }
+                case NUMERIC -> {
+                    if (nextLiteral) {
+                        decisions.put(next.literal(), true);
+                    }
+                    yield next.type() == DecimalType.FLOAT ? Typed.FLOAT : Typed.NUMERIC;
+                }
+                case FLOAT -> {
+                    if (nextLiteral) {
+                        decisions.put(next.literal(), false);
+                    }
+                    yield Typed.FLOAT;
+                }
+                case OTHER -> {
+                    if (nextLiteral) {
+                        decisions.put(next.literal(), false);
+                    }
+                    yield nextLiteral ? Typed.FLOAT : next.type() == DecimalType.OTHER ? Typed.OTHER
+                            : next.type() == DecimalType.NUMERIC ? Typed.NUMERIC : Typed.FLOAT;
+                }
+            };
+        }
+        return result;
+    }
+
+    /** The type of one operand: a decimal literal (signed or grouped), NUMERIC, FLOAT64 from a group, or other. */
+    private Typed operandType(int start, int end) {
+        int first = start;
+        if (tokens.get(first).isPunct("-") || tokens.get(first).isPunct("+")) {
+            first = nextSignificant(first + 1, end + 1);
+            if (first < 0) {
+                return Typed.OTHER;
+            }
+        }
+        Token token = tokens.get(first);
+        if (first == end && token.kind == Kind.NUMBER) {
+            String text = token.text.toLowerCase(Locale.ROOT);
+            return text.contains(".") || text.contains("e") ? new Typed(DecimalType.LITERAL, first) : Typed.OTHER;
+        }
+        if (token.isPunct("(") && matchingParen(first) == end && groupingParenthesis(first)) {
+            return valueType(first + 1, end);
+        }
+        return visiblyNumeric(start, end) ? Typed.NUMERIC : Typed.OTHER;
+    }
+
+    /**
+     * Collects the operands and operators of the arithmetic or comparison chain around the operand from
+     * {@code start} to {@code end}, left to right. A unary sign belongs to its operand.
+     */
+    private void operandChain(int start, int end, List<int[]> operands, List<String> operators) {
+        operands.add(new int[] {start, end});
+        while (true) {
+            int op = significantBefore(operands.getFirst()[0]);
+            if (op < 0 || !chainOperator(op)) {
+                break;
+            }
+            int last = significantBefore(op);
+            if (last < 0 || !endsOperand(last)) {
+                break;
+            }
+            int begin = operandStart(last);
+            if (begin < 0) {
+                break;
+            }
+            operands.addFirst(new int[] {signedStart(begin), last});
+            operators.addFirst(tokens.get(op).text);
+        }
+        while (true) {
+            int op = nextSignificant(operands.getLast()[1] + 1, tokens.size());
+            if (op < 0 || !chainOperator(op)) {
+                break;
+            }
+            int begin = nextSignificant(op + 1, tokens.size());
+            int sign = begin;
+            if (begin >= 0 && (tokens.get(begin).isPunct("-") || tokens.get(begin).isPunct("+"))) {
+                begin = nextSignificant(begin + 1, tokens.size());
+            }
+            if (begin < 0) {
+                break;
+            }
+            int last = tokens.get(begin).isPunct("(") ? matchingParen(begin) : operandEnd(begin);
+            if (last < begin) {
+                break;
+            }
+            operands.add(new int[] {sign, last});
+            operators.add(tokens.get(op).text);
+        }
+    }
+
+    /**
+     * Whether the value an {@code IN} list or a {@code BETWEEN} bound is compared with is NUMERIC, for a literal that
+     * is a whole list element or bound, or whether a list element or bound is, for a literal that is the value.
+     */
+    private boolean comparedNumeric(int start, int end) {
+        int left = significantBefore(start);
+        int right = nextSignificant(end + 1, tokens.size());
+        if (left >= 0 && (tokens.get(left).isPunct("(") || tokens.get(left).isPunct(","))) {
+            int open = tokens.get(left).isPunct("(") ? left : openerBefore(left);
+            int in = open < 0 ? -1 : significantBefore(open);
+            if (in >= 0 && tokens.get(in).isKeyword("IN")) {
+                return comparedValueNumeric(in);
+            }
+        }
+        if (left >= 0 && tokens.get(left).isKeyword("BETWEEN")) {
+            int and = betweenAnd(left);
+            return comparedValueNumeric(left) || and >= 0 && boundNumeric(and);
+        }
+        if (left >= 0 && tokens.get(left).isKeyword("AND")) {
+            int between = andBetween(left);
+            if (between >= 0) {
+                return comparedValueNumeric(between) || valueNumeric(between + 1, left);
+            }
+        }
+        if (right >= 0 && tokens.get(right).isKeyword("NOT")) {
+            right = nextSignificant(right + 1, tokens.size());
+        }
+        if (right >= 0 && tokens.get(right).isKeyword("IN")) {
+            int open = nextSignificant(right + 1, tokens.size());
+            if (open < 0 || !tokens.get(open).isPunct("(") || isQuery(open + 1, matchingParen(open))) {
+                return false;
+            }
+            for (int[] value : argumentRanges(open, matchingParen(open))) {
+                if (valueNumeric(value[0], value[1])) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if (right >= 0 && tokens.get(right).isKeyword("BETWEEN")) {
+            int and = betweenAnd(right);
+            return and >= 0 && (valueNumeric(right + 1, and) || boundNumeric(and));
+        }
+        return false;
+    }
+
+    /**
+     * The {@code <} of the {@code STRUCT<...>} or {@code ARRAY<...>} type whose closing {@code >} is at {@code close},
+     * or -1 when that token closes no such type (a comparison, for one).
+     */
+    private int typeAngleOpen(int close) {
+        if (close < 0 || !tokens.get(close).isPunct(">")) {
+            return -1;
+        }
+        int nesting = 0;
+        for (int i = close - 1; i >= 0; i--) {
+            if (tokens.get(i).isPunct(">")) {
+                nesting++;
+            } else if (tokens.get(i).isPunct("<")) {
+                if (nesting == 0) {
+                    int keyword = significantBefore(i);
+                    return keyword >= 0 && (tokens.get(keyword).isKeyword("STRUCT")
+                            || tokens.get(keyword).isKeyword("ARRAY")) ? i : -1;
+                }
+                nesting--;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * Whether the operand is the whole value of a NUMERIC or BIGNUMERIC target, which BigQuery coerces a literal to
+     * directly: {@code CAST(... AS NUMERIC)}, an element of {@code ARRAY<NUMERIC>[...]} or a field of
+     * {@code STRUCT<n NUMERIC>(...)}.
+     */
+    private boolean numericTarget(int start, int end) {
+        int left = significantBefore(start);
+        int right = nextSignificant(end + 1, tokens.size());
+        if (left < 0 || right < 0) {
+            return false;
+        }
+        if (tokens.get(left).isPunct("(") && tokens.get(right).isKeyword("AS")) {
+            int name = significantBefore(left);
+            int type = nextSignificant(right + 1, tokens.size());
+            return name >= 0 && (tokens.get(name).isKeyword("CAST") || tokens.get(name).isKeyword("SAFE_CAST"))
+                    && type >= 0 && NUMERIC_TYPE_NAMES.contains(tokens.get(type).upper());
+        }
+        Token l = tokens.get(left);
+        Token r = tokens.get(right);
+        boolean element = (l.isPunct("(") || l.isPunct(",") || l.isPunct("["))
+                && (r.isPunct(")") || r.isPunct(",") || r.isPunct("]"));
+        if (!element) {
+            return false;
+        }
+        int open = l.isPunct(",") ? openerBefore(left) : left;
+        int function = open < 0 || !tokens.get(open).isPunct("(") ? -1 : significantBefore(open);
+        List<Boolean> numericArguments = function < 0 || tokens.get(function).kind != Kind.IDENT ? null
+                : numericFunctionParameters.get(tokens.get(function).identifierText().toLowerCase(Locale.ROOT));
+        if (numericArguments != null) {
+            List<int[]> args = argumentRanges(open, matchingParen(open));
+            for (int k = 0; k < args.size() && k < numericArguments.size(); k++) {
+                if (args.get(k)[0] <= start && start < args.get(k)[1]) {
+                    return numericArguments.get(k);
+                }
+            }
+            return false;
+        }
+        int typeClose = open < 0 ? -1 : significantBefore(open);
+        int typeOpen = typeAngleOpen(typeClose);
+        if (typeOpen < 0) {
+            return false;
+        }
+        int keyword = significantBefore(typeOpen);
+        List<List<Integer>> fields = new ArrayList<>(List.of(new ArrayList<>()));
+        int nesting = 0;
+        for (int i = typeOpen + 1; i < typeClose; i++) {
+            Token token = tokens.get(i);
+            if (token.isPunct("<") || token.isPunct("(")) {
+                nesting++;
+            } else if (token.isPunct(">") || token.isPunct(")")) {
+                nesting--;
+            } else if (nesting == 0 && token.isPunct(",")) {
+                fields.add(new ArrayList<>());
+            } else if (nesting == 0 && token.kind == Kind.IDENT) {
+                fields.getLast().add(i);
+            }
+        }
+        int field;
+        if (tokens.get(keyword).isKeyword("ARRAY") && tokens.get(open).isPunct("[")) {
+            field = 0;
+        } else if (tokens.get(keyword).isKeyword("STRUCT") && tokens.get(open).isPunct("(")) {
+            List<int[]> args = argumentRanges(open, matchingParen(open));
+            field = -1;
+            for (int k = 0; k < args.size(); k++) {
+                if (args.get(k)[0] <= start && start < args.get(k)[1]) {
+                    field = k;
+                }
+            }
+        } else {
+            return false;
+        }
+        return field >= 0 && field < fields.size() && !fields.get(field).isEmpty()
+                && NUMERIC_TYPE_NAMES.contains(tokens.get(fields.get(field).getLast()).upper());
+    }
+
+    /** Whether the operand before the {@code IN} or {@code BETWEEN} at {@code keyword}, past a NOT, is NUMERIC. */
+    private boolean comparedValueNumeric(int keyword) {
+        int last = significantBefore(keyword);
+        if (last >= 0 && tokens.get(last).isKeyword("NOT")) {
+            last = significantBefore(last);
+        }
+        int first = last < 0 ? -1 : operandStart(last);
+        return first >= 0 && visiblyNumeric(signedStart(first), last);
+    }
+
+    /** Whether the upper bound after the {@code AND} of a {@code BETWEEN} is NUMERIC. */
+    private boolean boundNumeric(int and) {
+        int first = nextSignificant(and + 1, tokens.size());
+        int value = first >= 0 && (tokens.get(first).isPunct("-") || tokens.get(first).isPunct("+"))
+                ? nextSignificant(first + 1, tokens.size()) : first;
+        int last = value < 0 ? -1 : tokens.get(value).isPunct("(") ? matchingParen(value) : operandEnd(value);
+        return last >= 0 && valueNumeric(first, last + 1);
+    }
+
+    /** The {@code AND} that closes the {@code BETWEEN} at {@code between}, or -1. */
+    private int betweenAnd(int between) {
+        int depth = parenthesisDepth(between);
+        for (int i = between + 1; i < tokens.size(); i++) {
+            if (parenthesisDepth(i) < depth) {
+                return -1;
+            }
+            if (parenthesisDepth(i) == depth && tokens.get(i).isKeyword("AND")) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /** The {@code BETWEEN} the {@code AND} at {@code and} closes, or -1 when it is a logical AND. */
+    private int andBetween(int and) {
+        int depth = parenthesisDepth(and);
+        for (int i = and - 1; i >= 0; i--) {
+            if (parenthesisDepth(i) != depth) {
+                if (parenthesisDepth(i) < depth) {
+                    return -1;
+                }
+                continue;
+            }
+            Token token = tokens.get(i);
+            if (token.isKeyword("BETWEEN")) {
+                return i;
+            }
+            if (token.isPunct(",") || token.isKeyword("AND") || token.isKeyword("OR") || token.isKeyword("WHERE")
+                    || token.isKeyword("ON") || token.isKeyword("WHEN") || token.isKeyword("THEN")
+                    || token.isKeyword("SELECT") || token.isKeyword("HAVING")) {
+                return -1;
+            }
+        }
+        return -1;
+    }
+
+    private boolean chainOperator(int index) {
+        Token token = tokens.get(index);
+        return token.kind == Kind.PUNCT && (MULTIPLICATIVE.contains(token.text) || ADDITIVE.contains(token.text)
+                || COMPARISON_OPERATORS.contains(token.text));
+    }
+
+    /** Whether the token at {@code end} can close an operand, so that a sign after it is binary. */
+    private boolean endsOperand(int end) {
+        Token token = tokens.get(end);
+        return token.kind == Kind.NUMBER || token.kind == Kind.STRING || token.kind == Kind.NAMED_PARAM
+                || token.kind == Kind.POSITIONAL_PARAM || token.kind == Kind.QIDENT || token.isPunct(")")
+                || token.isPunct("]") || token.kind == Kind.IDENT && !NON_ALIAS_KEYWORDS.contains(token.upper());
+    }
+
+    /** The start of the operand at {@code start}, taking in a unary sign before it. */
+    private int signedStart(int start) {
+        int sign = significantBefore(start);
+        if (sign >= 0 && (tokens.get(sign).isPunct("-") || tokens.get(sign).isPunct("+"))) {
+            int before = significantBefore(sign);
+            if (before < 0 || !endsOperand(before)) {
+                return sign;
+            }
+        }
+        return start;
+    }
+
+    /** Whether another argument of the call, array literal or CASE around the operand is NUMERIC. */
+    private boolean siblingNumeric(int start, int end) {
+        int left = significantBefore(start);
+        int right = nextSignificant(end + 1, tokens.size());
+        if (left < 0 || right < 0) {
+            return false;
+        }
+        Token l = tokens.get(left);
+        if (l.isKeyword("THEN") || l.isKeyword("ELSE")) {
+            return caseResultNumeric(left);
+        }
+        Token r = tokens.get(right);
+        if (!(l.isPunct("(") || l.isPunct(",") || l.isPunct("["))
+                || !(r.isPunct(")") || r.isPunct(",") || r.isPunct("]"))) {
+            return false;
+        }
+        int open = l.isPunct(",") ? openerBefore(left) : left;
+        if (open < 0) {
+            return false;
+        }
+        boolean array = tokens.get(open).isPunct("[");
+        int name = significantBefore(open);
+        if (!array && (name < 0 || !COMMON_TYPE_FUNCTIONS.contains(tokens.get(name).upper()))) {
+            return false;
+        }
+        int close = array ? matchingBracket(open) : matchingParen(open);
+        List<int[]> args = argumentRanges(open, close);
+        boolean conditional = !array && tokens.get(name).isKeyword("IF");
+        for (int k = conditional ? 1 : 0; k < args.size(); k++) {
+            int[] arg = args.get(k);
+            if ((arg[1] <= start || arg[0] > end) && valueNumeric(arg[0], arg[1])) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** The unmatched ( or [ before {@code index}. */
+    private int openerBefore(int index) {
+        int depth = 0;
+        for (int i = index - 1; i >= 0; i--) {
+            Token token = tokens.get(i);
+            if (token.isPunct(")") || token.isPunct("]")) {
+                depth++;
+            } else if (token.isPunct("(") || token.isPunct("[")) {
+                if (depth == 0) {
+                    return i;
+                }
+                depth--;
+            }
+        }
+        return -1;
+    }
+
+    /** Whether a THEN or ELSE result of the CASE around {@code keyword}, other than the one after it, is NUMERIC. */
+    private boolean caseResultNumeric(int keyword) {
+        int depth = parenthesisDepth(keyword);
+        int caseStart = -1;
+        int nesting = 0;
+        for (int i = keyword - 1; i >= 0; i--) {
+            if (parenthesisDepth(i) != depth) {
+                continue;
+            }
+            if (tokens.get(i).isKeyword("END")) {
+                nesting++;
+            } else if (tokens.get(i).isKeyword("CASE")) {
+                if (nesting == 0) {
+                    caseStart = i;
+                    break;
+                }
+                nesting--;
+            }
+        }
+        if (caseStart < 0) {
+            return false;
+        }
+        int own = nextSignificant(keyword + 1, tokens.size());
+        nesting = 0;
+        int resultStart = -1;
+        for (int i = caseStart + 1; i < tokens.size(); i++) {
+            if (parenthesisDepth(i) != depth) {
+                continue;
+            }
+            Token token = tokens.get(i);
+            if (nesting == 0 && resultStart >= 0
+                    && (token.isKeyword("WHEN") || token.isKeyword("ELSE") || token.isKeyword("END"))) {
+                if (resultStart != own && valueNumeric(resultStart, i)) {
+                    return true;
+                }
+                resultStart = -1;
+            }
+            if (nesting == 0 && (token.isKeyword("THEN") || token.isKeyword("ELSE"))) {
+                resultStart = nextSignificant(i + 1, tokens.size());
+            }
+            if (token.isKeyword("CASE")) {
+                nesting++;
+            } else if (token.isKeyword("END")) {
+                if (nesting == 0) {
+                    break;
+                }
+                nesting--;
+            }
+        }
+        return false;
+    }
+
+    /** Whether the value from {@code start} to before {@code end} is NUMERIC, evaluated as BigQuery does. */
+    private boolean valueNumeric(int start, int end) {
+        return valueType(start, end).type() == DecimalType.NUMERIC;
+    }
+
+    /** The type of the value from {@code start} to before {@code end}; a comparison or anything unparsed is other. */
+    private Typed valueType(int start, int end) {
+        List<int[]> operands = new ArrayList<>();
+        List<String> operators = new ArrayList<>();
+        int at = nextSignificant(start, end);
+        while (at >= 0 && at < end) {
+            int operandFirst = at;
+            if (tokens.get(at).isPunct("-") || tokens.get(at).isPunct("+")) {
+                at = nextSignificant(at + 1, end);
+                if (at < 0) {
+                    return Typed.OTHER;
+                }
+            }
+            int operandLast = tokens.get(at).isPunct("(") ? matchingParen(at) : operandEnd(at);
+            if (operandLast < at || operandLast >= end) {
+                return Typed.OTHER;
+            }
+            operands.add(new int[] {operandFirst, operandLast});
+            int op = nextSignificant(operandLast + 1, end);
+            if (op < 0) {
+                break;
+            }
+            if (!chainOperator(op)) {
+                return Typed.OTHER;
+            }
+            operators.add(tokens.get(op).text);
+            at = nextSignificant(op + 1, end);
+        }
+        if (operands.isEmpty() || operators.size() >= operands.size()) {
+            return Typed.OTHER;
+        }
+        List<Typed> sides = chainSides(operands, operators, new HashMap<>());
+        return sides.size() == 1 ? sides.getFirst() : Typed.OTHER;
+    }
+
+    /** Whether the operand from {@code start} to {@code end} is visibly NUMERIC or BIGNUMERIC. */
+    private boolean visiblyNumeric(int start, int end) {
+        if (tokens.get(start).isPunct("-") || tokens.get(start).isPunct("+")) {
+            start = nextSignificant(start + 1, end + 1);
+            if (start < 0) {
+                return false;
+            }
+        }
+        Token first = tokens.get(start);
+        if (first.isPunct("(") && matchingParen(start) == end) {
+            return valueNumeric(start + 1, end);
+        }
+        if (first.kind == Kind.NAMED_PARAM) {
+            return start == end && numericParameter(parameters.named(first.value));
+        }
+        if (first.kind == Kind.POSITIONAL_PARAM) {
+            return start == end && numericParameter(first.value);
+        }
+        if (first.kind == Kind.IDENT && NUMERIC_TYPE_NAMES.contains(first.upper())
+                && tokens.get(end).kind == Kind.STRING) {
+            return true;
+        }
+        if (first.kind == Kind.STRING && start == end) {
+            // The value of a typed literal (NUMERIC '1'), when the chain took the string alone.
+            int type = significantBefore(start);
+            return type >= 0 && tokens.get(type).kind == Kind.IDENT
+                    && NUMERIC_TYPE_NAMES.contains(tokens.get(type).upper());
+        }
+        if (tokens.get(end).isPunct(")") && first.kind == Kind.IDENT) {
+            int open = nextSignificant(start + 1, end);
+            if (open < 0 || !tokens.get(open).isPunct("(")) {
+                return false;
+            }
+            if (first.isKeyword("CAST") || first.isKeyword("SAFE_CAST")) {
+                int depth = parenthesisDepth(open) + 1;
+                for (int i = open + 1; i < end; i++) {
+                    if (parenthesisDepth(i) == depth && tokens.get(i).isKeyword("AS")) {
+                        int type = nextSignificant(i + 1, end);
+                        return type >= 0 && NUMERIC_TYPE_NAMES.contains(tokens.get(type).upper());
+                    }
+                }
+                return false;
+            }
+            if (NUMERIC_KEEPING_FUNCTIONS.contains(first.upper())) {
+                List<int[]> args = argumentRanges(open, end);
+                if (args.isEmpty()) {
+                    return false;
+                }
+                int argument = args.getFirst()[0];
+                int modifier = nextSignificant(argument, args.getFirst()[1]);
+                if (modifier >= 0 && tokens.get(modifier).isKeyword("DISTINCT")) {
+                    argument = modifier + 1;
+                }
+                return valueNumeric(argument, args.getFirst()[1]);
+            }
+            return false;
+        }
+        List<String> path = new ArrayList<>();
+        for (int i = start; i <= end; i++) {
+            Token token = tokens.get(i);
+            if (token.kind == Kind.IDENT || token.kind == Kind.QIDENT) {
+                path.add(token.identifierText());
+            } else if (!token.isPunct(".") && token.kind != Kind.SPACE) {
+                return false;
+            }
+        }
+        if (path.isEmpty()) {
+            return false;
+        }
+        int select = containingSelect(start);
+        TableFieldSchema field = select < 0 ? dmlColumnField(path) : sourceColumnField(select, path);
+        if (field == null && path.size() == 1
+                && numericUdfParameters.contains(path.getFirst().toLowerCase(Locale.ROOT))) {
+            // A source column of the same name takes precedence over the parameter, as it does when bound.
+            return true;
+        }
+        return field != null && !"REPEATED".equals(field.getMode()) && field.getType() != null
+                && Set.of("NUMERIC", "BIGNUMERIC").contains(field.getType());
+    }
+
+    private static boolean numericParameter(String rendered) {
+        return rendered != null && (rendered.contains(" AS DECIMAL") || rendered.contains(" AS NUMERIC"));
+    }
+
+    /**
+     * Whether the literal from {@code start} to {@code end}, with its sign and any grouping parentheses, is a whole
+     * value of INSERT ... VALUES or of an UPDATE or MERGE SET, which DuckDB casts to the target column.
+     */
+    private boolean assignedValue(int start, int end) {
+        int verb = nextSignificant(0, tokens.size());
+        if (verb < 0 || !(tokens.get(verb).isKeyword("INSERT") || tokens.get(verb).isKeyword("UPDATE")
+                || tokens.get(verb).isKeyword("MERGE"))) {
+            return false;
+        }
+        int left = significantBefore(start);
+        int right = nextSignificant(end + 1, tokens.size());
+        if (left < 0) {
+            return false;
+        }
+        boolean closes = right < 0 || tokens.get(right).isPunct(",") || tokens.get(right).isPunct(")")
+                || tokens.get(right).isKeyword("WHERE") || tokens.get(right).isKeyword("WHEN")
+                || tokens.get(right).isKeyword("FROM");
+        if (!closes) {
+            return false;
+        }
+        if (tokens.get(left).isPunct("=")) {
+            int column = significantBefore(left);
+            int before = column < 0 ? -1 : significantBefore(operandStart(column));
+            return before >= 0 && (tokens.get(before).isKeyword("SET") || tokens.get(before).isPunct(","));
+        }
+        if (!tokens.get(left).isPunct("(") && !tokens.get(left).isPunct(",")) {
+            return false;
+        }
+        int open = tokens.get(left).isPunct("(") ? left : openerBefore(left);
+        while (open >= 0) {
+            int before = significantBefore(open);
+            if (before < 0) {
+                return false;
+            }
+            if (tokens.get(before).isKeyword("VALUES")) {
+                return true;
+            }
+            if (!tokens.get(before).isPunct(",")) {
+                return false;
+            }
+            int previous = significantBefore(before);
+            if (previous < 0 || !tokens.get(previous).isPunct(")")) {
+                return false;
+            }
+            open = openingFor(previous, "(", ")");
+        }
+        return false;
+    }
+
+    /**
+     * The type of an operand that is temporal as written but whose type cannot be told from the text:
+     * {@code DATE_TRUNC} returns a DATE, DATETIME or TIMESTAMP, the type of its argument.
+     */
+    private static final String UNKNOWN_TEMPORAL = "";
+
+    /**
+     * BigQuery coerces a STRING parameter compared with a TIMESTAMP, DATETIME or DATE to that type, and refuses a
+     * value that is not valid for it ({@code Invalid date: '2014-09-27T12:30:00'}). DuckDB casts an untyped literal
+     * more loosely, dropping a time part or a zone, so the value is checked here against the type of the other side
+     * of the comparison (or of a BETWEEN) where that side is temporal as written: a typed literal, a temporal
+     * function or CAST, or a table column of that type. A value written with a lowercase {@code t} separator or
+     * {@code z} zone ({@code 2014-09-27t12:30:00z}), which DuckDB cannot parse, is rendered there as the uppercased
+     * literal, which DuckDB casts implicitly as it does an uppercase one. Read anywhere else, the value stays the
+     * STRING the caller passed.
      */
     private void coerceLowercaseTemporalParameters() {
         for (int i = 0; i < tokens.size(); i++) {
@@ -10435,15 +11627,25 @@ final class SqlDialectTranslator {
             if (t.kind != Kind.NAMED_PARAM && t.kind != Kind.POSITIONAL_PARAM) {
                 continue;
             }
-            String normalized = QueryParameters.lowercaseTemporal(
-                    t.kind == Kind.NAMED_PARAM ? parameters.named(t.value) : t.value);
-            if (normalized != null && comparedWithTemporal(i)) {
+            String literal = t.kind == Kind.NAMED_PARAM ? parameters.named(t.value) : t.value;
+            String value = QueryParameters.stringLiteralValue(literal);
+            String type = value == null ? null : comparedTemporalType(i);
+            if (type == null) {
+                continue;
+            }
+            QueryParameters.requireTemporalValue(value, type);
+            String normalized = QueryParameters.lowercaseTemporal(literal);
+            if (normalized != null) {
                 tokens.set(i, Token.raw(DuckTypes.quoteLiteral(normalized)));
             }
         }
     }
 
-    private boolean comparedWithTemporal(int param) {
+    /**
+     * The type of the temporal operand the parameter at {@code param} is compared with: TIMESTAMP, DATETIME,
+     * DATE, {@link #UNKNOWN_TEMPORAL}, or null where the other side is not temporal as written.
+     */
+    private String comparedTemporalType(int param) {
         int first = param;
         int last = param;
         while (true) {
@@ -10461,11 +11663,33 @@ final class SqlDialectTranslator {
         if (after >= 0 && isComparison(tokens.get(after))) {
             return startsTemporal(nextSignificant(after + 1, tokens.size()));
         }
+        int distinctFrom = after >= 0 && tokens.get(after).isKeyword("IS") ? distinctFrom(after) : -1;
+        if (distinctFrom >= 0) {
+            // @a IS [NOT] DISTINCT FROM x
+            return startsTemporal(nextSignificant(distinctFrom + 1, tokens.size()));
+        }
         if (before < 0) {
-            return false;
+            return null;
         }
         if (isComparison(tokens.get(before))) {
             return endsTemporal(significantBefore(before));
+        }
+        if (tokens.get(before).isKeyword("FROM")) {
+            // x IS [NOT] DISTINCT FROM @a
+            int distinct = significantBefore(before);
+            int is = distinct >= 0 && tokens.get(distinct).isKeyword("DISTINCT")
+                    ? skipNot(significantBefore(distinct)) : -1;
+            return is >= 0 && tokens.get(is).isKeyword("IS") ? endsTemporal(significantBefore(is)) : null;
+        }
+        if (tokens.get(before).isKeyword("IN")) {
+            // x [NOT] IN (@a), whose only member's parentheses were read as grouping above.
+            return endsTemporal(skipNot(significantBefore(before)));
+        }
+        if (tokens.get(before).isPunct("(") || tokens.get(before).isPunct(",")) {
+            // A member of x [NOT] IN (..., @a, ...).
+            int open = tokens.get(before).isPunct("(") ? before : openerBefore(before);
+            int in = open < 0 || !tokens.get(open).isPunct("(") ? -1 : significantBefore(open);
+            return in >= 0 && tokens.get(in).isKeyword("IN") ? endsTemporal(skipNot(significantBefore(in))) : null;
         }
         if (tokens.get(before).isKeyword("BETWEEN")) {
             return endsTemporal(skipNot(significantBefore(before)));
@@ -10475,9 +11699,19 @@ final class SqlDialectTranslator {
             int low = operandStart(significantBefore(before));
             int between = low < 0 ? -1 : significantBefore(low);
             return between >= 0 && tokens.get(between).isKeyword("BETWEEN")
-                    && endsTemporal(skipNot(significantBefore(between)));
+                    ? endsTemporal(skipNot(significantBefore(between))) : null;
         }
-        return false;
+        return null;
+    }
+
+    /** The {@code FROM} of an {@code IS [NOT] DISTINCT FROM} starting at the {@code IS} at {@code is}, or -1. */
+    private int distinctFrom(int is) {
+        int next = nextSignificant(is + 1, tokens.size());
+        if (next >= 0 && tokens.get(next).isKeyword("NOT")) {
+            next = nextSignificant(next + 1, tokens.size());
+        }
+        int from = next >= 0 && tokens.get(next).isKeyword("DISTINCT") ? nextSignificant(next + 1, tokens.size()) : -1;
+        return from >= 0 && tokens.get(from).isKeyword("FROM") ? from : -1;
     }
 
     /** The token before an optional {@code NOT} at {@code index}, as in {@code x NOT BETWEEN a AND b}. */
@@ -10512,26 +11746,45 @@ final class SqlDialectTranslator {
         return start;
     }
 
-    private boolean endsTemporal(int end) {
+    /** The temporal type of the operand ending at {@code end}, as {@link #comparedTemporalType} reports it. */
+    private String endsTemporal(int end) {
         if (end >= 0 && tokens.get(end).isPunct(")")) {
             int open = openingFor(end, "(", ")");
             if (open >= 0 && groupingParenthesis(open)) {
-                return groupedOperandTemporal(open, end);
+                return inArithmetic(open, end, groupedOperandTemporal(open, end));
             }
         }
         int start = operandStart(end);
-        return start >= 0 && operandTemporal(start, end);
+        return start >= 0 ? inArithmetic(start, end, operandTemporal(start, end)) : null;
     }
 
-    private boolean startsTemporal(int start) {
+    /** The temporal type of the operand starting at {@code start}, as {@link #comparedTemporalType} reports it. */
+    private String startsTemporal(int start) {
         if (start < 0) {
-            return false;
+            return null;
         }
         if (tokens.get(start).isPunct("(") && groupingParenthesis(start)) {
-            return groupedOperandTemporal(start, matchingParen(start));
+            int close = matchingParen(start);
+            return inArithmetic(start, close, groupedOperandTemporal(start, close));
         }
         int end = operandEnd(start);
-        return end >= start && operandTemporal(start, end);
+        return end >= start ? inArithmetic(start, end, operandTemporal(start, end)) : null;
+    }
+
+    /**
+     * The type of the comparison's side where the temporal operand from {@code start} to {@code end} is only one term
+     * of it: a {@code +} or {@code -} next to it makes the side an arithmetic expression, whose type the operand does
+     * not tell ({@code DATE '2014-09-27' + INTERVAL 1 DAY} is a DATETIME), so it is {@link #UNKNOWN_TEMPORAL}.
+     */
+    private String inArithmetic(int start, int end, String type) {
+        if (type == null) {
+            return null;
+        }
+        int before = significantBefore(start);
+        int after = nextSignificant(end + 1, tokens.size());
+        boolean arithmetic = before >= 0 && (tokens.get(before).isPunct("+") || tokens.get(before).isPunct("-"))
+                || after >= 0 && (tokens.get(after).isPunct("+") || tokens.get(after).isPunct("-"));
+        return arithmetic ? UNKNOWN_TEMPORAL : type;
     }
 
     /**
@@ -10543,17 +11796,17 @@ final class SqlDialectTranslator {
         return before < 0 || !isName(tokens.get(before));
     }
 
-    /** Whether the parentheses from {@code open} to {@code close} hold exactly one temporal operand. */
-    private boolean groupedOperandTemporal(int open, int close) {
+    /** The temporal type of the one operand the parentheses from {@code open} to {@code close} hold, or null. */
+    private String groupedOperandTemporal(int open, int close) {
         int inner = nextSignificant(open + 1, close);
         int innerEnd = significantBefore(close);
         if (inner < 0 || innerEnd < inner) {
-            return false;
+            return null;
         }
         if (tokens.get(inner).isPunct("(") && matchingParen(inner) == innerEnd && groupingParenthesis(inner)) {
             return groupedOperandTemporal(inner, innerEnd);
         }
-        return operandEnd(inner) == innerEnd && operandTemporal(inner, innerEnd);
+        return operandEnd(inner) == innerEnd ? operandTemporal(inner, innerEnd) : null;
     }
 
     /** Where the operand starting at {@code start} ends: a call, a typed literal, a dotted path or one token. */
@@ -10577,27 +11830,31 @@ final class SqlDialectTranslator {
         return end;
     }
 
-    /** Whether the operand from {@code start} to {@code end} is a TIMESTAMP, DATETIME or DATE as written. */
-    private boolean operandTemporal(int start, int end) {
+    /**
+     * The type of the operand from {@code start} to {@code end} where it is a TIMESTAMP, DATETIME or DATE as written,
+     * {@link #UNKNOWN_TEMPORAL} where it is temporal but of a type the text does not tell, otherwise null.
+     */
+    private String operandTemporal(int start, int end) {
         Token first = tokens.get(start);
         if (first.kind != Kind.IDENT && first.kind != Kind.QIDENT) {
-            return false;
+            return null;
         }
         boolean unquoted = first.kind == Kind.IDENT;
         if (start == end && unquoted && TEMPORAL_FUNCTIONS.contains(first.upper())
                 && first.upper().startsWith("CURRENT_")) {
-            return true;
+            return temporalFunctionType(first.upper());
         }
         if (tokens.get(end).kind == Kind.STRING) {
-            return unquoted && TEMPORAL_TYPES.contains(first.upper());
+            return unquoted && TEMPORAL_TYPES.contains(first.upper()) ? first.upper() : null;
         }
         if (tokens.get(end).isPunct(")")) {
             if (first.isKeyword("CAST") || first.isKeyword("SAFE_CAST")) {
                 int type = significantBefore(end);
                 int as = type < 0 ? -1 : significantBefore(type);
-                return as >= 0 && tokens.get(as).isKeyword("AS") && TEMPORAL_TYPES.contains(tokens.get(type).upper());
+                return as >= 0 && tokens.get(as).isKeyword("AS") && TEMPORAL_TYPES.contains(tokens.get(type).upper())
+                        ? tokens.get(type).upper() : null;
             }
-            return unquoted && TEMPORAL_FUNCTIONS.contains(first.upper());
+            return unquoted && TEMPORAL_FUNCTIONS.contains(first.upper()) ? temporalFunctionType(first.upper()) : null;
         }
         List<String> path = new ArrayList<>();
         for (int i = start; i <= end; i++) {
@@ -10608,11 +11865,24 @@ final class SqlDialectTranslator {
         int select = containingSelect(start);
         if (select >= 0 && path.size() == 1 && selectAliasesVisible(select, start)
                 && renamedBySelectList(select, path.getFirst())) {
-            return false;
+            return null;
         }
         TableFieldSchema field = select < 0 ? dmlColumnField(path) : sourceColumnField(select, path);
         return field != null && !"REPEATED".equals(field.getMode()) && field.getType() != null
-                && Set.of("TIMESTAMP", "DATETIME", "DATE").contains(field.getType());
+                && TEMPORAL_TYPES.contains(field.getType()) ? field.getType() : null;
+    }
+
+    /** The type a function in {@link #TEMPORAL_FUNCTIONS} returns, from its name. */
+    private static String temporalFunctionType(String function) {
+        if (function.equals("DATE_TRUNC")) {
+            return UNKNOWN_TEMPORAL;
+        }
+        String name = function.startsWith("CURRENT_") ? function.substring("CURRENT_".length())
+                : function.startsWith("PARSE_") ? function.substring("PARSE_".length()) : function;
+        if (name.startsWith("TIMESTAMP")) {
+            return "TIMESTAMP";
+        }
+        return name.startsWith("DATETIME") ? "DATETIME" : "DATE";
     }
 
     /**
@@ -10700,7 +11970,8 @@ final class SqlDialectTranslator {
     /**
      * The schema of {@code path} read from one of {@code sources}, or null when no table has it. BigQuery rejects an
      * unqualified name several sources have unless a join's {@code USING} combines them into one column, so several
-     * matches of the same type and mode are that column; matches that differ are left untyped.
+     * matches of the same type are that column, also when one is REQUIRED and another NULLABLE; matches that differ
+     * in type, or where only one is REPEATED, are left untyped.
      */
     private TableFieldSchema sourcesColumnField(List<ProjectionSource> sources, List<String> path) {
         boolean qualified = path.size() > 1 && sources.stream()
@@ -10727,7 +11998,7 @@ final class SqlDialectTranslator {
             }
             if (matching != null) {
                 if (found != null && !(Objects.equals(found.getType(), matching.getType())
-                        && Objects.equals(found.getMode(), matching.getMode()))) {
+                        && "REPEATED".equals(found.getMode()) == "REPEATED".equals(matching.getMode()))) {
                     return null;
                 }
                 found = matching;
@@ -11573,10 +12844,111 @@ final class SqlDialectTranslator {
     }
 
     /**
+     * DuckDB sorts a set operation only by its result columns, so an ORDER BY that reads a field of one
+     * ({@code ... UNION ALL ... ORDER BY s.n}) fails with "Could not ORDER BY column", where BigQuery sorts by it.
+     * The set operation is wrapped as a derived table, as DuckDB's message suggests, with its ORDER BY, LIMIT and
+     * OFFSET left outside. It runs just before rendering, so no other pass reads the raw wrapper.
+     */
+    private void wrapSetOperationsOrderedByField() {
+        for (int order = tokens.size() - 1; order >= 0; order--) {
+            int by = nextSignificant(order + 1, tokens.size());
+            if (!tokens.get(order).isKeyword("ORDER") || by < 0 || !tokens.get(by).isKeyword("BY")
+                    || order > 0 && tokens.get(order - 1).text.contains("_floci_set_operation")) {
+                continue;
+            }
+            int depth = parenthesisDepth(order);
+            int start = order;
+            boolean setOperation = false;
+            for (int i = order - 1; i >= 0 && parenthesisDepth(i) >= depth; i--) {
+                if (parenthesisDepth(i) != depth) {
+                    continue;
+                }
+                Token token = tokens.get(i);
+                int quantifier = nextSignificant(i + 1, order);
+                setOperation |= (token.isKeyword("UNION") || token.isKeyword("INTERSECT") || token.isKeyword("EXCEPT"))
+                        && quantifier >= 0 && (tokens.get(quantifier).isKeyword("ALL")
+                        || tokens.get(quantifier).isKeyword("DISTINCT"));
+                start = i;
+            }
+            if (!setOperation || !readsField(by + 1, clauseEnd(by + 1, depth))) {
+                continue;
+            }
+            int body = queryBodyStart(start, order, depth);
+            if (body < 0 || setOperationBranch(start)) {
+                continue;
+            }
+            // Positions before this ORDER BY keep their places, so the scan goes on into the wrapped query, whose
+            // own derived tables may sort a set operation too; the guard above keeps this one from a second wrap.
+            tokens.add(order, Token.raw(") AS " + DuckTypes.quoteIdentifier("_floci_set_operation") + " "));
+            tokens.add(body, Token.raw("SELECT * FROM ("));
+        }
+    }
+
+    /**
+     * Whether the parenthesized query whose scope starts at {@code start} is itself a branch of an enclosing set
+     * operation. Its STRUCT fields take the first branch's names by position there, which a {@code SELECT *}
+     * wrapper would lose, so it is left as it is.
+     */
+    private boolean setOperationBranch(int start) {
+        int open = significantBefore(start);
+        if (open < 0 || !tokens.get(open).isPunct("(")) {
+            return false;
+        }
+        int before = significantBefore(open);
+        int after = nextSignificant(matchingParen(open) + 1, tokens.size());
+        return before >= 0 && (tokens.get(before).isKeyword("ALL") || tokens.get(before).isKeyword("DISTINCT"))
+                || after >= 0 && (tokens.get(after).isKeyword("UNION") || tokens.get(after).isKeyword("INTERSECT")
+                || tokens.get(after).isKeyword("EXCEPT"));
+    }
+
+    /** Whether the range holds a dotted path, {@code s.n}, outside a nested query. */
+    private boolean readsField(int start, int end) {
+        for (int i = start; i < end; i++) {
+            if (tokens.get(i).isPunct("(") && isQuery(i + 1, matchingParen(i))) {
+                i = matchingParen(i);
+                continue;
+            }
+            int dot = nextSignificant(i + 1, end);
+            int field = dot < 0 ? -1 : nextSignificant(dot + 1, end);
+            if (isName(tokens.get(i)) && dot >= 0 && tokens.get(dot).isPunct(".") && field >= 0
+                    && (tokens.get(field).kind == Kind.IDENT || tokens.get(field).kind == Kind.QIDENT)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Where the query of the scope starting at {@code start} begins: past a leading WITH list, or -1. */
+    private int queryBodyStart(int start, int end, int depth) {
+        if (!tokens.get(start).isKeyword("WITH")) {
+            return start;
+        }
+        for (int i = start + 1; i < end; i++) {
+            if (parenthesisDepth(i) != depth) {
+                continue;
+            }
+            Token token = tokens.get(i);
+            if (token.isKeyword("SELECT")) {
+                return i;
+            }
+            if (token.isPunct("(")) {
+                int before = significantBefore(i);
+                if (before >= 0 && tokens.get(before).isKeyword("AS")) {
+                    i = matchingParen(i);
+                    continue;
+                }
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /**
      * BigQuery's ORDER BY also resolves {@code s.n} to a field of a STRUCT select alias {@code s}, ahead of an
      * input column of the same name, while DuckDB reads {@code s} as a table. Expand those fields as in HAVING.
      * An ORDER BY inside a call or {@code OVER (...)} is skipped, as is one after a set operation, whose
-     * aliases come from the first SELECT and whose expressions DuckDB cannot sort by.
+     * aliases come from the first SELECT and whose expressions DuckDB cannot sort by. An alias that renames a
+     * column path ({@code t.s AS r}) has its {@code r.n} read through that path ({@code t.s.n}).
      */
     private void expandOrderByStructAliasFields() {
         for (int order = tokens.size() - 1; order >= 0; order--) {
@@ -11593,8 +12965,72 @@ final class SqlDialectTranslator {
             int listStart = quantifier >= 0 && (tokens.get(quantifier).isKeyword("DISTINCT")
                     || tokens.get(quantifier).isKeyword("ALL")) ? quantifier : select;
             Map<String, Map<String, List<Token>>> aliases = structSelectAliases(listStart, order, depth);
+            Map<String, List<Token>> paths = columnPathSelectAliases(listStart, order, depth);
+            paths.keySet().removeAll(aliases.keySet());
             if (!aliases.isEmpty()) {
                 replaceStructAliasFields(by + 1, clauseEnd(by + 1, depth), aliases, true);
+            }
+            if (!paths.isEmpty()) {
+                replaceColumnPathAliasFields(by + 1, clauseEnd(by + 1, depth), paths);
+            }
+        }
+    }
+
+    /**
+     * Select aliases whose expression is a plain column path under another name ({@code t.s AS r}, {@code s AS r}),
+     * keyed by the lower-case alias. An alias that repeats the path's last name already resolves in DuckDB.
+     */
+    private Map<String, List<Token>> columnPathSelectAliases(int select, int before, int depth) {
+        Map<String, List<Token>> paths = new HashMap<>();
+        int selectEnd = before;
+        for (int i = select + 1; i < before; i++) {
+            if (parenthesisDepth(i) == depth && isFromClause(i)) {
+                selectEnd = i;
+                break;
+            }
+        }
+        int start = select + 1;
+        for (int end = start; end <= selectEnd; end++) {
+            if (end < selectEnd && !(parenthesisDepth(end) == depth && tokens.get(end).isPunct(","))) {
+                continue;
+            }
+            List<Token> item = significant(start, end);
+            start = end + 1;
+            int n = item.size();
+            if (n < 3 || !item.get(n - 2).isKeyword("AS") || !isName(item.get(n - 1))) {
+                continue;
+            }
+            List<Token> path = item.subList(0, n - 2);
+            boolean plain = path.size() % 2 == 1;
+            for (int k = 0; k < path.size() && plain; k++) {
+                plain = k % 2 == 0 ? isName(path.get(k)) : path.get(k).isPunct(".");
+            }
+            String alias = item.get(n - 1).identifierText().toLowerCase(Locale.ROOT);
+            if (plain && !path.getLast().identifierText().toLowerCase(Locale.ROOT).equals(alias)) {
+                paths.put(alias, List.copyOf(path));
+            }
+        }
+        return paths;
+    }
+
+    /** Replaces each {@code alias.field} between {@code start} and {@code end} with {@code path.field}. */
+    private void replaceColumnPathAliasFields(int start, int end, Map<String, List<Token>> paths) {
+        boolean[] nestedQuery = nestedQueryPositions(start, end);
+        boolean[] inlined = inlinedFieldPositions(start, end);
+        for (int i = end - 1; i >= start; i--) {
+            if (nestedQuery[i] || inlined[i] || !isName(tokens.get(i)) || renamedPaths.containsKey(tokens.get(i))) {
+                continue;
+            }
+            int before = previousSignificantBefore(i);
+            int dot = nextSignificant(i + 1, end);
+            if (before >= start && tokens.get(before).isPunct(".") || dot < 0 || !tokens.get(dot).isPunct(".")) {
+                continue;
+            }
+            List<Token> path = paths.get(tokens.get(i).identifierText().toLowerCase(Locale.ROOT));
+            if (path != null) {
+                renamedPaths.put(path.getFirst(), new RenamedPath(tokens.get(i).identifierText(), path.size() / 2 + 1));
+                tokens.remove(i);
+                tokens.addAll(i, path);
             }
         }
     }
@@ -11925,7 +13361,8 @@ final class SqlDialectTranslator {
         boolean[] nestedQuery = nestedQueryPositions(start, end);
         boolean[] inlined = inlinedFieldPositions(start, end);
         for (int i = end - 1; i >= start; i--) {
-            if (nestedQuery[i] || inlined[i]) {
+            if (nestedQuery[i] || inlined[i] || renamedPaths.containsKey(tokens.get(i))) {
+                // A path an earlier pass put in place of a renamed alias already names its source column.
                 continue;
             }
             Token alias = tokens.get(i);
@@ -11954,6 +13391,30 @@ final class SqlDialectTranslator {
                 String message = "Field name " + tokens.get(field).identifierText() + " does not exist in STRUCT";
                 expression = List.of(Token.raw("error('" + message.replace("'", "''") + "')"));
             }
+            if (expression != null && orderBy && !anonymousFields.isEmpty()) {
+                List<String> path = new ArrayList<>(List.of(fieldKey));
+                int last = field;
+                int nextDot = nextSignificant(last + 1, end);
+                int next = nextDot < 0 ? -1 : nextSignificant(nextDot + 1, end);
+                while (next >= 0 && tokens.get(nextDot).isPunct(".")
+                        && (tokens.get(next).kind == Kind.IDENT || tokens.get(next).kind == Kind.QIDENT)) {
+                    List<String> parents = List.copyOf(path);
+                    path.add(tokens.get(next).identifierText().toLowerCase(Locale.ROOT));
+                    if (anonymousFields.contains(path)) {
+                        // An anonymous field one level down is no more reachable by its position than at the top.
+                        String name = tokens.get(next).identifierText();
+                        missingStructFields.add(new MissingStructField(alias.identifierText(), name,
+                                parenthesisDepth(start) == 0, Set.copyOf(anonymousFields), parents));
+                        String message = "Field name " + name + " does not exist in STRUCT";
+                        expression = List.of(Token.raw("error('" + message.replace("'", "''") + "')"));
+                        field = next;
+                        break;
+                    }
+                    last = next;
+                    nextDot = nextSignificant(last + 1, end);
+                    next = nextDot < 0 ? -1 : nextSignificant(nextDot + 1, end);
+                }
+            }
             if (expression == null) {
                 continue;
             }
@@ -11963,6 +13424,8 @@ final class SqlDialectTranslator {
             replacement.add(Token.raw(orderBy ? "], 1)" : ")"));
             tokens.subList(i, field + 1).clear();
             tokens.addAll(i, replacement);
+            // A nested path is longer than its replacement, so the clause's end moves with it.
+            end += replacement.size() - (field + 1 - i);
         }
     }
 
@@ -12175,7 +13638,7 @@ final class SqlDialectTranslator {
                 return -1;
             }
             int next = nextSignificant(i + 1, close);
-            if (token.isKeyword("OVER") || token.kind == Kind.IDENT && STRUCT_STAR_AGGREGATES.contains(token.upper())
+            if (token.isKeyword("OVER") || token.kind == Kind.IDENT && aggregateCallOpen(i, close) >= 0
                     && next >= 0 && tokens.get(next).isPunct("(")) {
                 return -1;
             }
@@ -12231,6 +13694,18 @@ final class SqlDialectTranslator {
      */
     private void addNestedAnonymousFields(int start, int end, String field, Set<List<String>> anonymous) {
         int keyword = nextSignificant(start, end);
+        if (keyword >= 0 && tokens.get(keyword).isPunct("[")) {
+            // An array literal of structs ([STRUCT(x + 1)]): its elements share one type, read from the first.
+            int bracket = matchingBracket(keyword);
+            if (bracket < 0 || bracket >= end || nextSignificant(bracket + 1, end) >= 0) {
+                return;
+            }
+            int element = nextSignificant(keyword + 1, bracket);
+            if (element >= 0) {
+                addNestedAnonymousFields(element, structArgumentEnd(element, bracket), field, anonymous);
+            }
+            return;
+        }
         int open = keyword < 0 ? -1 : nextSignificant(keyword + 1, end);
         if (open < 0 || !tokens.get(keyword).isKeyword("STRUCT") || !tokens.get(open).isPunct("(")) {
             return;
@@ -13027,7 +14502,7 @@ final class SqlDialectTranslator {
             }
 
             if (t.kind == Kind.NUMBER) {
-                out.append(t.text);
+                out.append(floatLiterals.contains(t) ? "CAST(" + t.text + " AS DOUBLE)" : t.text);
                 i++;
                 continue;
             }
@@ -13115,6 +14590,34 @@ final class SqlDialectTranslator {
                 if (function >= 0 && open >= 0 && tokens.get(open).isPunct("(")) {
                     int close = matchingParen(open);
                     String call = renderSafeCall(tokens.get(function).upper(), open, close);
+                    if (call != null) {
+                        out.append(call);
+                        i = close + 1;
+                        continue;
+                    }
+                }
+            }
+            if (upper.equals("NET") && next >= 0 && tokens.get(next).isPunct(".")) {
+                int function = nextSignificant(next + 1, end);
+                int open = function < 0 ? -1 : nextSignificant(function + 1, end);
+                if (function >= 0 && open >= 0 && tokens.get(open).isPunct("(")) {
+                    int close = matchingParen(open);
+                    String call = renderNet(tokens.get(function).upper(), open, close);
+                    if (call != null) {
+                        out.append(call);
+                        i = close + 1;
+                        continue;
+                    }
+                }
+            }
+            if (upper.equals("HLL_COUNT") && !isPrecededByDot(i)) {
+                int dot = next;
+                int function = dot < 0 ? -1 : nextSignificant(dot + 1, end);
+                int open = function < 0 ? -1 : nextSignificant(function + 1, end);
+                if (dot >= 0 && tokens.get(dot).isPunct(".") && function >= 0
+                        && tokens.get(function).kind == Kind.IDENT && open >= 0 && tokens.get(open).isPunct("(")) {
+                    int close = matchingParen(open);
+                    String call = renderHllCount(tokens.get(function).upper(), open, close);
                     if (call != null) {
                         out.append(call);
                         i = close + 1;
@@ -14630,6 +16133,10 @@ final class SqlDialectTranslator {
                 yield args(a, 2, name, "contains(_floci_nfkc_casefold(" + at(a, 0)
                         + "), _floci_nfkc_casefold(" + at(a, 1) + "))");
             }
+            case "BYTE_LENGTH" -> {
+                exactArgs(a, 1, name);
+                yield "floci_byte_length(" + at(a, 0) + ")";
+            }
             // BigQuery emits lowercase hexadecimal text; DuckDB's hex/to_hex emits uppercase.
             case "TO_HEX" -> args(a, 1, name, "lower(hex(" + at(a, 0) + "))");
             // BigQuery's cryptographic hash functions return raw BYTES. DuckDB returns the
@@ -14637,7 +16144,15 @@ final class SqlDialectTranslator {
             case "MD5" -> args(a, 1, name, "from_hex(md5(" + at(a, 0) + "))");
             case "SHA1" -> args(a, 1, name, "from_hex(sha1(" + at(a, 0) + "))");
             case "SHA256" -> args(a, 1, name, "from_hex(sha256(" + at(a, 0) + "))");
+            case "LENGTH" -> {
+                exactArgs(a, 1, name);
+                yield "floci_length(" + at(a, 0) + ")";
+            }
             case "RAND" -> args(a, 0, name, "random()");
+            case "FARM_FINGERPRINT" -> {
+                exactArgs(a, 1, name);
+                yield "farm_fingerprint(" + at(a, 0) + ")";
+            }
             case "GENERATE_ARRAY" -> "generate_series(" + String.join(", ", a) + ")";
             case "GENERATE_DATE_ARRAY" -> generateDateArray(a);
             case "GENERATE_TIMESTAMP_ARRAY" -> generateTimestampArray(a);
@@ -14645,7 +16160,7 @@ final class SqlDialectTranslator {
                     : "string_split(" + String.join(", ", a) + ")";
             case "FORMAT" -> "printf(" + String.join(", ", a) + ")";
             case "INITCAP" -> initcap(a);
-            case "TO_JSON_STRING" -> "CAST(to_json(" + at(a, 0) + ") AS VARCHAR)";
+            case "TO_JSON_STRING" -> renderToJsonString(a, name);
             case "JSON_VALUE", "JSON_EXTRACT_SCALAR" -> a.size() == 1
                     ? "json_extract_string(" + a.getFirst() + ", '$')"
                     : "json_extract_string(" + String.join(", ", a) + ")";
@@ -14848,6 +16363,16 @@ final class SqlDialectTranslator {
                 + ") END), 1)";
     }
 
+    /**
+     * The sidecar serializer renders a NULL value as the JSON text {@code null} and answers NULL only
+     * when {@code pretty_print} is NULL, so the call stands on its own: rendering {@code pretty_print}
+     * a second time to decide that would evaluate a volatile argument twice.
+     */
+    private static String renderToJsonString(List<String> arguments, String name) {
+        rangedArgs(arguments, 1, 2, name);
+        return "floci_to_json_string(" + String.join(", ", arguments) + ")";
+    }
+
     private static String renderApproxQuantiles(List<String> arguments, String name) {
         if (arguments.size() != 2) {
             return args(arguments, 2, name, "");
@@ -14871,6 +16396,35 @@ final class SqlDialectTranslator {
         }
         return "quantile_disc(" + at(arguments, 0) + ", list_transform(generate_series(0, CAST(" + quantileCount
                 + " AS BIGINT)), x -> CAST(x AS DOUBLE) / CAST(" + quantileCount + " AS DOUBLE)))";
+    }
+
+    /** DuckDB has no HLL++ functions, so the sidecar supplies BigQuery-compatible ZetaSketch aggregates. */
+    private String renderHllCount(String function, int open, int close) {
+        List<String> arguments = arguments(open, close);
+        return switch (function) {
+            // HLL_COUNT.INIT, MERGE and MERGE_PARTIAL are aggregates in BigQuery, and the sidecar
+            // implements them as aggregates too, so a group is sketched as its rows arrive.
+            case "INIT" -> {
+                hllArgs(arguments, 1, 2, function);
+                String precision = arguments.size() == 2
+                        ? ", CAST(" + at(arguments, 1) + " AS INTEGER)"
+                        : "";
+                yield "floci_hll_init(" + at(arguments, 0) + precision + ")";
+            }
+            case "EXTRACT" -> {
+                hllArgs(arguments, 1, 1, function);
+                yield "floci_hll_extract(CAST(" + at(arguments, 0) + " AS BLOB))";
+            }
+            case "MERGE" -> {
+                hllArgs(arguments, 1, 1, function);
+                yield "floci_hll_merge(CAST(" + at(arguments, 0) + " AS BLOB))";
+            }
+            case "MERGE_PARTIAL" -> {
+                hllArgs(arguments, 1, 1, function);
+                yield "floci_hll_merge_partial(CAST(" + at(arguments, 0) + " AS BLOB))";
+            }
+            default -> null;
+        };
     }
 
     private String renderSafeCall(String function, int open, int close) {
@@ -14933,6 +16487,36 @@ final class SqlDialectTranslator {
                 + ch + ") ELSE lower(" + ch + ") END), '') END), 1)";
     }
 
+    private String renderNet(String function, int open, int close) {
+        List<String> arguments = arguments(open, close);
+        return switch (function) {
+            case "SAFE_IP_FROM_STRING" -> {
+                exactArgs(arguments, 1, "NET.SAFE_IP_FROM_STRING");
+                yield "safe_ip_from_string(" + at(arguments, 0) + ")";
+            }
+            case "IP_FROM_STRING" -> {
+                exactArgs(arguments, 1, "NET.IP_FROM_STRING");
+                yield "ip_from_string(" + at(arguments, 0) + ")";
+            }
+            case "IP_TO_STRING" -> {
+                exactArgs(arguments, 1, "NET.IP_TO_STRING");
+                yield "ip_to_string(" + at(arguments, 0) + ")";
+            }
+            case "IP_TRUNC" -> {
+                exactArgs(arguments, 2, "NET.IP_TRUNC");
+                yield "ip_trunc(" + at(arguments, 0) + ", " + at(arguments, 1) + ")";
+            }
+            default -> null;
+        };
+    }
+
+    private static void hllArgs(List<String> arguments, int minimum, int maximum, String function) {
+        if (arguments.size() < minimum || arguments.size() > maximum) {
+            throw invalidQuery("No matching signature for function HLL_COUNT." + function + " with "
+                    + arguments.size() + " arguments");
+        }
+    }
+
     private static String args(List<String> a, int expected, String name, String rendered) {
         if (a.size() < expected) {
             throw invalidQuery("No matching signature for function " + name + " with " + a.size() + " arguments");
@@ -14946,6 +16530,17 @@ final class SqlDialectTranslator {
                     + " arguments");
         }
         return rendered;
+    }
+
+    private static void exactArgs(List<String> arguments, int expected, String name) {
+        rangedArgs(arguments, expected, expected, name);
+    }
+
+    private static void rangedArgs(List<String> arguments, int minimum, int maximum, String name) {
+        if (arguments.size() < minimum || arguments.size() > maximum) {
+            throw invalidQuery("No matching signature for function " + name + " with "
+                    + arguments.size() + " arguments");
+        }
     }
 
     private static String at(List<String> a, int index) {
@@ -15497,8 +17092,10 @@ final class SqlDialectTranslator {
                 if ("VARCHAR".equals(type)) {
                     if (isFloatLiteral(expression)) {
                         // BigQuery types a decimal or exponent literal as FLOAT64; DuckDB types it as DECIMAL,
-                        // where zero renders as "0.0" and negative zero loses its sign.
-                        return renderStringCast(function, "CAST(" + expr + " AS DOUBLE)");
+                        // where zero renders as "0.0" and negative zero loses its sign. A literal typeDecimalLiterals
+                        // already renders as DOUBLE needs no second cast.
+                        boolean typed = expression.stream().anyMatch(floatLiterals::contains);
+                        return renderStringCast(function, typed ? expr : "CAST(" + expr + " AS DOUBLE)");
                     }
                     if (!isDefinitelyNonFloatExpression(expression)) {
                         return renderStringCast(function, expr);
@@ -15918,11 +17515,18 @@ final class SqlDialectTranslator {
             }
             StringBuilder fields = new StringBuilder("STRUCT(");
             boolean first = true;
+            int position = 0;
             while (pos[0] < type.size() && !type.get(pos[0]).isPunct(">")) {
                 if (!first) {
                     expect(type, pos, ",");
                 }
-                String fieldName = type.get(pos[0]++).identifierText();
+                position++;
+                // A field written as a type alone (STRUCT<INT64>, STRUCT<ARRAY<INT64>>) is unnamed, and BigQuery
+                // calls it _field_ and its position; a named field's name is followed by its type's name.
+                Token after = pos[0] + 1 < type.size() ? type.get(pos[0] + 1) : null;
+                boolean unnamed = after == null || after.isPunct(",") || after.isPunct(">") || after.isPunct("<")
+                        || after.isPunct("(");
+                String fieldName = unnamed ? "_field_" + position : type.get(pos[0]++).identifierText();
                 fields.append(first ? "" : ", ").append(DuckTypes.quoteIdentifier(fieldName)).append(' ')
                         .append(parseTypeTokens(type, pos));
                 first = false;
@@ -16280,6 +17884,50 @@ final class SqlDialectTranslator {
                 normalized = normalized.substring(0, normalized.length() - 1) + "Z";
             }
             return !normalized.equals(value) && TEMPORAL_STRING.matcher(normalized).matches() ? normalized : null;
+        }
+
+        private static final String DATE_FORM = "\\d{4}-\\d{1,2}-\\d{1,2}";
+        private static final String TIME_FORM = "[ Tt]\\d{1,2}:\\d{1,2}:\\d{1,2}(?:\\.\\d{1,9})?";
+        private static final Pattern DATE_VALUE = Pattern.compile(DATE_FORM);
+        private static final Pattern DATETIME_VALUE = Pattern.compile(DATE_FORM + "(?:" + TIME_FORM + ")?");
+        private static final Pattern TIMESTAMP_VALUE = Pattern.compile(DATE_FORM + "(?:" + TIME_FORM + ")?"
+                + "\\s*(?:[Zz]|[+-]\\d{1,2}(?::?\\d{2})?|([A-Za-z][A-Za-z0-9_+-]*(?:/[A-Za-z0-9_+-]+)*))?");
+
+        /**
+         * Refuses a STRING parameter value that BigQuery cannot coerce to the {@code type} it is compared with, with
+         * BigQuery's message: a DATE takes a date alone, a DATETIME no zone, and a TIMESTAMP needs the seconds of any
+         * time and a zone name BigQuery knows, matched by case ({@code utc} is refused). An unknown temporal type
+         * checks nothing.
+         */
+        static void requireTemporalValue(String value, String type) {
+            switch (type) {
+                case "DATE" -> {
+                    if (!DATE_VALUE.matcher(value).matches()) {
+                        throw invalidQuery("Invalid date: '" + value + "'");
+                    }
+                }
+                case "DATETIME" -> {
+                    if (!DATETIME_VALUE.matcher(value).matches()) {
+                        throw invalidQuery("Invalid datetime string \"" + value + "\"");
+                    }
+                }
+                case "TIMESTAMP" -> {
+                    Matcher matcher = TIMESTAMP_VALUE.matcher(value);
+                    if (!matcher.matches()) {
+                        throw invalidQuery("Invalid timestamp: '" + value + "'");
+                    }
+                    String zone = matcher.group(1);
+                    if (zone != null && !zone.equals("UTC")) {
+                        try {
+                            ZoneId.of(zone);
+                        } catch (DateTimeException e) {
+                            throw invalidQuery("Invalid time zone: " + zone);
+                        }
+                    }
+                }
+                default -> {
+                }
+            }
         }
 
         private static final Pattern STRING_LITERAL = Pattern.compile(

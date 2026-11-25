@@ -309,7 +309,12 @@ Queries are translated to DuckDB SQL and executed on the sidecar, so most of Goo
   wherever BigQuery resolves it (the select list, `WHERE`, `ON`, `GROUP BY` expressions, `ORDER BY`,
   `HAVING`, `QUALIFY` and a window in the select list), and a suffix generated for a duplicate is
   unrecognized unless a source column carries that name. A bare `GROUP BY` name resolves a unique
-  output alias first, while a qualified item such as `GROUP BY t.b` still names its source alias. A
+  output alias first, also when the alias renames another expression (`SELECT MOD(id, 2) AS id ...
+  GROUP BY id` groups by `MOD(id, 2)`), while a qualified item such as `GROUP BY t.b` still names its
+  source alias. Such a name still groups by the source column in a select list that also has a star,
+  in a `SELECT AS STRUCT` or `SELECT AS VALUE` query, and inside `ROLLUP`, `CUBE` or `GROUPING SETS`.
+  A `QUALIFY` window that orders by that name still reads the source column, which DuckDB refuses with
+  a `Binder Error` once the grouping is positional, where BigQuery reads the alias. A
   window in the select list reads input columns rather than sibling aliases, and a window in `ORDER BY`,
   `HAVING` or `QUALIFY` resolves a unique output alias first, as the rest of that clause does. A star's
   `EXCEPT` list drops every output written with the name across the query's sources, including columns
@@ -330,7 +335,8 @@ Queries are translated to DuckDB SQL and executed on the sidecar, so most of Goo
   `COUNTIF`, `CONCAT`, `LOGICAL_AND`/`LOGICAL_OR`, `ARRAY_LENGTH`, `ARRAY_REVERSE`, `ARRAY_SLICE`,
   `ARRAY_CONCAT_AGG`,
   `GENERATE_ARRAY`, `GENERATE_DATE_ARRAY`, `GENERATE_TIMESTAMP_ARRAY`, `GENERATE_UUID`,
-  `APPROX_COUNT_DISTINCT`, `APPROX_QUANTILES`, `SPLIT`, `FORMAT`, `TO_HEX`, `MD5`, `SHA1`, `SHA256`, `TO_JSON_STRING`,
+  `APPROX_COUNT_DISTINCT`, `APPROX_QUANTILES`, `SPLIT`, `FORMAT`, `LENGTH`, `BYTE_LENGTH`,
+  `FARM_FINGERPRINT`, `TO_HEX`, `MD5`, `SHA1`, `SHA256`, `TO_JSON_STRING`,
   `JSON_VALUE`/`JSON_EXTRACT_SCALAR`,
   `JSON_QUERY`/`JSON_EXTRACT`, `REGEXP_CONTAINS`, `REGEXP_EXTRACT`, `REGEXP_EXTRACT_ALL`, `REGEXP_REPLACE`,
   `CURRENT_TIMESTAMP`/`CURRENT_DATE`/`CURRENT_DATETIME`, `UNIX_SECONDS`/`UNIX_MILLIS`/`UNIX_MICROS`/`UNIX_DATE`,
@@ -347,6 +353,30 @@ Queries are translated to DuckDB SQL and executed on the sidecar, so most of Goo
 - `CONTAINS_SUBSTR` supports scalar `STRING` inputs with NFKC-normalized, case-folded substring
   matching. Recursive `STRUCT`/`ARRAY` search and the optional JSON scope argument are not
   emulated.
+- `HLL_COUNT.INIT`, `HLL_COUNT.EXTRACT`, `HLL_COUNT.MERGE` and `HLL_COUNT.MERGE_PARTIAL`
+  exchange BigQuery's HLL++ ZetaSketch `BYTES`: `INIT` and `MERGE_PARTIAL` return a sketch, `EXTRACT`
+  and `MERGE` return the estimate. Initialization supports `INT64`, `STRING` and `BYTES`, BigQuery's
+  whole precision range of 10 to 24, and its null behavior, and produces the sketch bytes BigQuery
+  produces for the same input. `NUMERIC` and `BIGNUMERIC` initialization are not supported. The
+  three aggregating forms update the sketch as rows arrive, so the memory a query needs stays at the
+  size of the sketch instead of growing with the group.
+- `LENGTH` counts Unicode characters for `STRING` and bytes for `BYTES`. `BYTE_LENGTH` returns
+  the UTF-8 byte length of `STRING` and the byte length of `BYTES`.
+- `FARM_FINGERPRINT` accepts `STRING` and `BYTES` and returns the BigQuery-compatible signed
+  `INT64` FarmHash Fingerprint64 value.
+- `TO_JSON_STRING` preserves typed values recursively. Temporal values use BigQuery's canonical
+  forms, `NUMERIC` and `BIGNUMERIC` render as BigQuery renders them (a JSON string when the value has
+  a fractional part, a JSON number when it is integral, without trailing zeros), UUID and `HUGEINT`
+  values serialize as strings, and ordinary `STRING` values are not reinterpreted based on their
+  contents. A `NULL` value serializes as the JSON text `null`, and a `NULL` `pretty_print` makes the
+  call `NULL`; the optional `pretty_print` argument is supported.
+- `NET.IP_FROM_STRING` and `NET.SAFE_IP_FROM_STRING` parse IPv4 and IPv6 into `BYTES`.
+  `NET.IP_TRUNC` applies a prefix length and `NET.IP_TO_STRING` formats the bytes canonically.
+  A rejected address, prefix or `HLL_COUNT.INIT` precision quotes BigQuery's message
+  (`NET.IP_FROM_STRING() encountered an unparseable IP-address: nope`), behind the SQL engine's
+  `Invalid Input Error: ` class prefix.
+- `BYTES` expressions support byte-oriented `BIT_COUNT`, `REPEAT`, `CONCAT`, left shift and
+  bitwise AND, including inside temporary SQL functions.
 - `RAND` returns a uniformly distributed value in the half-open interval `[0, 1)`.
 - `ARRAY_AGG(value IGNORE NULLS ORDER BY ... LIMIT n)` preserves BigQuery's null filtering,
   aggregate ordering, and inline result limit. As in BigQuery, these aggregate modifiers are rejected
@@ -401,8 +431,9 @@ columns BigQuery documents:
 - `data_type` uses GoogleSQL names (`INT64`, `ARRAY<STRING>`, `STRUCT<name STRING, ...>`);
   `COLUMN_FIELD_PATHS` has one row per nested field path (`customer.name`).
 - `ddl` is a `CREATE TABLE` / `CREATE VIEW` / `CREATE SCHEMA` statement in BigQuery's format.
-- `TABLE_OPTIONS` reports `description`, `friendly_name` and `labels` as GoogleSQL literals
-  (`"text"`, `[STRUCT("key", "value")]`).
+- `TABLE_OPTIONS` reports `description`, `friendly_name`, `labels` and a set `expiration_timestamp`
+  as GoogleSQL literals (`"text"`, `[STRUCT("key", "value")]`,
+  `TIMESTAMP "2020-01-16T21:12:28.000Z"`).
 - `PARTITIONS` reports one row with a null `partition_id` for every unpartitioned table, reports
   decorator-written ingestion-time partitions, and derives partitions from rows in
   field-partitioned tables, including `__NULL__` and `__UNPARTITIONED__`. `total_logical_bytes` and
@@ -578,12 +609,12 @@ Not supported: `AVRO`, `ORC` and `DATASTORE_BACKUP` sources, Hive partitioning,
 | `DELETE [FROM] t WHERE ...` | `WHERE` is required |
 | `MERGE [INTO] t USING s ON ... WHEN [NOT] MATCHED ...` | `dmlStats` splits inserted, updated and deleted rows |
 | `TRUNCATE TABLE t` | `dmlStats.deletedRowCount` |
-| `CREATE [OR REPLACE] TABLE [IF NOT EXISTS] t (col TYPE [NOT NULL] [OPTIONS(description=...)], ...)` | Column types keep their exact BigQuery type (`BIGNUMERIC`, `GEOGRAPHY`, `ARRAY<...>`, `STRUCT<...>`); supported time and integer-range `PARTITION BY` expressions populate table metadata; `CLUSTER BY` and table `OPTIONS` are accepted and ignored |
-| `CREATE [OR REPLACE] TABLE [IF NOT EXISTS] t AS SELECT ...` | Schema and rows come from the query; field-based time and integer-range `PARTITION BY` expressions populate table metadata, while ingestion-time partitioning is rejected |
-| `CREATE [OR REPLACE] TABLE [IF NOT EXISTS] t COPY source [OPTIONS(...)]` | Copies a table, clone, or snapshot in the same job location; views are rejected. Trailing options override inherited metadata: `description`, `friendly_name`, `labels`, and `expiration_timestamp`, using the same values (literals or constant expressions) and `NULL` clearing as `ALTER TABLE SET OPTIONS`. Other options are unsupported |
+| `CREATE [OR REPLACE] TABLE [IF NOT EXISTS] t (col TYPE [NOT NULL] [OPTIONS(description=...)], ...)` | Column types keep their exact BigQuery type (`BIGNUMERIC`, `GEOGRAPHY`, `ARRAY<...>`, `STRUCT<...>`); supported time and integer-range `PARTITION BY` expressions, `CLUSTER BY` fields, and table options populate metadata. BigQuery's remaining table options are accepted: `require_partition_filter`, `partition_expiration_days` and `kms_key_name` are stored, the rest are ignored |
+| `CREATE [OR REPLACE] TABLE [IF NOT EXISTS] t [PARTITION BY ...] [CLUSTER BY ...] [OPTIONS(...)] AS SELECT ...` | Schema and rows come from the query; field-based time and integer-range `PARTITION BY` expressions, `CLUSTER BY` fields, and supported table options populate metadata; ingestion-time partitioning is rejected. BigQuery's remaining table options are accepted as on a plain `CREATE TABLE` |
+| `CREATE [OR REPLACE] TABLE [IF NOT EXISTS] t COPY source [OPTIONS(...)]` | Copies a table, clone, or snapshot in the same job location; views are rejected. Trailing options override inherited metadata: `description`, `friendly_name`, `labels`, and `expiration_timestamp`, using the same literal values and `NULL` clearing as `ALTER TABLE SET OPTIONS`. Other options and computed expressions are unsupported |
 | `CREATE [OR REPLACE] [MATERIALIZED] VIEW [IF NOT EXISTS] v AS SELECT ...` | |
 | `DROP TABLE / VIEW / MATERIALIZED VIEW [IF EXISTS]` | Dropping a view with `DROP TABLE` (or the reverse) is rejected |
-| `ALTER TABLE / VIEW [IF EXISTS] t SET OPTIONS(...)` | Sets `description`, `friendly_name`, `labels` and `expiration_timestamp`, or clears one with `NULL`. A value can be a literal or a constant expression such as `CONCAT('a', 'b')` or `TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)`, evaluated and type-checked as BigQuery does (a `STRING` for `description` and `friendly_name`, a `TIMESTAMP` for `expiration_timestamp`), in a dry run too; `labels` takes literal pairs only. Only the listed options change, and `labels` replaces the old labels. Any other option fails with `Unknown option`. Altering a view with `ALTER TABLE` (or the reverse) is rejected, and `IF EXISTS` skips a missing or expired table |
+| `ALTER TABLE / VIEW [IF EXISTS] t SET OPTIONS(...)` | Sets `description`, `friendly_name`, `labels` and `expiration_timestamp`, or clears one with `NULL`. `expiration_timestamp` accepts a timestamp literal or a timestamp-valued SQL expression, evaluated by the configured SQL engine. Only the listed options change, and `labels` replaces the old labels. Any other option fails with `Unknown option`. Altering a view with `ALTER TABLE` (or the reverse) is rejected, and `IF EXISTS` skips a missing or expired table |
 | `CREATE SCHEMA [IF NOT EXISTS] d`, `DROP SCHEMA [IF EXISTS] d [CASCADE \| RESTRICT]` | Datasets; a non-empty dataset needs `CASCADE`. `CASCADE`/`RESTRICT` are rejected on `DROP TABLE`/`VIEW` |
 
 DDL jobs report `statistics.query.statementType`, `ddlOperationPerformed` (`CREATE`, `REPLACE`,
@@ -702,13 +733,16 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
   `Query error: Cannot coerce expression 1 to type BOOL` for BigQuery's
   `Query error: Cannot coerce expression 1 to type BOOL at [1:4]`.
   A rejection of a shape BigQuery words differently keeps floci's own wording.
-- A `NUMERIC` variable refuses a `FLOAT64` value, apart from two shapes that still store one: a
-  `NUMERIC` field of a `STRUCT` default accepts a `FLOAT64` value,
-  `STRUCT(f AS n)`, where BigQuery coerces a `STRUCT` field only when the value is a literal; and
-  arithmetic over floating point literals stays `NUMERIC` here, so `SET n = 1.5 + 0.5` stores `2`,
-  where BigQuery types the expression `FLOAT64` and refuses it. The last one follows from a bare
-  decimal literal being `NUMERIC` here and `FLOAT64` in BigQuery, which holds outside scripts too:
-  `SELECT 1.5` reports a `NUMERIC` column.
+- A `NUMERIC` variable refuses a `FLOAT64` value, apart from one shape that still stores one: a
+  `NUMERIC` field of a `STRUCT` default accepts a `FLOAT64` value, `STRUCT(f AS n)`, where BigQuery
+  coerces a `STRUCT` field only when the value is a literal.
+- A decimal literal (`0.5`, `1.5e2`) is `FLOAT64`, as in BigQuery, and becomes `NUMERIC` where it meets a
+  `NUMERIC` value (`CAST(1 AS NUMERIC) + 0.5`, `COALESCE(n, 0.5)`). floci sees that value only when it is a
+  `NUMERIC` or `BIGNUMERIC` column of a table, a cast, a typed literal or a parameter, or `SUM`, `MIN`,
+  `MAX`, `ABS`, `ROUND`, `TRUNC`, `CEIL` or `FLOOR` of one. `AVG` of a `NUMERIC` value is `FLOAT64` here
+  (#724), so a literal beside it is too. Beside a `NUMERIC` value it cannot type
+  (an `UNNEST` element, a subquery or CTE column, another function's result), the literal stays `FLOAT64`
+  and so does the expression, where BigQuery types it `NUMERIC`.
 - A reserved keyword used as a loop or block label runs here, where BigQuery refuses it with
   `Reserved keyword 'outer' may not be used as a label name without backticks`.
 - An unknown name reports DuckDB's wording rather than BigQuery's: a query that names no such column
@@ -717,6 +751,9 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
   statement runs, such as a `NOT NULL` temporary column receiving a NULL, which answers
   `Constraint Error: NOT NULL constraint failed: t.id` where BigQuery answers
   `Required field id cannot be null`.
+- A function whose overload does not match the argument types names the GoogleSQL function, as
+  BigQuery does (`No matching signature for function BYTE_LENGTH Argument types: NUMERIC`), without
+  BigQuery's signature list and `at [1:col]` position.
 - Values a script needs at validation time are what a dry run cannot supply: a script dry run stops
   at the first variable or control-flow statement and after the first DDL statement, where BigQuery
   validates every statement of the script. A dry run whose script declares a temporary table reports
@@ -726,9 +763,17 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
 - Outside scripts, `ALTER TABLE` and `ALTER VIEW` support only `SET OPTIONS`.
 - DML statements are applied atomically per statement by reading and rewriting the whole target
   table; there is no fine-grained DML or streaming-buffer interaction.
-- `CLUSTER BY` and table `OPTIONS` in plain `CREATE TABLE` and `CREATE TABLE AS SELECT` are
-  not stored. `CREATE TABLE COPY` applies the option subset documented above. Time-based `PARTITION BY` metadata is
-  stored for the supported expressions documented above.
+- `CLUSTER BY` is stored as table metadata but does not physically cluster rows. Plain `CREATE TABLE`
+  and `CREATE TABLE AS SELECT` support the table options `description`, `friendly_name`, `labels`,
+  and `expiration_timestamp`; timestamp-valued expiration expressions are evaluated by the configured
+  SQL engine. They also accept BigQuery's remaining table options: `require_partition_filter`,
+  `partition_expiration_days` and `kms_key_name` are stored in the Table resource (`requirePartitionFilter`,
+  `timePartitioning.expirationMs` and `encryptionConfiguration.kmsKeyName`), while `default_rounding_mode`,
+  `enable_change_history`, `max_staleness`, `enable_fine_grained_mutations`, `storage_uri`, `file_format`,
+  `table_format` and `tags` are accepted and ignored. An expression value for an option the emulator does
+  not evaluate leaves the option unset. `ALTER TABLE SET OPTIONS` and `CREATE TABLE COPY` still reject
+  these options, as before. `CREATE TABLE COPY` applies the option subset documented above. Time-based
+  `PARTITION BY` metadata is stored for the supported expressions documented above.
 - Option values in `ALTER TABLE` / `ALTER VIEW SET OPTIONS` and `CREATE TABLE COPY` are evaluated
   without BigQuery's limits on the functions they call. BigQuery rejects aggregate functions
   (`Aggregate function MAX not allowed in option`), analytic functions and some scalar functions such
@@ -742,7 +787,7 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
   `FOR SYSTEM_TIME AS OF`, `GEOGRAPHY` functions, BigQuery ML, and remote functions are not
   emulated.
 - Most `SAFE.`-prefixed functions are not emulated. `SAFE_CAST`, `SAFE.FROM_HEX`, `SAFE.PARSE_DATE`,
-  and `SAFE.PARSE_TIMESTAMP` are supported explicitly.
+  `SAFE.PARSE_TIMESTAMP`, and `NET.SAFE_IP_FROM_STRING` are supported explicitly.
 - `FORMAT_TIMESTAMP` formats in UTC and ignores its time zone argument, so `%z` and `%Ez` print
   `+0000` and `+00:00`. `PARSE_DATE`, `PARSE_DATETIME` and `PARSE_TIMESTAMP` need a constant
   format (a literal or a query parameter): DuckDB's `strptime` takes no format read from a column.
@@ -757,20 +802,21 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
   type STRING which does not coerce to INT64`), and one BigQuery rejects but DuckDB can cast, such as
   `STRUCT<n INT64>('1')`, succeeds. A value for a nested `STRUCT<...>` field must use the declared field
   names, since DuckDB casts structs by name where BigQuery matches them by position.
-- A `STRUCT<...>` type with an unnamed field, such as `CAST(STRUCT(1) AS STRUCT<INT64>)` or the nested
-  `STRUCT<a STRUCT<INT64>>` of a typed constructor, fails with `Syntax error in type: expected ">"`, where
-  BigQuery names the field `_field_1`. Name each field of a nested `STRUCT` type.
 - A `STRING` query parameter shaped like a timestamp is coerced to `DATE`, `DATETIME` or `TIMESTAMP` when
   compared with one, with an uppercase `T` and `Z`, `UTC` or a numeric offset, and to `TIMESTAMP` with a
   time zone name (`America/Los_Angeles`, `EST5EDT`), as in BigQuery. A lowercase `t` or `z`
   (`2014-09-27t12:30:00.45`, `2014-09-27 12:30:00.45z`) is coerced when the other side of the comparison
   or `BETWEEN` is temporal as written: a typed literal, a temporal function or `CAST`, or a table column
-  of that type. Three forms differ: compared with anything else (an `UNNEST` element, a subquery column)
-  such a value fails with `Cannot compare values of type TIMESTAMP WITH TIME ZONE and type VARCHAR`, where
-  BigQuery accepts it; a lowercase zone name (`america/los_angeles`) is accepted, where BigQuery fails with `Invalid time
-  zone`; and a value with a zone name compared with a `DATE` succeeds, where BigQuery fails with `Invalid
-  date`. An unknown zone name fails with DuckDB's `Unknown TimeZone` rather than BigQuery's `Invalid time
-  zone`.
+  of that type. There the value is also checked as BigQuery checks it, with BigQuery's message: a `DATE`
+  takes a date alone (`Invalid date: '2014-09-27 12:30:00'`), a `DATETIME` no zone (`Invalid datetime
+  string "2014-09-27T12:30:00Z"`), and a `TIMESTAMP` needs the seconds of any time and a zone name it
+  knows, written in its own case (`Invalid timestamp: '2014-09-27T12:30'`, `Invalid time zone: utc`).
+  `DATE_TRUNC`, whose type follows its argument, an operand in `+` or `-` arithmetic (`DATE '2014-09-27' +
+  INTERVAL 1 DAY` is a `DATETIME`), and a parameter tested itself (`@a BETWEEN x AND y`) are not checked.
+  Compared with anything else (an `UNNEST` element, a subquery column) a lowercase `t` or `z` value fails
+  with `Cannot compare values of type TIMESTAMP WITH TIME ZONE and type VARCHAR`, where BigQuery accepts
+  it, and any other value is cast as DuckDB casts it: a time part or zone is dropped for a `DATE` or
+  `DATETIME`, and an unknown zone name fails with DuckDB's `Unknown TimeZone`.
 - `ORDER BY` sorts a `FLOAT64` `NaN` just after `NULL` (ascending) as BigQuery does, through an extra sort key
   that is added only when the query visibly can hold a `NaN` (a `'NaN'` string, `IEEE_DIVIDE`, a `FLOAT64`
   parameter, or a table with a `FLOAT64` column read right after `FROM` or `JOIN`). `NaN` still sorts last,

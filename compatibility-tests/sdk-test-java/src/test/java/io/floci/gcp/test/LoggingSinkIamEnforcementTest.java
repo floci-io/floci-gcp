@@ -386,6 +386,7 @@ class LoggingSinkIamEnforcementTest {
     }
 
     private static String token(String email) throws Exception {
+        TestFixtures.createServiceAccount(email);
         try (IamCredentialsClient credentials = TestFixtures.iamCredentialsClient()) {
             return credentials.generateAccessToken("projects/-/serviceAccounts/" + email, List.of(),
                     List.of("https://www.googleapis.com/auth/cloud-platform"),

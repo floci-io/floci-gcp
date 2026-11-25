@@ -20,7 +20,7 @@ floci-gcp:
   services:
     compute:
       enabled: true
-      operation-delay-ms: 50
+      operation-delay-ms: 10
       mock: true
     iam:
       enabled: true
@@ -55,6 +55,10 @@ floci-gcp:
       enabled: true
     monitoring:
       enabled: true
+      alerting-enabled: true
+      evaluation-interval-seconds: 1
+      uptime-checks-enabled: true
+      uptime-tick-interval-seconds: 1
     scheduler:
       enabled: true
       invocation-enabled: true

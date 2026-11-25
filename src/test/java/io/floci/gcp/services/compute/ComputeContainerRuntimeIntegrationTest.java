@@ -44,7 +44,7 @@ class ComputeContainerRuntimeIntegrationTest extends ComputeTestSupport {
         insert.then().statusCode(200);
         String operation = insert.jsonPath().getString("selfLink").replaceFirst("https://www.googleapis.com", "");
         String key = "zones/us-central1-a/operations/" + insert.jsonPath().getString("name");
-        Thread.sleep(150);
+        Thread.sleep(50); // past the operation's readyAt (operation-delay-ms: 10), so only the runtime phase holds it
         assertEquals("RUNNING", given().get(operation).jsonPath().getString("status"));
         assertEquals("PROVISIONING", given().get(root + ZONE + "/instances/vm").jsonPath().getString("status"));
 

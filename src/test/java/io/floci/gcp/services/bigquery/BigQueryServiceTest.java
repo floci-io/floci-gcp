@@ -14,6 +14,7 @@ import io.floci.gcp.services.bigquery.model.TableReference;
 import io.floci.gcp.services.bigquery.model.TableRow;
 import io.floci.gcp.services.bigquery.model.TableSchema;
 import io.floci.gcp.services.bigquery.model.UpdateMode;
+import io.floci.gcp.testing.ThreadStates;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -34,12 +35,14 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -782,6 +785,31 @@ class BigQueryServiceTest {
     }
 
     @Test
+    void executeImmediateEvaluatesConcatenatedTripleQuotedSqlText() {
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        BigQuerySqlEngine.Result sqlText = new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("_floci_script_value", "STRING", null))),
+                List.of(Map.of("_floci_script_value", "SELECT 9 AS result")), "SELECT", 0);
+        BigQuerySqlEngine.Result queryResult = new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("result", "INTEGER", null))),
+                List.of(Map.of("result", 9L)), "SELECT", 0);
+        when(engine.execute(any(), any())).thenReturn(sqlText, queryResult);
+        BigQueryService dynamicService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), engine);
+
+        dynamicService.query(PROJECT, "US", null, """
+                DECLARE sql_suffix STRING DEFAULT "9";
+                EXECUTE IMMEDIATE '''SELECT ''' || sql_suffix || ''' AS result''';
+                """, null);
+
+        ArgumentCaptor<BigQuerySqlEngine.Request> requests = ArgumentCaptor.forClass(BigQuerySqlEngine.Request.class);
+        verify(engine, times(2)).execute(requests.capture(), any());
+        assertTrue(requests.getAllValues().getFirst().sql().contains("|| '9' ||"),
+                requests.getAllValues().getFirst().sql());
+        assertEquals("SELECT 9 AS result", requests.getAllValues().getLast().sql());
+    }
+
+    @Test
     void executeImmediateCannotBeNested() {
         BigQueryService dynamicService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), mock(BigQuerySqlEngine.class));
@@ -828,6 +856,230 @@ class BigQueryServiceTest {
     }
 
     @Test
+    void alterExpirationTimestampEvaluatesTimestampExpressions() {
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        when(engine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("_floci_expiration_timestamp", "TIMESTAMP", null))),
+                List.of(Map.of("_floci_expiration_timestamp", "4071081600.123456")), "SELECT", 0));
+        BigQueryService alterService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), engine);
+        alterService.createDataset(PROJECT, newDataset(DATASET));
+        alterService.createTable(PROJECT, DATASET, newTable(DATASET, TABLE));
+
+        alterService.query(PROJECT, "US", null, """
+                DECLARE table_creation_time TIMESTAMP DEFAULT TIMESTAMP '2099-01-01 00:00:00+00';
+                ALTER TABLE ds1.t1 SET OPTIONS (
+                  expiration_timestamp = TIMESTAMP_ADD(
+                    table_creation_time, INTERVAL 172800000 MILLISECOND
+                  )
+                );
+                """, null);
+
+        assertEquals(String.valueOf(Instant.parse("2099-01-03T00:00:00.123456Z").toEpochMilli()),
+                alterService.getTable(PROJECT, DATASET, TABLE).getExtra().get("expirationTime"));
+    }
+
+    @Test
+    void createTableAsSelectStoresClusteringAndEvaluatedExpiration() {
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        TableSchema querySchema = new TableSchema(List.of(field("entity_id", "STRING", null)));
+        BigQuerySqlEngine.Result described = new BigQuerySqlEngine.Result(querySchema, List.of(), "SELECT", 0);
+        BigQuerySqlEngine.Result expirationDryRun = new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("_floci_expiration_timestamp", "TIMESTAMP", null))),
+                List.of(), "SELECT", 0);
+        BigQuerySqlEngine.Result expiration = new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("_floci_expiration_timestamp", "TIMESTAMP", null))),
+                List.of(Map.of("_floci_expiration_timestamp", "4070908800.123456")), "SELECT", 0);
+        BigQuerySqlEngine.Result queryResult = new BigQuerySqlEngine.Result(querySchema,
+                List.of(Map.of("entity_id", "item-1")), "SELECT", 0);
+        when(engine.execute(any(), any())).thenAnswer(invocation -> {
+            BigQuerySqlEngine.Request request = invocation.getArgument(0);
+            if (request.sql().contains("TIMESTAMP_ADD")) {
+                return request.dryRun() ? expirationDryRun : expiration;
+            }
+            if (request.sql().contains("ds1.source")) {
+                return request.dryRun() ? described : queryResult;
+            }
+            throw new AssertionError("Unexpected SQL request: " + request.sql());
+        });
+        BigQueryService createService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), engine);
+        createService.createDataset(PROJECT, newDataset(DATASET));
+
+        createService.query(PROJECT, "US", null, """
+                CREATE TABLE IF NOT EXISTS ds1.cached CLUSTER BY entity_id
+                OPTIONS(expiration_timestamp=TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 40 DAY))
+                AS SELECT entity_id FROM ds1.source
+                """, null);
+
+        Table created = createService.getTable(PROJECT, DATASET, "cached");
+        assertEquals(Map.of("fields", List.of("entity_id")), created.getExtra().get("clustering"));
+        assertEquals(String.valueOf(Instant.parse("2099-01-01T00:00:00.123456Z").toEpochMilli()),
+                created.getExtra().get("expirationTime"));
+    }
+
+    @Test
+    void clusteringTypeErrorsQuoteWhatBigQueryReports() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+        String[][] rejected = {
+                {"CREATE TABLE ds1.nested (s STRUCT<x INT64>) CLUSTER BY s",
+                        "CLUSTER BY columns may only have simple types, but column s has type STRUCT<x INT64>"},
+                {"CREATE TABLE ds1.repeated (arr ARRAY<INT64>) CLUSTER BY arr",
+                        "CLUSTER BY columns may only have simple types, but column arr has type ARRAY<INT64>"},
+                {"CREATE TABLE ds1.floating (f FLOAT64) CLUSTER BY f",
+                        "CLUSTER BY expression may not be a floating point type"},
+                {"CREATE TABLE ds1.json (j JSON) CLUSTER BY j",
+                        "CLUSTER BY expression must be groupable, but type is JSON"},
+                {"CREATE TABLE ds1.bytes (b BYTES) CLUSTER BY b",
+                        "Field b has type BYTES, which is not supported for clustering."},
+                {"CREATE TABLE ds1.unresolved (id STRING) CLUSTER BY missing_id",
+                        "Unrecognized name: missing_id"},
+                {"CREATE TABLE ds1.duplicate (a INT64) CLUSTER BY a, A",
+                        "Field can only appear once in clustering fields. Invalid field: a."}
+        };
+        for (String[] c : rejected) {
+            GcpException error = assertThrows(GcpException.class, () ->
+                    service.query(PROJECT, "US", null, c[0], null), c[0]);
+            assertEquals("invalidQuery", error.getReason(), c[0]);
+            assertEquals(c[1], error.getMessage(), c[0]);
+        }
+
+        service.query(PROJECT, "US", null, "CREATE TABLE ds1.geography (g GEOGRAPHY) CLUSTER BY g", null);
+
+        assertEquals(Map.of("fields", List.of("g")),
+                service.getTable(PROJECT, DATASET, "geography").getExtra().get("clustering"));
+    }
+
+    @Test
+    void createTableAsSelectRejectsADuplicateClusteringColumn() {
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        when(engine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("id", "INTEGER", null))),
+                List.of(Map.of("id", 1L)), "SELECT", 0));
+        BigQueryService duplicateService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), engine);
+        duplicateService.createDataset(PROJECT, newDataset(DATASET));
+
+        GcpException duplicate = assertThrows(GcpException.class, () -> duplicateService.query(PROJECT, "US", null,
+                "CREATE TABLE ds1.ctas_duplicate CLUSTER BY id, ID AS SELECT 1 AS id", null));
+
+        assertEquals("invalidQuery", duplicate.getReason());
+        assertEquals("Same column cannot be used multiple times as clustering column: 'id'",
+                duplicate.getMessage());
+    }
+
+    @Test
+    void createTableStoresTheBigQueryTableOptionsItModels() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+        service.query(PROJECT, "US", null, """
+                CREATE TABLE ds1.model (id INT64, d DATE) PARTITION BY d
+                OPTIONS(require_partition_filter=true, partition_expiration_days=7,
+                        kms_key_name='projects/p/locations/us/keyRings/r/cryptoKeys/k',
+                        enable_change_history=true, tags=[('123/env', 'prod')])
+                """, null);
+
+        Table created = service.getTable(PROJECT, DATASET, "model");
+        assertEquals(true, created.getExtra().get("requirePartitionFilter"));
+        assertEquals(Map.of("type", "DAY", "field", "d", "requirePartitionFilter", true,
+                        "expirationMs", "604800000"),
+                created.getExtra().get("timePartitioning"));
+        assertEquals(Map.of("kmsKeyName", "projects/p/locations/us/keyRings/r/cryptoKeys/k"),
+                created.getExtra().get("encryptionConfiguration"));
+        assertNull(created.getExtra().get("resourceTags"));
+
+        service.query(PROJECT, "US", null, "CREATE TABLE ds1.model_false (id INT64, d DATE) PARTITION BY d"
+                + " OPTIONS(require_partition_filter=false)", null);
+        Table notRequired = service.getTable(PROJECT, DATASET, "model_false");
+        assertEquals(false, notRequired.getExtra().get("requirePartitionFilter"));
+        assertEquals(Map.of("type", "DAY", "field", "d"), notRequired.getExtra().get("timePartitioning"));
+    }
+
+    @Test
+    void createTableValidatesThePartitionOnlyTableOptions() {
+        service.createDataset(PROJECT, newDataset(DATASET));
+        String[][] rejected = {
+                {"CREATE TABLE ds1.unpartitioned_req (id INT64) OPTIONS(require_partition_filter=true)",
+                        "require_partition_filter value in table OPTIONS is only supported for a CREATE TABLE"
+                                + " statement with a PARTITION BY clause"},
+                {"CREATE TABLE ds1.unpartitioned_exp (id INT64) OPTIONS(partition_expiration_days=7)",
+                        "partition_expiration_days value in table OPTIONS is only supported for a CREATE TABLE"
+                                + " statement with a PARTITION BY clause"},
+                {"CREATE TABLE ds1.range_exp (id INT64) PARTITION BY RANGE_BUCKET(id, GENERATE_ARRAY(0, 10))"
+                        + " OPTIONS(partition_expiration_days=7)",
+                        "partition_expiration_days in table OPTIONS is only supported for time partitioned tables."}
+        };
+        for (String[] c : rejected) {
+            GcpException error = assertThrows(GcpException.class, () ->
+                    service.query(PROJECT, "US", null, c[0], null), c[0]);
+            assertEquals("invalidQuery", error.getReason(), c[0]);
+            assertEquals(c[1], error.getMessage(), c[0]);
+        }
+
+        for (String days : List.of("0", "-1")) {
+            GcpException notPositive = assertThrows(GcpException.class, () -> service.query(PROJECT, "US", null,
+                    "CREATE TABLE ds1.not_positive (id INT64, d DATE) PARTITION BY d"
+                            + " OPTIONS(partition_expiration_days=" + days + ")", null));
+            assertEquals("invalidQuery", notPositive.getReason());
+            assertEquals("partition_expiration_days value in table OPTIONS must be positive",
+                    notPositive.getMessage());
+        }
+
+        service.query(PROJECT, "US", null, "CREATE TABLE ds1.tiny_expiration (id INT64, d DATE) PARTITION BY d"
+                + " OPTIONS(partition_expiration_days=0.00000001)", null);
+        assertEquals(Map.of("type", "DAY", "field", "d", "expirationMs", "1"),
+                service.getTable(PROJECT, DATASET, "tiny_expiration").getExtra().get("timePartitioning"));
+
+        service.query(PROJECT, "US", null, "CREATE TABLE ds1.range_req (id INT64)"
+                + " PARTITION BY RANGE_BUCKET(id, GENERATE_ARRAY(0, 10)) OPTIONS(require_partition_filter=true)",
+                null);
+        Table ranged = service.getTable(PROJECT, DATASET, "range_req");
+        assertEquals(true, ranged.getExtra().get("requirePartitionFilter"));
+        assertNull(ranged.getExtra().get("timePartitioning"));
+    }
+
+    @Test
+    void createTableAsSelectBindsItsQueryToTheParametersAfterTheOptionExpressions() {
+        String sql = "CREATE TABLE ds1.cached OPTIONS(description=?) AS SELECT ? AS value";
+        List<Map<String, Object>> parameters = List.of(positionalParameter("cache"), positionalParameter("wanted"));
+
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        when(engine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("value", "STRING", null))),
+                List.of(Map.of("value", "wanted")), "SELECT", 0));
+        BigQueryService parameterizedService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), engine);
+        parameterizedService.createDataset(PROJECT, newDataset(DATASET));
+
+        parameterizedService.query(PROJECT, "US", null,
+                new BigQueryService.QueryOptions(sql, null, parameters, "POSITIONAL", false, false));
+
+        List<BigQuerySqlEngine.Request> executed = queryRequests(engine, "AS value");
+        assertEquals(1, executed.size());
+        assertEquals(List.of(parameters.get(1)), executed.getFirst().queryParameters());
+
+        BigQuerySqlEngine dryRunEngine = mock(BigQuerySqlEngine.class);
+        when(dryRunEngine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
+                new TableSchema(List.of(field("value", "STRING", null))), List.of(), "SELECT", 0));
+        BigQueryService dryRunService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), dryRunEngine);
+        dryRunService.createDataset(PROJECT, newDataset(DATASET));
+
+        dryRunService.query(PROJECT, "US", null,
+                new BigQueryService.QueryOptions(sql, null, parameters, "POSITIONAL", true, false));
+
+        List<BigQuerySqlEngine.Request> described = queryRequests(dryRunEngine, "AS value");
+        assertEquals(1, described.size());
+        assertTrue(described.getFirst().dryRun());
+        assertEquals(List.of(parameters.get(1)), described.getFirst().queryParameters());
+    }
+
+    private static List<BigQuerySqlEngine.Request> queryRequests(BigQuerySqlEngine engine, String sqlFragment) {
+        ArgumentCaptor<BigQuerySqlEngine.Request> requests = ArgumentCaptor.forClass(BigQuerySqlEngine.Request.class);
+        verify(engine, atLeastOnce()).execute(requests.capture(), any());
+        return requests.getAllValues().stream().filter(request -> request.sql().contains(sqlFragment)).toList();
+    }
+
+    @Test
     void dateAndTimestampVariablesCanBeDeclaredAndAssigned() {
         BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
         when(engine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
@@ -851,6 +1103,30 @@ class BigQueryServiceTest {
         assertTrue(request.getValue().sql().contains("DATE '2025-01-02'"), request.getValue().sql());
         assertTrue(request.getValue().sql().contains("TIMESTAMP '2025-01-02T12:00:00Z'"),
                 request.getValue().sql());
+    }
+
+    @Test
+    void timestampVariablesAcceptEpochSecondsFromTypedQueryResults() {
+        BigQuerySqlEngine engine = mock(BigQuerySqlEngine.class);
+        when(engine.execute(any(), any())).thenReturn(
+                new BigQuerySqlEngine.Result(new TableSchema(List.of(field("creation_time", "TIMESTAMP", null))),
+                        List.of(Map.of("creation_time", "1704164645.123456")), "SELECT", 0),
+                new BigQuerySqlEngine.Result(new TableSchema(List.of(field("created_at", "TIMESTAMP", null))),
+                        List.of(Map.of("created_at", "2024-01-02T03:04:05.123456Z")), "SELECT", 0));
+        BigQueryService variableService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), engine);
+
+        variableService.query(PROJECT, "US", null, """
+                DECLARE created_at TIMESTAMP DEFAULT (
+                  SELECT creation_time FROM ds1.INFORMATION_SCHEMA.TABLES WHERE table_name = 't1'
+                );
+                SELECT created_at;
+                """, null);
+
+        ArgumentCaptor<BigQuerySqlEngine.Request> requests = ArgumentCaptor.forClass(BigQuerySqlEngine.Request.class);
+        verify(engine, times(2)).execute(requests.capture(), any());
+        assertTrue(requests.getAllValues().get(1).sql().contains(
+                "TIMESTAMP '2024-01-02T03:04:05.123456Z'"), requests.getAllValues().get(1).sql());
     }
 
     @Test
@@ -1655,6 +1931,96 @@ class BigQueryServiceTest {
     }
 
     @Test
+    void appendToTheDestinationOfAWriteTruncateQueryWaitsForTheReplacement() throws Exception {
+        // The job reads ds1.t1 and replaces it, so an append acknowledged between the read and the replacement
+        // would be dropped; it has to wait and land after the replacement instead.
+        CountDownLatch queryStarted = new CountDownLatch(1);
+        CountDownLatch finishQuery = new CountDownLatch(1);
+        BigQuerySqlEngine blockingEngine = mock(BigQuerySqlEngine.class);
+        when(blockingEngine.execute(any(), any())).thenAnswer(invocation -> {
+            queryStarted.countDown();
+            if (!finishQuery.await(10, TimeUnit.SECONDS)) {
+                throw new AssertionError("timed out waiting to finish the destination query");
+            }
+            return new BigQuerySqlEngine.Result(newTable(DATASET, TABLE).getSchema(),
+                    List.of(Map.of("name", "from-query", "age", 2)), "SELECT", 0);
+        });
+        BigQueryService concurrentService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), blockingEngine);
+        concurrentService.createDataset(PROJECT, newDataset(DATASET));
+        concurrentService.createTable(PROJECT, DATASET, newTable(DATASET, TABLE));
+        concurrentService.appendRows(PROJECT, DATASET, TABLE, List.of(Map.of("name", "before", "age", 1)));
+        BigQueryService.QueryOptions options = new BigQueryService.QueryOptions(
+                "SELECT * FROM ds1.t1", null, List.of(), null, false, false,
+                new TableReference(PROJECT, DATASET, TABLE), "WRITE_TRUNCATE", null);
+
+        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
+            Future<StoredJob> query = executor.submit(() -> concurrentService.query(PROJECT, "US", null, options));
+            assertTrue(queryStarted.await(5, TimeUnit.SECONDS));
+            FutureTask<Void> append = new FutureTask<>(() -> concurrentService.appendRows(PROJECT, DATASET, TABLE,
+                    List.of(Map.of("name", "after", "age", 3))), null);
+            Thread appendThread = new Thread(append, "append-to-destination");
+            appendThread.start();
+            try {
+                // The append must be parked on writeLock, which the query holds, not merely not yet scheduled.
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+                while (appendThread.getState() != Thread.State.BLOCKED && !append.isDone()
+                        && System.nanoTime() < deadline) {
+                    Thread.onSpinWait();
+                }
+                assertEquals(Thread.State.BLOCKED, appendThread.getState(),
+                        "an append to a WRITE_TRUNCATE destination must wait for the replacement");
+            } finally {
+                finishQuery.countDown();
+            }
+            query.get(5, TimeUnit.SECONDS);
+            append.get(5, TimeUnit.SECONDS);
+        }
+
+        List<String> names = concurrentService.listTableData(PROJECT, DATASET, TABLE).rows().stream()
+                .map(row -> row.getF().getFirst().getV().toString()).toList();
+        assertEquals(List.of("from-query", "after"), names);
+    }
+
+    @Test
+    void appendDoesNotWaitForAWriteTruncateQueryThatDoesNotReadItsDestination() throws Exception {
+        CountDownLatch queryStarted = new CountDownLatch(1);
+        CountDownLatch finishQuery = new CountDownLatch(1);
+        BigQuerySqlEngine blockingEngine = mock(BigQuerySqlEngine.class);
+        when(blockingEngine.execute(any(), any())).thenAnswer(invocation -> {
+            queryStarted.countDown();
+            if (!finishQuery.await(10, TimeUnit.SECONDS)) {
+                throw new AssertionError("timed out waiting to finish the destination query");
+            }
+            return new BigQuerySqlEngine.Result(new TableSchema(List.of(field("value", "INTEGER", null))),
+                    List.of(Map.of("value", 1)), "SELECT", 0);
+        });
+        BigQueryService concurrentService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), blockingEngine);
+        concurrentService.createDataset(PROJECT, newDataset(DATASET));
+        concurrentService.createTable(PROJECT, DATASET, newTable(DATASET, TABLE));
+        BigQueryService.QueryOptions options = new BigQueryService.QueryOptions(
+                "SELECT 1 AS value", null, List.of(), null, false, false,
+                new TableReference(PROJECT, DATASET, "output"), "WRITE_TRUNCATE", null);
+
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
+            Future<StoredJob> query = executor.submit(() -> concurrentService.query(PROJECT, "US", null, options));
+            assertTrue(queryStarted.await(5, TimeUnit.SECONDS));
+            Future<?> append = executor.submit(() -> concurrentService.appendRows(PROJECT, DATASET, TABLE,
+                    List.of(Map.of("name", "concurrent", "age", 1))));
+            try {
+                append.get(3, TimeUnit.SECONDS);
+            } finally {
+                finishQuery.countDown();
+            }
+            query.get(5, TimeUnit.SECONDS);
+        }
+
+        assertEquals(1, concurrentService.listTableData(PROJECT, DATASET, TABLE).rows().size());
+        assertEquals(1, concurrentService.listTableData(PROJECT, DATASET, "output").rows().size());
+    }
+
+    @Test
     void deleteJobKeepsACallerSuppliedDestinationTable() {
         seedTwoRows();
         BigQueryService.QueryOptions options = new BigQueryService.QueryOptions(
@@ -1942,8 +2308,6 @@ class BigQueryServiceTest {
     void appendToSelfReferencedCreateReplaceWaitsForTablePublication() throws Exception {
         CountDownLatch queryStarted = new CountDownLatch(1);
         CountDownLatch finishQuery = new CountDownLatch(1);
-        CountDownLatch appendStarted = new CountDownLatch(1);
-        CountDownLatch appendFinished = new CountDownLatch(1);
         BigQuerySqlEngine blockingEngine = mock(BigQuerySqlEngine.class);
         when(blockingEngine.execute(any(), any())).thenAnswer(invocation -> {
             queryStarted.countDown();
@@ -1963,14 +2327,14 @@ class BigQueryServiceTest {
             Future<StoredJob> query = executor.submit(() -> concurrentService.query(PROJECT, null, null,
                     "CREATE OR REPLACE TABLE ds1.t1 AS SELECT * FROM ds1.t1", null));
             assertTrue(queryStarted.await(5, TimeUnit.SECONDS));
+            AtomicReference<Thread> appender = new AtomicReference<>();
             Future<?> append = executor.submit(() -> {
-                appendStarted.countDown();
+                appender.set(Thread.currentThread());
                 concurrentService.appendRows(PROJECT, DATASET, TABLE, List.of(Map.of("name", "after", "age", 3)));
-                appendFinished.countDown();
             });
-            assertTrue(appendStarted.await(5, TimeUnit.SECONDS));
             try {
-                assertFalse(appendFinished.await(100, TimeUnit.MILLISECONDS),
+                ThreadStates.awaitBlockedOrDone(appender, append);
+                assertFalse(append.isDone(),
                         "self-referencing replacement must serialize with appends to its source table");
             } finally {
                 finishQuery.countDown();
@@ -2013,7 +2377,6 @@ class BigQueryServiceTest {
     void appendToAViewSourceWaitsForTheReplacementThatReadsIt() throws Exception {
         CountDownLatch queryStarted = new CountDownLatch(1);
         CountDownLatch finishQuery = new CountDownLatch(1);
-        CountDownLatch appendFinished = new CountDownLatch(1);
         BigQuerySqlEngine blockingEngine = mock(BigQuerySqlEngine.class);
         // createTable validates a view's query, so the engine answers that one before it starts blocking.
         when(blockingEngine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
@@ -2038,12 +2401,14 @@ class BigQueryServiceTest {
             Future<StoredJob> query = executor.submit(() -> concurrentService.query(PROJECT, null, null,
                     "CREATE OR REPLACE TABLE ds1.t1 AS SELECT * FROM ds1.source_view", null));
             assertTrue(queryStarted.await(5, TimeUnit.SECONDS));
+            AtomicReference<Thread> appender = new AtomicReference<>();
             Future<?> append = executor.submit(() -> {
+                appender.set(Thread.currentThread());
                 concurrentService.appendRows(PROJECT, DATASET, TABLE, List.of(Map.of("name", "after", "age", 3)));
-                appendFinished.countDown();
             });
             try {
-                assertFalse(appendFinished.await(100, TimeUnit.MILLISECONDS),
+                ThreadStates.awaitBlockedOrDone(appender, append);
+                assertFalse(append.isDone(),
                         "a replacement that reads the target through a view must serialize with its appends");
             } finally {
                 finishQuery.countDown();
@@ -2060,7 +2425,6 @@ class BigQueryServiceTest {
     void appendToATargetReadThroughAViewInAnotherDatasetWaitsForTheReplacement() throws Exception {
         CountDownLatch queryStarted = new CountDownLatch(1);
         CountDownLatch finishQuery = new CountDownLatch(1);
-        CountDownLatch appendFinished = new CountDownLatch(1);
         BigQuerySqlEngine blockingEngine = mock(BigQuerySqlEngine.class);
         // createTable validates a view's query, so the engine answers that one before it starts blocking.
         when(blockingEngine.execute(any(), any())).thenReturn(new BigQuerySqlEngine.Result(
@@ -2084,12 +2448,14 @@ class BigQueryServiceTest {
             Future<StoredJob> query = executor.submit(() -> concurrentService.query(PROJECT, null, null,
                     "CREATE OR REPLACE TABLE ds1.t1 AS SELECT * FROM ds2.other_view", null));
             assertTrue(queryStarted.await(5, TimeUnit.SECONDS));
+            AtomicReference<Thread> appender = new AtomicReference<>();
             Future<?> append = executor.submit(() -> {
+                appender.set(Thread.currentThread());
                 concurrentService.appendRows(PROJECT, DATASET, TABLE, List.of(Map.of("name", "after", "age", 3)));
-                appendFinished.countDown();
             });
             try {
-                assertFalse(appendFinished.await(100, TimeUnit.MILLISECONDS),
+                ThreadStates.awaitBlockedOrDone(appender, append);
+                assertFalse(append.isDone(),
                         "a view in another dataset that reads the target must serialize with its appends");
             } finally {
                 finishQuery.countDown();
@@ -2192,7 +2558,6 @@ class BigQueryServiceTest {
     void appendToAMatchingWildcardSourceWaitsForTheReplacement() throws Exception {
         CountDownLatch queryStarted = new CountDownLatch(1);
         CountDownLatch finishQuery = new CountDownLatch(1);
-        CountDownLatch appendFinished = new CountDownLatch(1);
         BigQuerySqlEngine blockingEngine = mock(BigQuerySqlEngine.class);
         when(blockingEngine.execute(any(), any())).thenAnswer(invocation -> {
             queryStarted.countDown();
@@ -2212,12 +2577,14 @@ class BigQueryServiceTest {
             Future<StoredJob> query = executor.submit(() -> concurrentService.query(PROJECT, null, null,
                     "CREATE OR REPLACE TABLE ds1.t1 AS SELECT * FROM `ds1.t*`", null));
             assertTrue(queryStarted.await(5, TimeUnit.SECONDS));
+            AtomicReference<Thread> appender = new AtomicReference<>();
             Future<?> append = executor.submit(() -> {
+                appender.set(Thread.currentThread());
                 concurrentService.appendRows(PROJECT, DATASET, TABLE, List.of(Map.of("name", "after", "age", 3)));
-                appendFinished.countDown();
             });
             try {
-                assertFalse(appendFinished.await(100, TimeUnit.MILLISECONDS),
+                ThreadStates.awaitBlockedOrDone(appender, append);
+                assertFalse(append.isDone(),
                         "a replacement through a wildcard that matches the target must serialize with its appends");
             } finally {
                 finishQuery.countDown();
@@ -2234,8 +2601,6 @@ class BigQueryServiceTest {
     void wholeTableDeleteWaitsForAnInFlightAppendAndWins() throws Exception {
         CountDownLatch writeStarted = new CountDownLatch(1);
         CountDownLatch allowWrite = new CountDownLatch(1);
-        CountDownLatch deleteStarted = new CountDownLatch(1);
-        CountDownLatch deleteFinished = new CountDownLatch(1);
         ArmableBlockingPutStorage<String, StoredTableData> blockingData =
                 new ArmableBlockingPutStorage<>(writeStarted, allowWrite);
         BigQueryService concurrentService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
@@ -2248,14 +2613,13 @@ class BigQueryServiceTest {
             Future<?> append = executor.submit(() -> concurrentService.appendRows(PROJECT, DATASET, TABLE,
                     List.of(Map.of("name", "in-flight", "age", 1))));
             assertTrue(writeStarted.await(5, TimeUnit.SECONDS));
+            AtomicReference<Thread> deleter = new AtomicReference<>();
             Future<?> delete = executor.submit(() -> {
-                deleteStarted.countDown();
+                deleter.set(Thread.currentThread());
                 concurrentService.deleteTable(PROJECT, DATASET, TABLE);
-                deleteFinished.countDown();
             });
-            assertTrue(deleteStarted.await(5, TimeUnit.SECONDS));
-            assertFalse(deleteFinished.await(100, TimeUnit.MILLISECONDS),
-                    "delete must wait for the mutation that already holds writeLock");
+            ThreadStates.awaitBlockedOrDone(deleter, delete);
+            assertFalse(delete.isDone(), "delete must wait for the mutation that already holds writeLock");
 
             allowWrite.countDown();
             append.get(5, TimeUnit.SECONDS);
@@ -2541,6 +2905,13 @@ class BigQueryServiceTest {
                         "CREATE OR REPLACE TABLE ds1.partitioned (ts TIMESTAMP) "
                                 + "PARTITION BY TIMESTAMP_TRUNC(ts, HOUR)", null, List.of(),
                         null, true, false))).getReason());
+
+        assertEquals("partition_expiration_days value in table OPTIONS must be positive",
+                assertThrows(GcpException.class, () -> service.query(PROJECT, "US", null,
+                        new BigQueryService.QueryOptions(
+                                "CREATE TABLE ds1.zero_expiration (id INT64, d DATE) PARTITION BY d"
+                                        + " OPTIONS(partition_expiration_days=0)", null, List.of(),
+                                null, true, false))).getMessage());
 
         // A dry run that is valid still reports success and writes nothing.
         StoredJob ok = service.query(PROJECT, "US", null, new BigQueryService.QueryOptions(
@@ -3142,6 +3513,10 @@ class BigQueryServiceTest {
         Dataset d = new Dataset();
         d.setDatasetReference(new DatasetReference(null, datasetId));
         return d;
+    }
+
+    private static Map<String, Object> positionalParameter(String value) {
+        return Map.of("parameterType", Map.of("type", "STRING"), "parameterValue", Map.of("value", value));
     }
 
     private Table newTable(String datasetId, String tableId) {
@@ -3990,8 +4365,6 @@ class BigQueryServiceTest {
     void copyWaitsForAnInFlightSourceMutationAndIncludesIt() throws Exception {
         CountDownLatch writeStarted = new CountDownLatch(1);
         CountDownLatch allowWrite = new CountDownLatch(1);
-        CountDownLatch copyStarted = new CountDownLatch(1);
-        CountDownLatch copyFinished = new CountDownLatch(1);
         ArmableBlockingPutStorage<String, StoredTableData> blockingData =
                 new ArmableBlockingPutStorage<>(writeStarted, allowWrite);
         BigQueryService concurrentService = new BigQueryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
@@ -4004,15 +4377,13 @@ class BigQueryServiceTest {
             Future<?> append = executor.submit(() -> concurrentService.appendRows(PROJECT, DATASET, TABLE,
                     List.of(Map.of("name", "in-flight", "age", 1))));
             assertTrue(writeStarted.await(5, TimeUnit.SECONDS));
+            AtomicReference<Thread> copier = new AtomicReference<>();
             Future<StoredJob> copy = executor.submit(() -> {
-                copyStarted.countDown();
-                StoredJob job = concurrentService.copy(PROJECT, null, null, copyConfig(TABLE, "copied"));
-                copyFinished.countDown();
-                return job;
+                copier.set(Thread.currentThread());
+                return concurrentService.copy(PROJECT, null, null, copyConfig(TABLE, "copied"));
             });
-            assertTrue(copyStarted.await(5, TimeUnit.SECONDS));
-            assertFalse(copyFinished.await(100, TimeUnit.MILLISECONDS),
-                    "copy must wait for the source mutation that already holds writeLock");
+            ThreadStates.awaitBlockedOrDone(copier, copy);
+            assertFalse(copy.isDone(), "copy must wait for the source mutation that already holds writeLock");
 
             allowWrite.countDown();
             append.get(5, TimeUnit.SECONDS);

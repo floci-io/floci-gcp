@@ -1004,6 +1004,9 @@ public class FirestoreService {
 
     private boolean matchesFieldFilter(StoredDocument doc, StructuredQuery.FieldFilter ff) {
         String path = ff.getField().getFieldPath();
+        if (NAME_FIELD.equals(path)) {
+            return matchesNameFilter(doc, ff);
+        }
         StoredValue stored = resolveFieldPath(doc, path);
         Value filterValue = ff.getValue();
         OptionalInt filterComparison = stored == null
@@ -1030,6 +1033,30 @@ public class FirestoreService {
                     && stored.getArrayValue() != null && filterValue.hasArrayValue()
                     && filterValue.getArrayValue().getValuesList().stream()
                         .anyMatch(fv -> stored.getArrayValue().stream().anyMatch(sv -> sv.matchesEqual(fv)));
+            default -> true;
+        };
+    }
+
+    /**
+     * Filters on {@code __name__} compare the document's resource name, which is not one of its
+     * fields, the same way cursors on {@code __name__} do.
+     */
+    private boolean matchesNameFilter(StoredDocument doc, StructuredQuery.FieldFilter ff) {
+        Value filterValue = ff.getValue();
+        return switch (ff.getOp()) {
+            case EQUAL -> compareDocFieldToValue(doc, NAME_FIELD, filterValue) == 0;
+            case NOT_EQUAL -> compareDocFieldToValue(doc, NAME_FIELD, filterValue) != 0;
+            case LESS_THAN -> compareDocFieldToValue(doc, NAME_FIELD, filterValue) < 0;
+            case LESS_THAN_OR_EQUAL -> compareDocFieldToValue(doc, NAME_FIELD, filterValue) <= 0;
+            case GREATER_THAN -> compareDocFieldToValue(doc, NAME_FIELD, filterValue) > 0;
+            case GREATER_THAN_OR_EQUAL -> compareDocFieldToValue(doc, NAME_FIELD, filterValue) >= 0;
+            case IN -> filterValue.hasArrayValue()
+                    && filterValue.getArrayValue().getValuesList().stream()
+                        .anyMatch(v -> compareDocFieldToValue(doc, NAME_FIELD, v) == 0);
+            case NOT_IN -> filterValue.hasArrayValue()
+                    && filterValue.getArrayValue().getValuesList().stream()
+                        .noneMatch(v -> compareDocFieldToValue(doc, NAME_FIELD, v) == 0);
+            case ARRAY_CONTAINS, ARRAY_CONTAINS_ANY -> false;
             default -> true;
         };
     }

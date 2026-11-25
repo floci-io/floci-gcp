@@ -38,16 +38,24 @@ import java.util.Set;
 @Consumes(MediaType.APPLICATION_JSON)
 public class IamController {
 
+    /**
+     * Only the service-account paths this controller serves. A wider template would also claim other APIs'
+     * paths that no literal route matches, such as {@code services/x%3Aenable}: http.proto expands a colon
+     * inside a path variable as {@code %3A}, so that is a resource name, not the {@code :enable} verb, and
+     * under enforcement the request would be gated as an IAM call.
+     */
+    static final String SERVICE_ACCOUNT_PATHS = "/{rest:[^/]+/serviceAccounts(?:/.*)?}";
+
     private static final Logger LOG = Logger.getLogger(IamController.class);
 
     private static final List<String> CUSTOM_METHODS =
-            List.of("getIamPolicy", "setIamPolicy", "testIamPermissions", "signBlob");
+            List.of("getIamPolicy", "setIamPolicy", "testIamPermissions", "signBlob", "disable", "enable");
 
     @Inject
     IamService service;
 
     @POST
-    @Path("/{rest:.+}")
+    @Path(SERVICE_ACCOUNT_PATHS)
     public Response post(@PathParam("rest") String rest, Map<String, Object> body) {
         IamPath p = parsePath(rest);
         LOG.debugf("IAM POST %s project=%s id=%s method=%s", rest, p.project(), p.identifier(), p.customMethod());
@@ -81,7 +89,7 @@ public class IamController {
     // UpdateServiceAccount: PUT /v1/projects/{project}/serviceAccounts/{email} with the
     // ServiceAccount as the body.
     @PUT
-    @Path("/{rest:.+}")
+    @Path(SERVICE_ACCOUNT_PATHS)
     public Response put(@PathParam("rest") String rest, Map<String, Object> body) {
         IamPath p = parsePath(rest);
         LOG.debugf("IAM PUT %s project=%s id=%s", rest, p.project(), p.identifier());
@@ -94,7 +102,7 @@ public class IamController {
     // PatchServiceAccount: PATCH /v1/projects/{project}/serviceAccounts/{email} with body
     // { "serviceAccount": {...}, "updateMask": "displayName,description" }.
     @PATCH
-    @Path("/{rest:.+}")
+    @Path(SERVICE_ACCOUNT_PATHS)
     public Response patch(@PathParam("rest") String rest, @QueryParam("updateMask") String queryMask,
             Map<String, Object> body) {
         IamPath p = parsePath(rest);
@@ -144,7 +152,7 @@ public class IamController {
     }
 
     @GET
-    @Path("/{rest:.+}")
+    @Path(SERVICE_ACCOUNT_PATHS)
     public Response get(@PathParam("rest") String rest,
             @QueryParam("pageSize") @DefaultValue("0") int pageSize,
             @QueryParam("pageToken") String pageToken) {
@@ -186,7 +194,7 @@ public class IamController {
 
     @DELETE
     @Consumes({MediaType.APPLICATION_JSON, MediaType.APPLICATION_FORM_URLENCODED})
-    @Path("/{rest:.+}")
+    @Path(SERVICE_ACCOUNT_PATHS)
     public Response delete(@PathParam("rest") String rest) {
         IamPath p = parsePath(rest);
         LOG.debugf("IAM DELETE %s project=%s id=%s", rest, p.project(), p.identifier());
@@ -209,6 +217,13 @@ public class IamController {
 
     @SuppressWarnings("unchecked")
     private Response handleCustomMethod(IamPath p, Map<String, Object> body) {
+        if ("disable".equals(p.customMethod()) || "enable".equals(p.customMethod())) {
+            if (p.identifier().contains("/")) {
+                return Response.status(Response.Status.NOT_FOUND).build();
+            }
+            service.setServiceAccountDisabled(p.project(), p.identifier(), "disable".equals(p.customMethod()));
+            return Response.ok(Map.of()).build();
+        }
         String resource = "testIamPermissions".equals(p.customMethod())
                 ? "projects/" + p.project() + "/serviceAccounts/" + p.identifier()
                 : service.serviceAccountResource(p.project(), p.identifier());

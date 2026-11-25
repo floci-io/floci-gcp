@@ -130,14 +130,37 @@ public class ServiceUsageService implements ServiceStateProvider {
     }
 
     public Operation enable(String project, String serviceId) {
-        requireProject(project);
-        requireServiceId(serviceId);
-        Service service = writeState(project, serviceId, State.ENABLED);
-        LOG.infof("enable service name=%s", service.getName());
+        Service service = enableState(project, serviceId);
         return done(EnableServiceResponse.newBuilder().setService(service).build(), service.getName());
     }
 
     public Operation disable(String project, String serviceId) {
+        Service service = disableState(project, serviceId);
+        return done(DisableServiceResponse.newBuilder().setService(service).build(), service.getName());
+    }
+
+    // The v1beta1 messages share simple names with the v1 ones imported above, so they are qualified.
+    /** v1beta1 {@code services.enable}: the same state change, with an {@code Empty} response. */
+    public Operation enableBeta(String project, String serviceId) {
+        Service service = enableState(project, serviceId);
+        return doneBeta(service.getName());
+    }
+
+    /** v1beta1 {@code services.disable}: the same state change, with an {@code Empty} response. */
+    public Operation disableBeta(String project, String serviceId) {
+        Service service = disableState(project, serviceId);
+        return doneBeta(service.getName());
+    }
+
+    private Service enableState(String project, String serviceId) {
+        requireProject(project);
+        requireServiceId(serviceId);
+        Service service = writeState(project, serviceId, State.ENABLED);
+        LOG.infof("enable service name=%s", service.getName());
+        return service;
+    }
+
+    private Service disableState(String project, String serviceId) {
         requireProject(project);
         requireServiceId(serviceId);
         String name = serviceName(project, serviceId);
@@ -147,13 +170,26 @@ public class ServiceUsageService implements ServiceStateProvider {
         }
         Service service = writeState(project, serviceId, State.DISABLED);
         LOG.infof("disable service name=%s", name);
-        return done(DisableServiceResponse.newBuilder().setService(service).build(), name);
+        return service;
     }
 
     public Service get(String project, String serviceId) {
         requireProject(project);
         requireServiceId(serviceId);
         return buildService(project, serviceId, readState(project, serviceId));
+    }
+
+    public com.google.api.serviceusage.v1beta1.Service getBeta(String project, String serviceId) {
+        return toBeta(get(project, serviceId));
+    }
+
+    public com.google.api.serviceusage.v1beta1.ListServicesResponse listBeta(String project, int pageSize,
+                                                                             String pageToken, String filter) {
+        ListServicesResponse page = list(project, pageSize, pageToken, filter);
+        return com.google.api.serviceusage.v1beta1.ListServicesResponse.newBuilder()
+                .addAllServices(page.getServicesList().stream().map(ServiceUsageService::toBeta).toList())
+                .setNextPageToken(page.getNextPageToken())
+                .build();
     }
 
     public ListServicesResponse list(String project, int pageSize, String pageToken, String filter) {
@@ -183,9 +219,24 @@ public class ServiceUsageService implements ServiceStateProvider {
     }
 
     public Operation batchEnable(String project, String body) {
-        requireProject(project);
         BatchEnableServicesRequest request = ProtoJson.merge(body, BatchEnableServicesRequest.newBuilder()).build();
-        List<String> serviceIds = request.getServiceIdsList();
+        List<Service> services = batchEnableState(project, request.getServiceIdsList());
+        BatchEnableServicesResponse response = BatchEnableServicesResponse.newBuilder()
+                .addAllServices(services)
+                .build();
+        return done(response, services.stream().map(Service::getName).toArray(String[]::new));
+    }
+
+    /** v1beta1 {@code services.batchEnable}: the same state change, with an {@code Empty} response. */
+    public Operation batchEnableBeta(String project, String body) {
+        com.google.api.serviceusage.v1beta1.BatchEnableServicesRequest request = ProtoJson.merge(body,
+                com.google.api.serviceusage.v1beta1.BatchEnableServicesRequest.newBuilder()).build();
+        List<Service> services = batchEnableState(project, request.getServiceIdsList());
+        return doneBeta(services.stream().map(Service::getName).toArray(String[]::new));
+    }
+
+    private List<Service> batchEnableState(String project, List<String> serviceIds) {
+        requireProject(project);
         if (serviceIds.isEmpty()) {
             throw GcpException.invalidArgument("service_ids must not be empty.");
         }
@@ -199,10 +250,7 @@ public class ServiceUsageService implements ServiceStateProvider {
             services.add(writeState(project, serviceId, State.ENABLED));
         }
         LOG.infof("batch enable services parent=projects/%s count=%d", project, services.size());
-        BatchEnableServicesResponse response = BatchEnableServicesResponse.newBuilder()
-                .addAllServices(services)
-                .build();
-        return done(response, services.stream().map(Service::getName).toArray(String[]::new));
+        return services;
     }
 
     public BatchGetServicesResponse batchGet(String project, List<String> names) {
@@ -281,6 +329,24 @@ public class ServiceUsageService implements ServiceStateProvider {
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException("SHA-256 not available", e);
         }
+    }
+
+    private Operation doneBeta(String... resourceNames) {
+        com.google.api.serviceusage.v1beta1.OperationMetadata metadata =
+                com.google.api.serviceusage.v1beta1.OperationMetadata.newBuilder()
+                        .addAllResourceNames(List.of(resourceNames))
+                        .build();
+        return operations.done("", Empty.getDefaultInstance(), metadata);
+    }
+
+    private static com.google.api.serviceusage.v1beta1.Service toBeta(Service service) {
+        return com.google.api.serviceusage.v1beta1.Service.newBuilder()
+                .setName(service.getName())
+                .setParent(service.getParent())
+                .setConfig(com.google.api.serviceusage.v1beta1.ServiceConfig.newBuilder()
+                        .setName(service.getConfig().getName()))
+                .setStateValue(service.getStateValue())
+                .build();
     }
 
     private Operation done(com.google.protobuf.Message response, String... resourceNames) {

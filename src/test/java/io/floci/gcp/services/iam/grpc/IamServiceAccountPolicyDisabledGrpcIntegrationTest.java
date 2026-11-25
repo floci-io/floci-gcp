@@ -14,22 +14,18 @@ import io.grpc.Metadata;
 import io.grpc.stub.MetadataUtils;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
-import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
 import java.net.URI;
 import java.time.Instant;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 @QuarkusTest
-@TestProfile(IamServiceAccountPolicyDisabledGrpcIntegrationTest.DisabledProfile.class)
 class IamServiceAccountPolicyDisabledGrpcIntegrationTest {
     @Inject
     CredentialTokenService tokens;
@@ -64,13 +60,6 @@ class IamServiceAccountPolicyDisabledGrpcIntegrationTest {
                     .addAllPermissions(permissions).build()).getPermissionsList());
         } finally {
             channel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
-        }
-    }
-
-    public static class DisabledProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci-gcp.services.iam.authorization-mode", "disabled");
         }
     }
 }

@@ -9,6 +9,8 @@ import io.floci.gcp.services.bigquery.model.TableFieldSchema;
 import java.io.IOException;
 import java.math.BigInteger;
 import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -37,6 +39,8 @@ final class InformationSchema {
 
     private static final Map<String, List<TableFieldSchema>> VIEWS = new LinkedHashMap<>();
     private static final ObjectMapper JSON = new ObjectMapper();
+    private static final DateTimeFormatter TIMESTAMP_OPTION_FORMAT = DateTimeFormatter
+            .ofPattern("uuuu-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC);
 
     static {
         VIEWS.put("SCHEMATA", fields("catalog_name STRING", "schema_name STRING", "schema_owner STRING",
@@ -418,6 +422,13 @@ final class InformationSchema {
                     .map(e -> "STRUCT(" + quote(e.getKey()) + ", " + quote(e.getValue()) + ")")
                     .collect(Collectors.joining(", ", "[", "]"));
             rows.add(option(projectId, datasetId, tableId, "labels", "ARRAY<STRUCT<STRING, STRING>>", labels));
+        }
+        Object expirationTime = table.getExtra().get("expirationTime");
+        if (expirationTime != null) {
+            String timestamp = TIMESTAMP_OPTION_FORMAT.format(
+                    Instant.ofEpochMilli(Long.parseLong(expirationTime.toString())));
+            rows.add(option(projectId, datasetId, tableId, "expiration_timestamp", "TIMESTAMP",
+                    "TIMESTAMP " + quote(timestamp)));
         }
         return rows;
     }

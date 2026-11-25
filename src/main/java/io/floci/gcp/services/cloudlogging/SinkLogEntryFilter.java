@@ -117,7 +117,7 @@ final class SinkLogEntryFilter {
         };
     }
 
-    private static Function<StoredLogEntry, Object> accessor(String field) {
+    static Function<StoredLogEntry, Object> accessor(String field) {
         return switch (field) {
             case "logName" -> StoredLogEntry::getLogName;
             case "severity" -> StoredLogEntry::getSeverity;

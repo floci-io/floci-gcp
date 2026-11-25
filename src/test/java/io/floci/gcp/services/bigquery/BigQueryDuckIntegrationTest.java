@@ -3572,6 +3572,25 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(5)
+    void anAggregateSelectAliasInsideAnOrderByExpressionReadsTheAliasLikeBigQuery() {
+        String source = "(SELECT 1 AS x, 'a' AS g UNION ALL SELECT 2, 'b' UNION ALL SELECT 3, 'a') t";
+        for (String[] c : new String[][] {
+                {"SELECT g, COUNT(*) AS x FROM " + source + " GROUP BY g ORDER BY x * -1, g", "a:2,b:1"},
+                {"SELECT g, SUM(x) AS x FROM " + source + " GROUP BY g ORDER BY x + 0", "b:2,a:4"},
+                {"SELECT g, COUNT(*) + 10 AS x FROM " + source + " GROUP BY g ORDER BY x * -1, g", "a:12,b:11"},
+                {"SELECT g, COUNT(*) AS x FROM " + source + " GROUP BY g HAVING COUNT(*) > 0 ORDER BY -x, g",
+                        "a:2,b:1"},
+                {"SELECT DISTINCT g, COUNT(*) AS x FROM " + source + " GROUP BY g ORDER BY x * -1, g", "a:2,b:1"},
+                {"SELECT 'all' AS g, COUNT(*) AS x FROM " + source + " ORDER BY x + 0", "all:3"},
+        }) {
+            query(Map.of("query", c[0], "useLegacySql", false))
+                    .then().statusCode(200)
+                    .body("rows.collect { it.f[0].v + ':' + it.f[1].v }.join(',')", equalTo(c[1]));
+        }
+    }
+
+    @Test
+    @Order(5)
     void orderByAMissingStructAliasFieldNamesTheFieldLikeBigQuery() {
         for (String[] c : new String[][] {
                 {"SELECT STRUCT(x AS n) AS s FROM UNNEST([3, 1, 2]) x ORDER BY s.zz", "zz", "STRUCT<n INT64>"},

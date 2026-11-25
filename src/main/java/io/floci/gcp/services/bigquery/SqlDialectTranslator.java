@@ -9169,7 +9169,7 @@ final class SqlDialectTranslator {
                     || tokens.get(name).isKeyword(ALL)) {
                 continue;
             }
-            int position = selectAliasPosition(items, tokens.get(name).identifierText());
+            int position = selectAliasPosition(items, tokens.get(name).identifierText(), false);
             if (position > 0) {
                 tokens.set(name, new Token(Kind.NUMBER, String.valueOf(position), null));
             }
@@ -9288,9 +9288,12 @@ final class SqlDialectTranslator {
         return false;
     }
 
-    /** The expression of the select item {@link #selectAliasPosition} finds for {@code name}, parenthesized. */
+    /**
+     * The expression of the select item {@link #selectAliasPosition} finds for {@code name}, parenthesized. An
+     * aggregate item qualifies, since ORDER BY may hold an aggregate and DuckDB computes an identical aggregate once.
+     */
     private List<Token> aliasedExpression(List<int[]> items, String name) {
-        int position = selectAliasPosition(items, name);
+        int position = selectAliasPosition(items, name, true);
         if (position <= 0) {
             return null;
         }
@@ -9310,11 +9313,12 @@ final class SqlDialectTranslator {
     /**
      * The 1-based position of the one select item that outputs {@code name} from an expression other than the
      * column of that name, or -1. An item that is that column itself ({@code SELECT id}) resolves the same either
-     * way, a name several items output is ambiguous, and an aggregate or window item cannot be grouped by, so
-     * those keep the name as written. Only an alias or a column path names an output: {@code SELECT id - id}
-     * has no alias, so its trailing {@code id} is not one.
+     * way, a name several items output is ambiguous, an aggregate item cannot be grouped by unless
+     * {@code aggregates} allows it (ORDER BY may hold one), and a window item cannot be grouped by and could
+     * number its rows differently when computed again, so those keep the name as written. Only an alias or a
+     * column path names an output: {@code SELECT id - id} has no alias, so its trailing {@code id} is not one.
      */
-    private int selectAliasPosition(List<int[]> items, String name) {
+    private int selectAliasPosition(List<int[]> items, String name, boolean aggregates) {
         int found = -1;
         for (int index = 0; index < items.size(); index++) {
             int[] item = items.get(index);
@@ -9336,7 +9340,7 @@ final class SqlDialectTranslator {
         boolean sameColumn = expression.size() == 1 && isName(expression.getFirst())
                 && expression.getFirst().identifierText().equalsIgnoreCase(name);
         int first = nextSignificant(item[0], expressionEnd);
-        if (sameColumn || first < 0 || structStarAggregates(first, expressionEnd)
+        if (sameColumn || first < 0 || !aggregates && structStarAggregates(first, expressionEnd)
                 || hasWindowExpression(item[0], expressionEnd)) {
             return -1;
         }

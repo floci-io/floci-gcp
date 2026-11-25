@@ -15,6 +15,7 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -81,7 +82,9 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
             } catch (GcpException e) {
                 throw orderByFieldFailure(translation, emptySetup, flociEndpoint, e);
             }
-            return new Result(schemaOf(columns(described)), List.of(), "SELECT", staging.bytesProcessed(),
+            List<Column> columns = columns(described);
+            rejectStructOrderBy(translation, columns, emptySetup, flociEndpoint);
+            return new Result(schemaOf(columns), List.of(), "SELECT", staging.bytesProcessed(),
                     duplicateNames(translation, described));
         }
 
@@ -96,6 +99,7 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
             // again with positional aliases once the schema has BigQuery's names.
             List<Map<String, Object>> described = describeRows(sql, emptySetup, flociEndpoint);
             List<Column> columns = columns(described);
+            rejectStructOrderBy(translation, columns, emptySetup, flociEndpoint);
             return new Result(schemaOf(columns),
                     rejectNullArrayElements(columns, fetch(sql, setup, flociEndpoint, columns)), "SELECT",
                     staging.bytesProcessed(), duplicateNames(translation, described));
@@ -103,6 +107,7 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         List<Column> columns = columns(result.columns().stream()
                 .map(c -> Map.<String, Object>of("column_name", c.name(), "column_type", c.type()))
                 .toList());
+        rejectStructOrderBy(translation, columns, emptySetup, flociEndpoint);
         return new Result(schemaOf(columns), rejectNullArrayElements(columns, decodeRows(result.rows(), columns)),
                 "SELECT", staging.bytesProcessed(), translation.duplicateOutputNames());
     }
@@ -146,6 +151,88 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
             }
         }
         throw SqlDialectTranslator.invalidQuery("Field name " + missing.field() + " does not exist in " + type);
+    }
+
+    /**
+     * BigQuery refuses to sort by a STRUCT while it analyzes the query, {@code ORDER BY does not support expressions
+     * of type STRUCT<n INT64>}, where DuckDB sorts by it. A position, or a path whose first name is a result column,
+     * is typed from {@code columns}; any other item from describing the translator's typing query, once and only
+     * when such an item is there. A typing query DuckDB cannot describe leaves the query to run as it did.
+     */
+    private void rejectStructOrderBy(SqlDialectTranslator.ScriptTranslation translation, List<Column> columns,
+                                     String setup, String flociEndpoint) {
+        SqlDialectTranslator.OrderByTypes orderBy = translation.orderByTypes();
+        if (orderBy == null) {
+            return;
+        }
+        Map<String, DuckTypes.DuckType> typed = null;
+        for (SqlDialectTranslator.OrderByItem item : orderBy.items()) {
+            DuckTypes.DuckType type;
+            if (item.position() > 0) {
+                type = item.position() <= columns.size() ? columns.get(item.position() - 1).type() : null;
+            } else {
+                Column column = item.path() == null ? null : resultColumn(columns, item.path().getFirst());
+                if (column != null) {
+                    type = fieldType(column.type(), item.path().subList(1, item.path().size()));
+                } else {
+                    if (typed == null) {
+                        typed = describedTypes(orderBy.typingSql(), setup, flociEndpoint);
+                    }
+                    type = typed.get(item.column());
+                }
+            }
+            if (type != null && type.isStruct()) {
+                throw SqlDialectTranslator.invalidQuery("ORDER BY does not support expressions of type "
+                        + googleSqlTypeName(type));
+            }
+        }
+    }
+
+    /** The one result column named {@code name}, or null when none or several are. */
+    private static Column resultColumn(List<Column> columns, String name) {
+        Column found = null;
+        for (Column column : columns) {
+            if (column.name().equalsIgnoreCase(name)) {
+                if (found != null) {
+                    return null;
+                }
+                found = column;
+            }
+        }
+        return found;
+    }
+
+    /** The type {@code path} reaches through STRUCT fields of {@code type}, or null past an array or a missing field. */
+    private static DuckTypes.DuckType fieldType(DuckTypes.DuckType type, List<String> path) {
+        for (String name : path) {
+            DuckTypes.DuckType child = null;
+            if (type.isStruct()) {
+                for (DuckTypes.DuckField field : type.fields()) {
+                    if (field.name().equalsIgnoreCase(name)) {
+                        child = field.type();
+                        break;
+                    }
+                }
+            }
+            if (child == null) {
+                return null;
+            }
+            type = child;
+        }
+        return type;
+    }
+
+    private Map<String, DuckTypes.DuckType> describedTypes(String sql, String setup, String flociEndpoint) {
+        Map<String, DuckTypes.DuckType> types = new HashMap<>();
+        try {
+            for (Map<String, Object> row : describeRows(sql, setup, flociEndpoint)) {
+                types.put(String.valueOf(row.get("column_name")),
+                        DuckTypes.parse(String.valueOf(row.get("column_type"))));
+            }
+        } catch (GcpException e) {
+            LOG.debugf("Could not describe the ORDER BY items: %s", e.getMessage());
+        }
+        return types;
     }
 
     /** The non-repeated STRUCT field reached from {@code field} by the field names {@code path}, or null. */

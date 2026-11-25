@@ -12723,7 +12723,8 @@ final class SqlDialectTranslator {
             case "CURRENT_DATETIME" -> "CAST(current_timestamp AS TIMESTAMP)";
             case "GENERATE_UUID" -> "uuid()";
             case "APPROX_COUNT_DISTINCT" -> args(a, 1, name, "COUNT(DISTINCT " + at(a, 0) + ")");
-            case "UNIX_SECONDS" -> "((epoch_us(" + at(a, 0) + ") - (epoch_us(" + at(a, 0) + ") % 1000000 + 1000000) % 1000000) // 1000000)";
+            case "UNIX_SECONDS" -> "list_extract(list_transform([(" + at(a, 0) + ")], _floci_unix_seconds_value -> "
+                    + "((epoch_us(_floci_unix_seconds_value) - (epoch_us(_floci_unix_seconds_value) % 1000000 + 1000000) % 1000000) // 1000000)), 1)";
             case "UNIX_MILLIS" -> "epoch_ms(" + at(a, 0) + ")";
             case "UNIX_MICROS" -> "epoch_us(" + at(a, 0) + ")";
             case "UNIX_DATE" -> "date_diff('day', DATE '1970-01-01', " + at(a, 0) + ")";

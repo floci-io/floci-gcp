@@ -1275,12 +1275,13 @@ class BigQueryDuckIntegrationTest {
                   UNIX_SECONDS(TIMESTAMP '9999-12-31 23:59:59.999999+00') AS maximum_timestamp,
                   UNIX_SECONDS(TIMESTAMP '0001-01-01 00:00:00.000001+00') AS minimum_year,
                   UNIX_SECONDS(TIMESTAMP '1969-12-31 23:59:59.999999+00') AS before_epoch,
-                  UNIX_SECONDS(TIMESTAMP '1970-01-01 00:00:00+00') AS epoch
+                  UNIX_SECONDS(TIMESTAMP '1970-01-01 00:00:00+00') AS epoch,
+                  UNIX_SECONDS(TIMESTAMP_MICROS(CAST(1100000 + RAND() * 800000 AS INT64))) AS random_fraction
                 """, "useLegacySql", false))
                 .then().statusCode(200)
                 .body("rows[0].f.v", equalTo(List.of(
                         "1", "-1", "1767311999", "10413792000", "253402300799",
-                        "-62135596800", "-1", "0")));
+                        "-62135596800", "-1", "0", "1")));
     }
 
     @Test

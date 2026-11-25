@@ -355,17 +355,20 @@ final class GcsGrpcMapper {
         return meta;
     }
 
+    /**
+     * A {@code *} mask is the JSON API's objects.update, so it gets the same full-replace rules: an
+     * unset content field or metadata is cleared, an unset custom_time on an object that has one is
+     * rejected, and holds the request does not set are kept. Explicit masks patch only their paths.
+     */
     static GcsObjectPatch objectUpdateFields(com.google.storage.v2.Object value,
             java.util.List<String> paths) {
+        if (paths.contains("*")) {
+            return objectReplaceFields(value);
+        }
         Map<String, java.lang.Object> patch = new LinkedHashMap<>();
         Map<String, String> metadataUpdates = new LinkedHashMap<>();
         java.util.Set<String> metadataRemovals = new java.util.LinkedHashSet<>();
-        java.util.Set<String> selected = paths.contains("*")
-                ? java.util.Set.of("content_type", "content_disposition", "content_encoding",
-                        "content_language", "cache_control", "custom_time", "metadata",
-                        "temporary_hold", "event_based_hold")
-                : new java.util.LinkedHashSet<>(paths);
-        for (String path : selected) {
+        for (String path : new java.util.LinkedHashSet<>(paths)) {
             switch (path) {
                 case "content_type" -> patch.put("contentType", value.getContentType());
                 case "content_disposition" -> patch.put("contentDisposition", value.getContentDisposition());
@@ -400,6 +403,27 @@ final class GcsGrpcMapper {
             metadataRemovals.clear();
         }
         return new GcsObjectPatch(patch, metadataUpdates, metadataRemovals);
+    }
+
+    private static GcsObjectPatch objectReplaceFields(com.google.storage.v2.Object value) {
+        Map<String, java.lang.Object> patch = new LinkedHashMap<>();
+        patch.put("contentType", blankToNull(value.getContentType()));
+        patch.put("contentDisposition", blankToNull(value.getContentDisposition()));
+        patch.put("contentEncoding", blankToNull(value.getContentEncoding()));
+        patch.put("contentLanguage", blankToNull(value.getContentLanguage()));
+        patch.put("cacheControl", blankToNull(value.getCacheControl()));
+        patch.put("metadata", value.getMetadataCount() == 0 ? null : new LinkedHashMap<>(value.getMetadataMap()));
+        if (value.hasCustomTime()) {
+            patch.put("customTime", GcsCustomTime.fromUpdate(value.getCustomTime()));
+        }
+        // proto3 cannot tell an unset temporary_hold from false, so only a set hold is applied.
+        if (value.getTemporaryHold()) {
+            patch.put("temporaryHold", true);
+        }
+        if (value.hasEventBasedHold()) {
+            patch.put("eventBasedHold", value.getEventBasedHold());
+        }
+        return new GcsObjectPatch(patch, Map.of(), java.util.Set.of(), true);
     }
 
     static ObjectChecksums toChecksums(GcsObjectMeta stored) {

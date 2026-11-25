@@ -70,6 +70,14 @@ final class GcsCustomTime {
         return Instant.EPOCH.plusNanos(nanos.longValueExact()).toString();
     }
 
+    /** objects.update replaces the resource, so it must restate a customTime the object already has. */
+    static void requireKeptOnUpdate(String previous) {
+        if (previous != null) {
+            throw GcpException.invalidArgument("The object has a customTime, so an update request must include "
+                    + "a customTime equal to or later than " + previous + ".");
+        }
+    }
+
     static void requireNotDecreased(String previous, String next) {
         if (previous == null) {
             return;

@@ -9,7 +9,12 @@ import java.util.Set;
 record GcsObjectPatch(
         Map<String, Object> fields,
         Map<String, String> metadataUpdates,
-        Set<String> metadataRemovals) {
+        Set<String> metadataRemovals,
+        boolean fullReplace) {
+
+    GcsObjectPatch(Map<String, Object> fields, Map<String, String> metadataUpdates, Set<String> metadataRemovals) {
+        this(fields, metadataUpdates, metadataRemovals, false);
+    }
 
     GcsObjectPatch {
         fields = Collections.unmodifiableMap(new LinkedHashMap<>(fields));

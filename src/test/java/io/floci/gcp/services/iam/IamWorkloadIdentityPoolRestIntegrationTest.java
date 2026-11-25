@@ -1,12 +1,21 @@
 package io.floci.gcp.services.iam;
 
+import com.google.iam.v1.Binding;
+import com.google.iam.v1.IAMPolicyGrpc;
+import com.google.iam.v1.Policy;
+import com.google.iam.v1.SetIamPolicyRequest;
 import io.floci.gcp.core.common.ProjectNumbers;
+import io.grpc.ManagedChannel;
+import io.grpc.ManagedChannelBuilder;
+import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
+import java.net.URI;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.contains;
@@ -22,6 +31,9 @@ class IamWorkloadIdentityPoolRestIntegrationTest {
 
     private static final String PROJECT = "test-project";
     private static final String BASE = "/v1/projects/" + PROJECT + "/locations/global/workloadIdentityPools";
+
+    @TestHTTPResource
+    URI endpoint;
 
     @Test
     void poolLifecycleUsesProjectNumbersAndSoftDelete() {
@@ -343,6 +355,35 @@ class IamWorkloadIdentityPoolRestIntegrationTest {
                 .when().post(BASE + "/" + poolId + ":undelete")
                 .then().statusCode(400)
                 .body("error.message", equalTo(IamWorkloadIdentityPoolService.POOL_NOT_DELETED));
+    }
+
+    @Test
+    void sharedGrpcPolicyUsesTheSameKeyAsRest() throws Exception {
+        String poolId = "pool-" + suffix();
+        String name = name(poolId);
+        given().queryParam("workloadIdentityPoolId", poolId).contentType("application/json").body(Map.of())
+                .when().post(BASE).then().statusCode(200);
+
+        ManagedChannel channel = ManagedChannelBuilder
+                .forAddress(endpoint.getHost(), endpoint.getPort())
+                .usePlaintext()
+                .build();
+        try {
+            IAMPolicyGrpc.IAMPolicyBlockingStub policy = IAMPolicyGrpc.newBlockingStub(channel);
+            policy.setIamPolicy(SetIamPolicyRequest.newBuilder()
+                    .setResource(name)
+                    .setPolicy(Policy.newBuilder().addBindings(Binding.newBuilder()
+                            .setRole("roles/iam.workloadIdentityPoolViewer")
+                            .addMembers("serviceAccount:reader@test-project.iam.gserviceaccount.com")))
+                    .build());
+        } finally {
+            channel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+        }
+
+        given().urlEncodingEnabled(false).contentType("application/json").body(Map.of())
+                .when().post(BASE + "/" + poolId + ":getIamPolicy")
+                .then().statusCode(200)
+                .body("bindings[0].role", equalTo("roles/iam.workloadIdentityPoolViewer"));
     }
 
     @Test

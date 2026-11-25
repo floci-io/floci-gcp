@@ -76,6 +76,8 @@ public class IamService {
     // organizations." https://docs.cloud.google.com/logging/docs/audit/configure-data-access
     private static final Pattern AUDIT_CONFIG_RESOURCE =
             Pattern.compile("(projects|folders|organizations|billingAccounts)/[^/]+");
+    private static final Pattern WORKLOAD_IDENTITY_POOL_POLICY =
+            Pattern.compile("projects/[0-9]+/locations/global/workloadIdentityPools/[^/]+");
 
     private final StorageBackend<String, StoredServiceAccount> saStore;
     private final StorageBackend<String, StoredServiceAccountKey> keyStore;
@@ -1040,7 +1042,16 @@ public class IamService {
 
     /** A project policy is stored under the project ID, whether the request names the ID or the number. */
     private String canonicalProjectName(String resource) {
-        return projects == null ? resource : projects.canonicalProjectName(resource);
+        if (projects == null) {
+            return resource;
+        }
+        String canonical = projects.canonicalProjectName(resource);
+        // GCP returns pool names with the project number, but the REST and shared gRPC policy
+        // methods must share one key. Store the pool policy under the project-ID spelling.
+        if (canonical != null && WORKLOAD_IDENTITY_POOL_POLICY.matcher(canonical).matches()) {
+            return projects.canonicalResourceName(canonical);
+        }
+        return canonical;
     }
 
     private static String policyKey(String resource) {

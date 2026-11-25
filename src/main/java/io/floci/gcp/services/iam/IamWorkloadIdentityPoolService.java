@@ -5,6 +5,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.LocationCatalog;
@@ -127,21 +128,51 @@ public class IamWorkloadIdentityPoolService {
         requireGlobal(location);
         validateId(poolId, false);
         String name = IamWorkloadIdentityPoolNames.pool(projectId, poolId);
+        String policy = IamWorkloadIdentityPoolNames.policyPool(projectId, poolId);
+        IamService iam = iamService == null ? null : iamService.get();
+        if (iam == null) {
+            return createPoolUncoordinated(name, body);
+        }
+        // Hold the policy lock across cleanup and publication. Otherwise a setIamPolicy that
+        // sees the pool between the store write and the deletePolicy can have its grant erased.
+        return iam.createResourceAndPolicy(policy, null,
+                establishPolicy -> createPoolAndPolicy(name, body, establishPolicy));
+    }
+
+    private ObjectNode createPoolAndPolicy(String name, ObjectNode body, Runnable establishPolicy) {
         synchronized (lock(name)) {
             if (pools.get(name).isPresent()) {
                 throw GcpException.alreadyExists(ENTITY_ALREADY_EXISTS);
             }
-            ObjectNode pool = resourceBody(body, "workloadIdentityPool");
-            removeOutputFields(pool);
-            pool.put("name", name);
-            pool.put("state", "ACTIVE");
+            ObjectNode pool = poolBody(name, body);
             pools.put(name, pool.toString());
-            IamService iam = iamService == null ? null : iamService.get();
-            if (iam != null) {
-                iam.deletePolicy(IamWorkloadIdentityPoolNames.policyPool(projectId, poolId));
+            try {
+                establishPolicy.run();
+                return operation(name);
+            } catch (RuntimeException | Error failure) {
+                pools.delete(name);
+                throw failure;
             }
+        }
+    }
+
+    private ObjectNode createPoolUncoordinated(String name, ObjectNode body) {
+        synchronized (lock(name)) {
+            if (pools.get(name).isPresent()) {
+                throw GcpException.alreadyExists(ENTITY_ALREADY_EXISTS);
+            }
+            ObjectNode pool = poolBody(name, body);
+            pools.put(name, pool.toString());
             return operation(name);
         }
+    }
+
+    private ObjectNode poolBody(String name, ObjectNode body) {
+        ObjectNode pool = resourceBody(body, "workloadIdentityPool");
+        removeOutputFields(pool);
+        pool.put("name", name);
+        pool.put("state", "ACTIVE");
+        return pool;
     }
 
     public ObjectNode getPool(String project, String location, String poolId) {
@@ -446,7 +477,7 @@ public class IamWorkloadIdentityPoolService {
 
     private static ObjectNode resourceBody(ObjectNode body, String wrapper) {
         if (body == null) {
-            return com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode();
+            return JsonNodeFactory.instance.objectNode();
         }
         JsonNode nested = body.get(wrapper);
         ObjectNode source = nested instanceof ObjectNode object ? object : body;

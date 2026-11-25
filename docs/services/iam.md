@@ -612,9 +612,10 @@ curl http://localhost:4588/v1/projects/floci-local/serviceAccounts/my-sa@floci-l
 resource names use the project number, as GCP returns them, while requests may use
 either the project ID or number.
 
-- Pool and provider create, get, list, patch, delete and undelete return completed
-  `google.longrunning.Operation`s. The operation name is nested under the pool or
-  provider (`.../workloadIdentityPools/{pool}/operations/{id}` or
+- Pool and provider create, patch, delete and undelete return completed
+  `google.longrunning.Operation`s; get and list return the resources directly.
+  The operation name is nested under the pool or provider
+  (`.../workloadIdentityPools/{pool}/operations/{id}` or
   `.../providers/{provider}/operations/{id}`), matching the IAM discovery document.
 - `patch` requires an `updateMask`; `list` accepts `showDeleted`, `pageSize` and
   `pageToken`.

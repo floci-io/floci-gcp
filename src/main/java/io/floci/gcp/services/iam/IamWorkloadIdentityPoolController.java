@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.gcp.core.common.GcpException;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
@@ -218,7 +219,7 @@ public class IamWorkloadIdentityPoolController {
         } catch (JsonProcessingException e) {
             // Fall through to the API's invalid-body answer.
         }
-        throw io.floci.gcp.core.common.GcpException.invalidArgument("Invalid JSON request body");
+        throw GcpException.invalidArgument("Invalid JSON request body");
     }
 
     private static Response json(JsonNode body) {

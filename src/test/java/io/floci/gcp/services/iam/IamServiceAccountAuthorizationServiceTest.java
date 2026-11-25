@@ -227,6 +227,15 @@ class IamServiceAccountAuthorizationServiceTest {
                 mapper.createObjectNode())).isEmpty());
         assertTrue(resolved.checks(resolved.restOperation("testPoolIamPermissions",
                 Map.of("project", "p", "poolId", "pool"), mapper.createObjectNode())).isEmpty());
+
+        IamPermissionCheck getPolicy = resolved.checks(new IamOperation("GetIamPolicy", pool)).getFirst();
+        assertEquals("iam.googleapis.com/workloadIdentityPools.getIamPolicy", getPolicy.permission());
+        assertEquals(poolPolicy, getPolicy.resource().policyResource());
+        IamPermissionCheck setPolicy = resolved.checks(new IamOperation("SetIamPolicy", pool)).getFirst();
+        assertEquals("iam.googleapis.com/workloadIdentityPools.setIamPolicy", setPolicy.permission());
+        assertEquals(poolPolicy, setPolicy.resource().policyResource());
+        assertTrue(resolved.supportsIamPolicyMethod("GetIamPolicy", pool));
+        assertFalse(resolved.supportsIamPolicyMethod("GetIamPolicy", provider));
     }
 
     @Test

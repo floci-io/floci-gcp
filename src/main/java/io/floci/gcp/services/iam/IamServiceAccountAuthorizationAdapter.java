@@ -206,8 +206,10 @@ public class IamServiceAccountAuthorizationAdapter implements IamAuthorizationAd
             case "GetServiceAccountKey" -> "iam.serviceAccountKeys.get";
             case "ListServiceAccountKeys" -> "iam.serviceAccountKeys.list";
             case "DeleteServiceAccountKey" -> "iam.serviceAccountKeys.delete";
-            case "GetIamPolicy" -> "iam.serviceAccounts.getIamPolicy";
-            case "SetIamPolicy" -> "iam.serviceAccounts.setIamPolicy";
+            case "GetIamPolicy" -> isWorkloadIdentityPool(operation.resource())
+                    ? WORKLOAD_IDENTITY + "getIamPolicy" : "iam.serviceAccounts.getIamPolicy";
+            case "SetIamPolicy" -> isWorkloadIdentityPool(operation.resource())
+                    ? WORKLOAD_IDENTITY + "setIamPolicy" : "iam.serviceAccounts.setIamPolicy";
             case "SignBlob" -> "iam.serviceAccounts.signBlob";
             case "SignJwt" -> "iam.serviceAccounts.signJwt";
             case "GenerateAccessToken" -> "iam.serviceAccounts.getAccessToken";
@@ -240,6 +242,11 @@ public class IamServiceAccountAuthorizationAdapter implements IamAuthorizationAd
         IamResource resource = projectScoped ? IamResource.project(operation.resource())
                 : requireResource(operation.resource());
         return List.of(new IamPermissionCheck(permission, resource));
+    }
+
+    @Override
+    public boolean supportsIamPolicyMethod(String method, String resource) {
+        return !isWorkloadIdentityPoolProvider(resource);
     }
 
     @Override
@@ -307,6 +314,16 @@ public class IamServiceAccountAuthorizationAdapter implements IamAuthorizationAd
     private static Set<String> withProjectRead(Set<String> permissions) {
         return Stream.concat(permissions.stream(), Stream.of("resourcemanager.projects.get"))
                 .collect(Collectors.toUnmodifiableSet());
+    }
+
+    private static boolean isWorkloadIdentityPool(String resource) {
+        return resource != null
+                && resource.matches("projects/[^/]+/locations/global/workloadIdentityPools/[^/]+");
+    }
+
+    private static boolean isWorkloadIdentityPoolProvider(String resource) {
+        return resource != null
+                && resource.matches("projects/[^/]+/locations/global/workloadIdentityPools/[^/]+/providers/[^/]+");
     }
 
     /** Older IAM roles spell these permissions without the {@code iam.googleapis.com/} prefix. */

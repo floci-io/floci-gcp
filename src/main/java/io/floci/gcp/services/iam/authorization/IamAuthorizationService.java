@@ -68,7 +68,8 @@ public class IamAuthorizationService {
         LOG.logf(enabled() ? Logger.Level.WARN : Logger.Level.INFO,
                 "IAM authorization mode=%s; supported services=%s. "
                         + "Identity handling is service-specific; GCS bucket policies evaluate anonymous callers. "
-                        + "Enforce mode covers IAM service-account/key REST operations and IAM Credentials "
+                        + "Enforce mode covers IAM service-account/key and Workload Identity Pool/provider REST "
+                        + "operations, IAM Credentials "
                         + "generateAccessToken/generateIdToken/signBlob/signJwt and service-account policies over REST/shared IAM gRPC, Cloud Run v2 service/revision REST and shared IAM gRPC, "
                         + "Cloud Scheduler job REST/gRPC, Cloud Logging project/organization sink REST/gRPC, "
                         + "Pub/Sub REST/gRPC, Secret Manager REST/gRPC, Resource Manager REST/project IAM gRPC, Cloud Billing project billingInfo get REST, "

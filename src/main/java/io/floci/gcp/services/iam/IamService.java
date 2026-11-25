@@ -161,7 +161,8 @@ public class IamService {
                 .enabled(config.services().iam().enabled())
                 .storageKey("iam")
                 .protocol(ServiceProtocol.REST)
-                .resourceClasses(IamController.class, IamRolesController.class, IamOrganizationRolesController.class)
+                .resourceClasses(IamController.class, IamRolesController.class, IamOrganizationRolesController.class,
+                        IamWorkloadIdentityPoolController.class)
                 .api("iam.googleapis.com", "Identity and Access Management (IAM) API")
                 .usageAdapter(new IamServiceUsageAdapter(this))
                 .build());

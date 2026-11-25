@@ -5092,6 +5092,8 @@ class BigQueryDuckIntegrationTest {
                  "useLegacySql": false}
                 """)
                 .then().statusCode(200)
+                .body("schema.fields.type",
+                        equalTo(Arrays.asList("INTEGER", "INTEGER", "INTEGER", "INTEGER")))
                 .body("rows[0].f.v", equalTo(Arrays.asList(null, null, null, null)));
     }
 

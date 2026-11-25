@@ -3106,6 +3106,7 @@ final class SqlDialectTranslator {
         rewriteTypedStructConstructors();
         // After the typed constructors, whose STRUCT<a INT64, b INT64> commas would split a select item.
         groupBySelectAliasPositions();
+        orderByExpressionSelectAliases();
         rewriteArraySubscripts();
         rewriteSelectAsStruct();
         List<Integer> sig = significantIndexes();
@@ -4152,6 +4153,7 @@ final class SqlDialectTranslator {
         rewriteTypedStructConstructors();
         // After the typed constructors, whose STRUCT<a INT64, b INT64> commas would split a select item.
         groupBySelectAliasPositions();
+        orderByExpressionSelectAliases();
         rewriteArraySubscripts();
         // SELECT AS STRUCT renders its fields to text, so queries nested in them must be rewritten first.
         quoteImplicitSelectAliases();
@@ -9172,6 +9174,137 @@ final class SqlDialectTranslator {
                 tokens.set(name, new Token(Kind.NUMBER, String.valueOf(position), null));
             }
         }
+    }
+
+    private static final Set<String> SORT_MODIFIERS = Set.of("ASC", "DESC", "NULLS", "FIRST", "LAST");
+
+    /**
+     * BigQuery reads a name in ORDER BY as a select alias before a source column, also inside an expression:
+     * {@code SELECT -x AS x ... ORDER BY x + 0} sorts by {@code -x}. DuckDB binds a bare item to the alias but a name
+     * inside an expression to the source column, so such a name is replaced by the aliased expression in
+     * parentheses. A qualified name, a field path, a name inside an aggregate's arguments or a nested query, and an
+     * expression that is volatile or binds a positional parameter keep the name as written, as does a set operation.
+     */
+    private void orderByExpressionSelectAliases() {
+        for (int select = tokens.size() - 1; select >= 0; select--) {
+            if (tokens.get(select).isKeyword("SELECT")) {
+                orderByExpressionSelectAliases(select);
+            }
+        }
+    }
+
+    private void orderByExpressionSelectAliases(int select) {
+        List<int[]> items = selectItems(select);
+        if (items == null || items.stream().anyMatch(this::expandsStar) || followsSetOperator(select)) {
+            return;
+        }
+        int depth = parenthesisDepth(select);
+        int tailStart = items.getLast()[1];
+        int end = structStarArmEnd(tailStart, structStarQueryEnd(select), depth);
+        if (structStarSetOperationTail(select, tailStart, end, depth) != end) {
+            return;
+        }
+        int order = structStarClauseStart(tailStart, end, depth, "ORDER");
+        int by = order < 0 ? -1 : nextSignificant(order + 1, end);
+        if (by < 0 || !tokens.get(by).isKeyword("BY")) {
+            return;
+        }
+        List<int[]> orderItems = topLevelRanges(by + 1, Math.min(clauseEnd(by + 1, depth), end), depth);
+        for (int k = orderItems.size() - 1; k >= 0; k--) {
+            int[] orderItem = orderItems.get(k);
+            List<Token> significant = significant(orderItem[0], orderItem[1]);
+            if (significant.stream().skip(1).allMatch(token -> SORT_MODIFIERS.contains(token.upper()))) {
+                // A bare item already reads the alias in DuckDB.
+                continue;
+            }
+            for (int i = orderItem[1] - 1; i >= orderItem[0]; i--) {
+                Token token = tokens.get(i);
+                if (!isName(token) || parenthesisDepth(i) < depth || insideAggregateOrQuery(i, orderItem[0])) {
+                    continue;
+                }
+                int before = significantBefore(i);
+                int after = nextSignificant(i + 1, tokens.size());
+                if (before >= 0 && tokens.get(before).isPunct(".")
+                        || after >= 0 && (tokens.get(after).isPunct(".") || tokens.get(after).isPunct("("))
+                        || syntaxName(i, before, after)) {
+                    continue;
+                }
+                List<Token> replacement = aliasedExpression(items, token.identifierText());
+                if (replacement != null) {
+                    tokens.remove(i);
+                    tokens.addAll(i, replacement);
+                }
+            }
+        }
+    }
+
+    /**
+     * Whether the name at {@code index} is SQL syntax rather than a column reference, so an alias of that name does
+     * not apply: a cast's target type or a field alias after {@code AS}, a name inside a {@code STRUCT<...>} or
+     * {@code ARRAY<...>} type, and an {@code INTERVAL} unit or a date part ({@code EXTRACT(DAY FROM ...)}, a weekday
+     * in {@code WEEK(...)}, the date-part argument of {@code DATE_TRUNC} and its kin), which
+     * {@link #isIntervalPartSyntax} and {@link #isDatePartSyntax} already recognise for the other passes.
+     */
+    private boolean syntaxName(int index, int before, int after) {
+        if (before >= 0 && tokens.get(before).isKeyword("AS") || isIntervalPartSyntax(index)
+                || isDatePartSyntax(index, tokens.size())) {
+            return true;
+        }
+        for (int i = index - 1; i >= 0; i--) {
+            Token token = tokens.get(i);
+            if (token.isPunct(")")) {
+                i = openingFor(i, "(", ")");
+                if (i < 0) {
+                    return false;
+                }
+            } else if (token.isPunct(">") && typeAngleOpen(i) >= 0) {
+                i = typeAngleOpen(i);
+            } else if (token.isPunct("<")) {
+                // A comparison's < leaves the name a column; only a type's opening angle makes it a type name.
+                int keyword = significantBefore(i);
+                if (keyword >= 0 && (tokens.get(keyword).isKeyword("STRUCT")
+                        || tokens.get(keyword).isKeyword("ARRAY"))) {
+                    return true;
+                }
+            } else if (token.isPunct("(")) {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    /** Whether the token at {@code index} is inside an aggregate's arguments or a nested query after {@code start}. */
+    private boolean insideAggregateOrQuery(int index, int start) {
+        int open = index;
+        while ((open = openerBefore(open)) >= start) {
+            if (tokens.get(open).isPunct("(")) {
+                int name = significantBefore(open);
+                if (name >= 0 && STRUCT_STAR_AGGREGATES.contains(tokens.get(name).upper())
+                        || isQuery(open + 1, matchingParen(open))) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /** The expression of the select item {@link #selectAliasPosition} finds for {@code name}, parenthesized. */
+    private List<Token> aliasedExpression(List<int[]> items, String name) {
+        int position = selectAliasPosition(items, name);
+        if (position <= 0) {
+            return null;
+        }
+        int[] item = items.get(position - 1);
+        int as = topLevelAs(item[0], item[1]);
+        int alias = as >= 0 ? as : implicitSelectAlias(item[0], item[1]);
+        int expressionEnd = alias >= 0 ? alias : item[1];
+        for (int i = item[0]; i < expressionEnd; i++) {
+            Token token = tokens.get(i);
+            if (token.kind == Kind.POSITIONAL_PARAM || VOLATILE_FUNCTIONS.contains(token.upper())) {
+                return null;
+            }
+        }
+        return new Lexer("(" + text(item[0], expressionEnd).trim() + ")").tokenize();
     }
 
     /**

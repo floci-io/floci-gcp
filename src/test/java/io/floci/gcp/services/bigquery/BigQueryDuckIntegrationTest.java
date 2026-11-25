@@ -3538,6 +3538,40 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(5)
+    void aSelectAliasInsideAnOrderByExpressionReadsTheAliasLikeBigQuery() {
+        String source = "(SELECT 1 AS x UNION ALL SELECT 2) t";
+        for (String[] c : new String[][] {
+                {"SELECT s AS ts FROM (SELECT 2 AS ts, 'b' AS s UNION ALL SELECT 1, 'a') t ORDER BY ts = 'a' DESC",
+                        "a,b"},
+                {"SELECT -x AS x FROM " + source + " ORDER BY x + 0", "-2,-1"},
+                {"SELECT -x AS x FROM " + source + " ORDER BY ABS(x - 2)", "-1,-2"},
+                {"SELECT -x AS x FROM " + source + " ORDER BY CASE WHEN x < -1 THEN 0 ELSE 1 END", "-2,-1"},
+                {"SELECT -x AS x FROM " + source + " ORDER BY t.x + 0", "-1,-2"},
+                {"SELECT -x AS x FROM " + source + " WHERE x > 1 ORDER BY x + 0", "-2"},
+                {"SELECT x AS int64 FROM (SELECT '2' AS x UNION ALL SELECT '10') t ORDER BY CAST(x AS INT64)", "2,10"},
+                {"SELECT d AS month FROM (SELECT DATE '2024-03-15' AS d UNION ALL SELECT DATE '2024-01-20') t"
+                        + " ORDER BY DATE_TRUNC(d, MONTH)", "2024-01-20,2024-03-15"},
+                {"SELECT -x AS day FROM " + source + " ORDER BY EXTRACT(DAY FROM DATE '2024-01-01') + day", "-2,-1"},
+                {"SELECT d AS day FROM (SELECT DATE '2024-03-15' AS d UNION ALL SELECT DATE '2024-01-20') t"
+                        + " ORDER BY DATE_ADD(d, INTERVAL 1 DAY)", "2024-01-20,2024-03-15"},
+                {"SELECT -x AS x FROM (SELECT -1 AS x UNION ALL SELECT 2) t ORDER BY 0 < x", "-2,1"},
+                {"SELECT d AS day FROM (SELECT DATE '2024-03-15' AS d UNION ALL SELECT DATE '2024-01-20') t"
+                        + " ORDER BY DATE_ADD(d, INTERVAL -1 DAY)", "2024-01-20,2024-03-15"},
+                {"SELECT d AS tuesday FROM (SELECT DATE '2024-03-15' AS d UNION ALL SELECT DATE '2024-01-20') t"
+                        + " ORDER BY DATE_TRUNC(d, WEEK(TUESDAY))", "2024-01-20,2024-03-15"},
+                {"SELECT e AS d FROM (SELECT DATE '2024-01-01' AS d, DATE '2024-01-03' AS e UNION ALL"
+                        + " SELECT DATE '2024-01-02', DATE '2024-01-01') t"
+                        + " ORDER BY DATE_DIFF(DATE '2024-01-04', d, DAY)",
+                        "2024-01-03,2024-01-01"},
+        }) {
+            query(Map.of("query", c[0], "useLegacySql", false))
+                    .then().statusCode(200)
+                    .body("rows.collect { it.f[0].v }.join(',')", equalTo(c[1]));
+        }
+    }
+
+    @Test
+    @Order(5)
     void orderByAMissingStructAliasFieldNamesTheFieldLikeBigQuery() {
         for (String[] c : new String[][] {
                 {"SELECT STRUCT(x AS n) AS s FROM UNNEST([3, 1, 2]) x ORDER BY s.zz", "zz", "STRUCT<n INT64>"},

@@ -3508,6 +3508,52 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(5)
+    void aCastToAStructTypeMatchesFieldsByPositionLikeBigQuery() {
+        query(Map.of("query", "SELECT CAST(STRUCT(1 AS a, 'x' AS b) AS STRUCT<c INT64, d STRING>) AS s,"
+                + " CAST(STRUCT(1, 'x', [2]) AS STRUCT<INT64, n STRING, ARRAY<INT64>>).n AS n,"
+                + " CAST(STRUCT(1, 2) AS STRUCT<INT64, b INT64>).b AS b", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].fields.name", equalTo(List.of("c", "d")))
+                .body("rows[0].f[0].v.f.v", equalTo(List.of("1", "x")))
+                .body("rows[0].f[1].v", equalTo("x"))
+                .body("rows[0].f[2].v", equalTo("2"));
+        query(Map.of("query", "SELECT CAST(STRUCT(STRUCT(1 AS x) AS m, 2 AS k) AS STRUCT<p STRUCT<y INT64>, q FLOAT64>)"
+                + " AS s, CAST([STRUCT(1 AS a), STRUCT(2 AS a)] AS ARRAY<STRUCT<z INT64>>) AS a",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].fields.name", equalTo(List.of("p", "q")))
+                .body("schema.fields[0].fields[0].fields.name", equalTo(List.of("y")))
+                .body("rows[0].f[0].v.f[0].v.f[0].v", equalTo("1"))
+                .body("rows[0].f[0].v.f[1].v", equalTo("2.0"))
+                .body("schema.fields[1].fields.name", equalTo(List.of("z")))
+                .body("rows[0].f[1].v.collect { it.v.f[0].v }", equalTo(List.of("1", "2")));
+        query(Map.of("query", "SELECT SAFE_CAST(STRUCT('7' AS a) AS STRUCT<z INT64>) AS s,"
+                + " CAST(NULL AS STRUCT<z INT64>) AS n, SAFE_CAST(STRUCT('x' AS a) AS STRUCT<z INT64>) AS bad",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.f[0].v", equalTo("7"))
+                .body("rows[0].f[1].v", nullValue())
+                .body("rows[0].f[2].v.f[0].v", nullValue());
+        query(Map.of("query", "SELECT CAST(s AS STRUCT<z INT64>) AS v, COUNT(*) AS c"
+                + " FROM (SELECT STRUCT(1 AS a) AS s) t GROUP BY CAST(s AS STRUCT<z INT64>)", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v.f[0].v", equalTo("1"))
+                .body("rows[0].f[1].v", equalTo("1"));
+        for (String sql : new String[] {
+                "SELECT CAST(STRUCT(1, 2) AS STRUCT<a INT64>) AS s",
+                "SELECT SAFE_CAST(STRUCT(1, 2) AS STRUCT<a INT64>) AS s",
+                "SELECT CAST(STRUCT(1 AS a) AS STRUCT<a INT64, b INT64>) AS s",
+                "SELECT SAFE_CAST(STRUCT(1 AS a) AS STRUCT<a INT64, b INT64>) AS s",
+                "SELECT CAST(s AS STRUCT<a INT64>) AS s FROM (SELECT STRUCT(1 AS a, 2 AS b) AS s) t WHERE FALSE",
+        }) {
+            // BigQuery: Invalid cast from STRUCT<...> to STRUCT<...>, at analysis, so also over no rows.
+            query(Map.of("query", sql, "useLegacySql", false))
+                    .then().statusCode(400);
+        }
+    }
+
+    @Test
+    @Order(5)
     void setOperationStructsTakeTheFirstQuerysFieldNamesLikeBigQuery() {
         for (String[] c : new String[][] {
                 {"SELECT STRUCT(1 AS n) AS s UNION ALL SELECT STRUCT(0)", "n", "1,0"},

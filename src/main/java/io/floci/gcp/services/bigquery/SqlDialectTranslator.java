@@ -17222,6 +17222,11 @@ final class SqlDialectTranslator {
                 List<Token> expression = significant(open + 1, k);
                 String expr = render(open + 1, k).trim();
                 List<Token> targetType = significant(k + 1, close);
+                List<Token> normalized = splitClosingAngles(targetType);
+                boolean nullLiteral = expression.size() == 1 && expression.getFirst().isKeyword("NULL");
+                if (!nullLiteral && normalized.stream().anyMatch(token -> token.isKeyword("STRUCT"))) {
+                    return positionalCast(function, expr, normalized, new int[] {0}, 0);
+                }
                 String type = translateType(targetType);
                 if ("VARCHAR".equals(type)) {
                     if (isFloatLiteral(expression)) {
@@ -17619,6 +17624,15 @@ final class SqlDialectTranslator {
 
     /** Maps a GoogleSQL type (possibly {@code ARRAY<...>} / {@code STRUCT<...>}) to DuckDB. */
     private static String translateType(List<Token> tokens) {
+        List<Token> type = splitClosingAngles(tokens);
+        StringBuilder sb = new StringBuilder();
+        int[] pos = {0};
+        sb.append(parseTypeTokens(type, pos));
+        return sb.toString();
+    }
+
+    /** The type tokens with each {@code >>} split into two {@code >}, as a nested type closes. */
+    private static List<Token> splitClosingAngles(List<Token> tokens) {
         List<Token> type = new ArrayList<>();
         for (Token t : tokens) {
             if (t.isPunct(">>")) {
@@ -17628,10 +17642,62 @@ final class SqlDialectTranslator {
                 type.add(t);
             }
         }
-        StringBuilder sb = new StringBuilder();
-        int[] pos = {0};
-        sb.append(parseTypeTokens(type, pos));
-        return sb.toString();
+        return type;
+    }
+
+    /**
+     * Renders {@code function(value AS type)} for a type holding a STRUCT, matching STRUCT fields by position as
+     * BigQuery does, where DuckDB's own struct cast matches them by name: {@code CAST(STRUCT(1 AS a) AS STRUCT<c
+     * INT64>)} is {@code {c: 1}}. A STRUCT is rebuilt with {@code struct_pack} from {@code struct_extract_at},
+     * each field cast to its declared type (an unnamed one takes {@code _field_N}, as {@link #parseTypeTokens}
+     * names it), an ARRAY casts each element, and any other type is cast as written. The value is bound once in
+     * a one-element list, and a NULL STRUCT stays NULL. Lambda variables are named by {@code depth}, so the same cast
+     * written twice (in SELECT and GROUP BY) renders the same expression.
+     */
+    private String positionalCast(String function, String value, List<Token> type, int[] pos, int depth) {
+        int[] probe = {pos[0]};
+        String plain = parseTypeTokens(type, probe);
+        if (type.subList(pos[0], probe[0]).stream().noneMatch(token -> token.isKeyword("STRUCT"))) {
+            // No STRUCT below here, so DuckDB's own cast already matches BigQuery.
+            pos[0] = probe[0];
+            return function + "(" + value + " AS " + plain + ")";
+        }
+        Token head = type.get(pos[0]);
+        boolean nested = pos[0] + 1 < type.size() && type.get(pos[0] + 1).isPunct("<");
+        if (nested && head.isKeyword("STRUCT")) {
+            pos[0] += 2;
+            String variable = DuckTypes.quoteIdentifier("_floci_struct_cast_" + depth);
+            List<String> fields = new ArrayList<>();
+            int position = 0;
+            while (pos[0] < type.size() && !type.get(pos[0]).isPunct(">")) {
+                if (position > 0) {
+                    expect(type, pos, ",");
+                }
+                position++;
+                Token after = pos[0] + 1 < type.size() ? type.get(pos[0] + 1) : null;
+                boolean unnamed = after == null || after.isPunct(",") || after.isPunct(">") || after.isPunct("<")
+                        || after.isPunct("(");
+                String fieldName = unnamed ? "_field_" + position : type.get(pos[0]++).identifierText();
+                String field = positionalCast(function, "struct_extract_at(" + variable + ", " + position + ")",
+                        type, pos, depth + 1);
+                fields.add(DuckTypes.quoteIdentifier(fieldName) + " := " + field);
+            }
+            expect(type, pos, ">");
+            // BigQuery refuses a STRUCT cast whose field counts differ, also on an empty input. Unifying the value with
+            // an unnamed ROW of the target's width makes DuckDB check that while it binds, returning the value as is.
+            String checked = "list_extract(list_value(" + value + ", row("
+                    + String.join(", ", Collections.nCopies(fields.size(), "NULL")) + ")), 1)";
+            return "list_extract(list_transform([" + checked + "], " + variable + " -> CASE WHEN " + variable
+                    + " IS NULL THEN NULL ELSE struct_pack(" + String.join(", ", fields) + ") END), 1)";
+        }
+        if (nested && head.isKeyword("ARRAY")) {
+            pos[0] += 2;
+            String variable = DuckTypes.quoteIdentifier("_floci_struct_cast_" + depth);
+            String element = positionalCast(function, variable, type, pos, depth + 1);
+            expect(type, pos, ">");
+            return "list_transform(" + value + ", " + variable + " -> " + element + ")";
+        }
+        return function + "(" + value + " AS " + parseTypeTokens(type, pos) + ")";
     }
 
     private static String parseTypeTokens(List<Token> type, int[] pos) {

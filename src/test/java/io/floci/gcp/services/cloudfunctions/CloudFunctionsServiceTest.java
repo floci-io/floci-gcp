@@ -1,12 +1,16 @@
 package io.floci.gcp.services.cloudfunctions;
 
+import com.google.cloud.functions.v2.BuildConfig;
 import com.google.cloud.functions.v2.Environment;
 import com.google.cloud.functions.v2.Function;
+import com.google.cloud.functions.v2.GenerateDownloadUrlResponse;
 import com.google.cloud.functions.v2.GenerateUploadUrlResponse;
 import com.google.cloud.functions.v2.ListFunctionsResponse;
 import com.google.cloud.functions.v2.OnDeployUpdatePolicy;
 import com.google.cloud.functions.v2.OperationMetadata;
 import com.google.cloud.functions.v2.OperationType;
+import com.google.cloud.functions.v2.Source;
+import com.google.cloud.functions.v2.StorageSource;
 import com.google.iam.v1.Policy;
 import com.google.longrunning.Operation;
 import com.google.protobuf.Any;
@@ -21,6 +25,14 @@ import io.floci.gcp.services.operations.LongRunningOperationsService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.net.URI;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -32,6 +44,10 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
 class CloudFunctionsServiceTest {
+
+    private static final DateTimeFormatter V4_DATE = DateTimeFormatter
+            .ofPattern("yyyyMMdd'T'HHmmss'Z'")
+            .withZone(ZoneOffset.UTC);
 
     private CloudFunctionsService service;
     private GcsService gcsService;
@@ -381,5 +397,102 @@ class CloudFunctionsServiceTest {
 
         assertEquals("UNAVAILABLE", ex.getGcpStatus());
         verifyNoInteractions(gcsService);
+    }
+
+    @Test
+    void generateDownloadUrlSignsTheFunctionSourceObjectForThirtyMinutes() {
+        service.createFunction("p1", "us-central1", "fn",
+                "{\"buildConfig\":{\"source\":{\"storageSource\":"
+                        + "{\"bucket\":\"src-bucket\",\"object\":\"source-abc.zip\"}}}}", false);
+
+        GenerateDownloadUrlResponse response = service.generateDownloadUrl(
+                "projects/p1/locations/us-central1/functions/fn", "http://localhost:4588");
+
+        URI url = URI.create(response.getDownloadUrl());
+        assertEquals("http", url.getScheme());
+        assertEquals("localhost:4588", url.getAuthority());
+        assertEquals("/src-bucket/source-abc.zip", url.getPath());
+        Map<String, String> query = queryParameters(url);
+        assertEquals("GOOG4-RSA-SHA256", query.get("X-Goog-Algorithm"));
+        assertEquals("1800", query.get("X-Goog-Expires"));
+        Instant signedAt = V4_DATE.parse(query.get("X-Goog-Date"), Instant::from);
+        assertTrue(Duration.between(signedAt, Instant.now()).abs().compareTo(Duration.ofMinutes(1)) < 0);
+        assertFalse(query.containsKey("generation"));
+    }
+
+    @Test
+    void generateDownloadUrlPercentEncodesTheObjectName() {
+        service.createFunction("p1", "us-central1", "fn",
+                "{\"buildConfig\":{\"source\":{\"storageSource\":"
+                        + "{\"bucket\":\"src-bucket\",\"object\":\"dir/source archive#1.zip\"}}}}", false);
+
+        GenerateDownloadUrlResponse response = service.generateDownloadUrl(
+                "projects/p1/locations/us-central1/functions/fn", "http://localhost:4588");
+
+        URI url = URI.create(response.getDownloadUrl());
+        assertEquals("/src-bucket/dir/source%20archive%231.zip", url.getRawPath());
+        assertEquals("/src-bucket/dir/source archive#1.zip", url.getPath());
+        assertNull(url.getFragment());
+    }
+
+    @Test
+    void generateDownloadUrlPinsTheSourceGeneration() {
+        service.createFunction("p1", "us-central1", "fn",
+                "{\"buildConfig\":{\"source\":{\"storageSource\":"
+                        + "{\"bucket\":\"src-bucket\",\"object\":\"source-abc.zip\",\"generation\":\"42\"}}}}", false);
+
+        GenerateDownloadUrlResponse response = service.generateDownloadUrl(
+                "projects/p1/locations/us-central1/functions/fn", "http://localhost:4588/");
+
+        URI url = URI.create(response.getDownloadUrl());
+        assertEquals("/src-bucket/source-abc.zip", url.getPath());
+        assertEquals("42", queryParameters(url).get("generation"));
+    }
+
+    @Test
+    void generateDownloadUrlRequiresAFunctionDeployedFromStorageSource() {
+        GcpException missing = assertThrows(GcpException.class, () -> service.generateDownloadUrl(
+                "projects/p1/locations/us-central1/functions/missing", "http://localhost:4588"));
+        assertEquals("NOT_FOUND", missing.getGcpStatus());
+
+        service.createFunction("p1", "us-central1", "no-source", "{}", false);
+        GcpException noSource = assertThrows(GcpException.class, () -> service.generateDownloadUrl(
+                "projects/p1/locations/us-central1/functions/no-source", "http://localhost:4588"));
+        assertEquals("FAILED_PRECONDITION", noSource.getGcpStatus());
+
+        service.createFunction("p1", "us-central1", "repo-source",
+                "{\"buildConfig\":{\"source\":{\"repoSource\":{\"repoName\":\"r\",\"branchName\":\"main\"}}}}", false);
+        GcpException repoSource = assertThrows(GcpException.class, () -> service.generateDownloadUrl(
+                "projects/p1/locations/us-central1/functions/repo-source", "http://localhost:4588"));
+        assertEquals("FAILED_PRECONDITION", repoSource.getGcpStatus());
+    }
+
+    @Test
+    void generateDownloadUrlRequiresGcsServiceEnabled() {
+        ServiceRegistry registry = mock(ServiceRegistry.class);
+        when(registry.isEnabled("gcs")).thenReturn(false);
+        InMemoryStorage<String, String> store = new InMemoryStorage<>();
+        String name = "projects/p1/locations/us-central1/functions/fn";
+        store.put(name, ProtoJson.print(Function.newBuilder().setName(name)
+                .setBuildConfig(BuildConfig.newBuilder().setSource(Source.newBuilder()
+                        .setStorageSource(StorageSource.newBuilder().setBucket("b").setObject("o.zip"))))
+                .build()));
+        CloudFunctionsService gated = new CloudFunctionsService(store,
+                mock(LongRunningOperationsService.class), gcsService, registry, iamService);
+
+        GcpException ex = assertThrows(GcpException.class,
+                () -> gated.generateDownloadUrl(name, "http://localhost:4588"));
+
+        assertEquals("UNAVAILABLE", ex.getGcpStatus());
+    }
+
+    private static Map<String, String> queryParameters(URI url) {
+        Map<String, String> parameters = new HashMap<>();
+        for (String pair : url.getRawQuery().split("&")) {
+            String[] kv = pair.split("=", 2);
+            parameters.put(URLDecoder.decode(kv[0], StandardCharsets.UTF_8),
+                    kv.length > 1 ? URLDecoder.decode(kv[1], StandardCharsets.UTF_8) : "");
+        }
+        return parameters;
     }
 }

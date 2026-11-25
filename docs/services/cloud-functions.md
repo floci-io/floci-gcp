@@ -16,6 +16,7 @@ floci-gcp emulates the Cloud Functions v2 control plane over REST JSON using Goo
 | Update function | `PATCH /v2/projects/{project}/locations/{location}/functions/{function}` |
 | Delete function | `DELETE /v2/projects/{project}/locations/{location}/functions/{function}` |
 | Generate upload URL | `POST /v2/projects/{project}/locations/{location}/functions:generateUploadUrl` |
+| Generate download URL | `POST /v2/projects/{project}/locations/{location}/functions/{function}:generateDownloadUrl` |
 | Get IAM policy | `GET /v2/projects/{project}/locations/{location}/functions/{function}:getIamPolicy` |
 | Set IAM policy | `POST /v2/projects/{project}/locations/{location}/functions/{function}:setIamPolicy` |
 | Test IAM permissions | `POST /v2/projects/{project}/locations/{location}/functions/{function}:testIamPermissions` |
@@ -29,6 +30,8 @@ Create, update and delete return completed `google.longrunning.Operation` resour
 Cloud Functions resources are metadata only. Creating a function synthesizes `ACTIVE` state, default `GEN_2` environment when omitted, URL, timestamps, and Cloud Run service references in `serviceConfig`.
 
 `generateUploadUrl` returns an upload URL backed by the existing GCS XML `PUT /{bucket}/{object}` object path and includes a `storageSource` in the response. Uploaded source archives are stored as inert GCS metadata; no function build or runtime is executed. Cloud Storage must be enabled for source upload URL generation.
+
+`generateDownloadUrl` returns a V4-style signed GCS URL (`X-Goog-Expires=1800`) for the function's `buildConfig.source.storageSource` object, pinned to its `generation` when set. The signature is a placeholder because the emulator does not verify it. With IAM authorization in `enforce` mode, GCS treats signed URLs as anonymous, so the source object must be readable by `allUsers` for the download to succeed. A function without a Cloud Storage source returns `FAILED_PRECONDITION`; Cloud Storage must be enabled.
 
 Update takes an optional `updateMask`. With a mask, only the listed paths change, and a listed field missing from the body is cleared. Nested paths such as `buildConfig.runtime` leave sibling fields alone. Without a mask, every settable field is replaced by the body. Fields the API marks output-only keep their stored values. That covers `state`, `stateMessages`, `url`, `createTime`, `satisfiesPzs`, `buildConfig.build`, `buildConfig.sourceProvenance`, `buildConfig.onDeployUpdatePolicy.runtimeVersion`, `serviceConfig.service`, `serviceConfig.uri`, `serviceConfig.revision` and `eventTrigger.trigger`, and create ignores them in the request body too. `updateTime` is set to now, and the environment cannot be changed. An update that changes a settable field of `buildConfig` or `serviceConfig` moves `serviceConfig.revision` to the next number, as a redeploy does; a mask that names only output-only paths leaves it alone. An unknown mask path returns `INVALID_ARGUMENT`.
 
@@ -50,6 +53,5 @@ FunctionServiceSettings settings = FunctionServiceSettings.newHttpJsonBuilder()
 ## Not Implemented
 
 - Runtime invocation
-- Download URL generation
 - Runtime listing
 - The Cloud Functions v1 API

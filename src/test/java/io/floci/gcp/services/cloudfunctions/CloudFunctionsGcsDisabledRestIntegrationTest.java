@@ -27,6 +27,27 @@ class CloudFunctionsGcsDisabledRestIntegrationTest {
                 .body("error.message", equalTo("Cloud Functions source upload requires Cloud Storage to be enabled."));
     }
 
+    @Test
+    void generateDownloadUrlRequiresGcsService() {
+        String base = "/v2/projects/functions-gcs-disabled/locations/us-central1/functions";
+        given()
+                .contentType("application/json")
+                .queryParam("functionId", "fn")
+                .body("{\"buildConfig\":{\"source\":{\"storageSource\":{\"bucket\":\"b\",\"object\":\"o.zip\"}}}}")
+                .when().post(base)
+                .then()
+                .statusCode(200);
+
+        given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .body("{}")
+                .when().post(base + "/fn:generateDownloadUrl")
+                .then()
+                .statusCode(503)
+                .body("error.status", equalTo("UNAVAILABLE"));
+    }
+
     public static class DisabledGcsProfile implements QuarkusTestProfile {
         @Override
         public Map<String, String> getConfigOverrides() {

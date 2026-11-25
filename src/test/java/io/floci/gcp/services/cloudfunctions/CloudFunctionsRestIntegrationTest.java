@@ -9,6 +9,7 @@ import java.nio.charset.StandardCharsets;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
 @QuarkusTest
 class CloudFunctionsRestIntegrationTest {
@@ -334,6 +335,65 @@ class CloudFunctionsRestIntegrationTest {
                 .then()
                 .statusCode(200)
                 .body(equalTo("encoded source"));
+    }
+
+    @Test
+    void generateDownloadUrlServesThePinnedGenerationAfterTheSourceIsOverwritten() {
+        String project = "functions-it-download-versioned";
+        String base = "/v2/projects/" + project + "/locations/us-central1/functions";
+        String sourceBucket = "functions-it-download-versioned-bucket";
+        given()
+                .contentType("application/json")
+                .body("{\"name\":\"" + sourceBucket + "\",\"versioning\":{\"enabled\":true}}")
+                .when().post("/storage/v1/b?project=" + project)
+                .then()
+                .statusCode(200);
+        String firstGeneration = given()
+                .queryParam("uploadType", "media")
+                .queryParam("name", "source.zip")
+                .contentType("application/zip")
+                .body("first source".getBytes(StandardCharsets.UTF_8))
+                .when().post("/upload/storage/v1/b/{bucket}/o", sourceBucket)
+                .then()
+                .statusCode(200)
+                .extract().path("generation");
+        String secondGeneration = given()
+                .queryParam("uploadType", "media")
+                .queryParam("name", "source.zip")
+                .contentType("application/zip")
+                .body("second source".getBytes(StandardCharsets.UTF_8))
+                .when().post("/upload/storage/v1/b/{bucket}/o", sourceBucket)
+                .then()
+                .statusCode(200)
+                .extract().path("generation");
+        assertNotEquals(firstGeneration, secondGeneration);
+
+        given()
+                .contentType("application/json")
+                .queryParam("functionId", "fn")
+                .body("{\"buildConfig\":{\"source\":{\"storageSource\":{\"bucket\":\"" + sourceBucket
+                        + "\",\"object\":\"source.zip\",\"generation\":\"" + firstGeneration + "\"}}}}")
+                .when().post(base)
+                .then()
+                .statusCode(200);
+
+        String downloadUrl = given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .body("{}")
+                .when().post(base + "/fn:generateDownloadUrl")
+                .then()
+                .statusCode(200)
+                .body("downloadUrl", containsString("generation=" + firstGeneration))
+                .extract().path("downloadUrl");
+
+        URI signed = URI.create(downloadUrl);
+        given()
+                .urlEncodingEnabled(false)
+                .when().get(signed.getRawPath() + "?" + signed.getRawQuery())
+                .then()
+                .statusCode(200)
+                .body(equalTo("first source"));
     }
 
     @Test

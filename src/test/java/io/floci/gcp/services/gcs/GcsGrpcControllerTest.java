@@ -817,6 +817,39 @@ class GcsGrpcControllerTest {
     }
 
     @Test
+    void rewriteObjectRejectsEmptyRequiredObjectNames() {
+        createBucket("grpc-rewrite-names");
+        service.putObject("grpc-rewrite-names", "source", "text/plain", new byte[] {1}, BASE_URL);
+
+        RecordingObserver<RewriteResponse> missingDestination = new RecordingObserver<>();
+        controller.rewriteObject(RewriteObjectRequest.newBuilder()
+                .setSourceBucket("projects/_/buckets/grpc-rewrite-names")
+                .setSourceObject("source")
+                .setDestinationBucket("projects/_/buckets/grpc-rewrite-names")
+                .setDestinationName("")
+                .build(), missingDestination);
+
+        Status destinationStatus = Status.fromThrowable(missingDestination.error);
+        assertEquals(Status.Code.INVALID_ARGUMENT, destinationStatus.getCode());
+        assertEquals("The `destination_name` field must be set to an object name.",
+                destinationStatus.getDescription());
+        assertTrue(service.listObjects("grpc-rewrite-names").stream()
+                .noneMatch(meta -> meta.getName().isEmpty()));
+
+        RecordingObserver<RewriteResponse> missingSource = new RecordingObserver<>();
+        controller.rewriteObject(RewriteObjectRequest.newBuilder()
+                .setSourceBucket("projects/_/buckets/grpc-rewrite-names")
+                .setSourceObject("")
+                .setDestinationBucket("projects/_/buckets/grpc-rewrite-names")
+                .setDestinationName("copy")
+                .build(), missingSource);
+
+        Status sourceStatus = Status.fromThrowable(missingSource.error);
+        assertEquals(Status.Code.INVALID_ARGUMENT, sourceStatus.getCode());
+        assertEquals("You must specify an object name.", sourceStatus.getDescription());
+    }
+
+    @Test
     void objectUpdateMetadataKeyMaskMergesAndDeletesKeys() {
         createBucket("metadata-bucket");
         service.putObject("metadata-bucket", "object", "text/plain",

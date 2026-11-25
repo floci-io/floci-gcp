@@ -252,6 +252,15 @@ public class GcsGrpcController extends StorageGrpc.StorageImplBase {
         unary(observer, () -> {
             String sourceBucket = GcsGrpcMapper.bucketId(request.getSourceBucket());
             String destinationBucket = GcsGrpcMapper.bucketId(request.getDestinationBucket());
+            // Live GCS validates the required object names before starting the rewrite. An empty
+            // destination_name would otherwise be stored as an object with an empty name.
+            if (request.getSourceObject().isEmpty()) {
+                throw GcpException.invalidArgument("You must specify an object name.");
+            }
+            if (request.getDestinationName().isEmpty()) {
+                throw GcpException.invalidArgument(
+                        "The `destination_name` field must be set to an object name.");
+            }
             requireRead(sourceBucket, request.getSourceObject());
             requireWrite(destinationBucket, request.getDestinationName());
             GcsObjectPreconditions conditions = preconditions(

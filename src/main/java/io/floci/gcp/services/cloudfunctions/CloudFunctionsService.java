@@ -5,6 +5,7 @@ import com.google.api.FieldBehavior;
 import com.google.api.FieldBehaviorProto;
 import com.google.cloud.functions.v2.Environment;
 import com.google.cloud.functions.v2.Function;
+import com.google.cloud.functions.v2.GenerateDownloadUrlResponse;
 import com.google.cloud.functions.v2.GenerateUploadUrlResponse;
 import com.google.cloud.functions.v2.ListFunctionsResponse;
 import com.google.cloud.functions.v2.OperationMetadata;
@@ -41,7 +42,11 @@ import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -51,6 +56,13 @@ import java.util.UUID;
 public class CloudFunctionsService {
 
     private static final Logger LOG = Logger.getLogger(CloudFunctionsService.class);
+    private static final DateTimeFormatter SIGNED_URL_DATE = DateTimeFormatter
+            .ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneOffset.UTC);
+    private static final int SIGNED_URL_TTL_SECONDS = 1800;
+    // GCS only checks X-Goog-Date and X-Goog-Expires on signed URLs and never verifies the signature,
+    // so a fixed placeholder is used. 512 hex chars matches the length of a real GOOG4-RSA-SHA256
+    // signature (2048-bit RSA key, 256 bytes).
+    private static final String PLACEHOLDER_SIGNATURE = "0".repeat(512);
 
     private final StorageBackend<String, String> functionStore;
     private final LongRunningOperationsService operations;
@@ -222,6 +234,36 @@ public class CloudFunctionsService {
                         .setSourceUploadUrl(uploadUrl)
                         .build())
                 .build();
+    }
+
+    public GenerateDownloadUrlResponse generateDownloadUrl(String name, String baseUrl) {
+        if (serviceRegistry != null && !serviceRegistry.isEnabled("gcs")) {
+            throw GcpException.unavailable("Cloud Functions source download requires Cloud Storage to be enabled.");
+        }
+        Function function = getFunction(name);
+        if (!function.getBuildConfig().getSource().hasStorageSource()) {
+            throw GcpException.failedPrecondition(
+                    "Cloud Function " + name + " was not deployed from a Cloud Storage source.");
+        }
+        StorageSource source = function.getBuildConfig().getSource().getStorageSource();
+        String signedAt = SIGNED_URL_DATE.format(Instant.now());
+        StringBuilder url = new StringBuilder(trimTrailingSlash(baseUrl))
+                .append('/').append(source.getBucket()).append('/').append(source.getObject())
+                .append("?X-Goog-Algorithm=GOOG4-RSA-SHA256")
+                .append("&X-Goog-Credential=").append(urlEncode("floci-gcp@" + GcpResourceNames.parseProject(name)
+                        + ".iam.gserviceaccount.com/" + signedAt.substring(0, 8) + "/auto/storage/goog4_request"))
+                .append("&X-Goog-Date=").append(signedAt)
+                .append("&X-Goog-Expires=").append(SIGNED_URL_TTL_SECONDS)
+                .append("&X-Goog-SignedHeaders=host")
+                .append("&X-Goog-Signature=").append(PLACEHOLDER_SIGNATURE);
+        if (source.getGeneration() != 0) {
+            url.append("&generation=").append(source.getGeneration());
+        }
+        return GenerateDownloadUrlResponse.newBuilder().setDownloadUrl(url.toString()).build();
+    }
+
+    private static String urlEncode(String value) {
+        return URLEncoder.encode(value, StandardCharsets.UTF_8);
     }
 
     private void ensureSourceBucket(String bucket, String project, String location, String baseUrl) {

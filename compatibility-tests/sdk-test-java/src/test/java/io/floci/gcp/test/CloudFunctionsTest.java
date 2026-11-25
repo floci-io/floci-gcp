@@ -5,10 +5,14 @@ import com.google.cloud.functions.v2.CreateFunctionRequest;
 import com.google.cloud.functions.v2.DeleteFunctionRequest;
 import com.google.cloud.functions.v2.Function;
 import com.google.cloud.functions.v2.FunctionServiceClient;
+import com.google.cloud.functions.v2.GenerateDownloadUrlRequest;
+import com.google.cloud.functions.v2.GenerateDownloadUrlResponse;
 import com.google.cloud.functions.v2.GenerateUploadUrlRequest;
 import com.google.cloud.functions.v2.GenerateUploadUrlResponse;
 import com.google.cloud.functions.v2.GetFunctionRequest;
 import com.google.cloud.functions.v2.ListFunctionsRequest;
+import com.google.cloud.functions.v2.Source;
+import com.google.cloud.functions.v2.StorageSource;
 import com.google.cloud.functions.v2.UpdateFunctionRequest;
 import com.google.iam.v1.Binding;
 import com.google.iam.v1.GetIamPolicyRequest;
@@ -46,6 +50,7 @@ class CloudFunctionsTest {
     private static final String FUNCTION_NAME = PARENT + "/functions/" + FUNCTION_ID;
 
     private static FunctionServiceClient client;
+    private static StorageSource uploadedSource;
 
     @BeforeAll
     static void setUp() throws IOException {
@@ -134,10 +139,44 @@ class CloudFunctionsTest {
                 .build();
         HttpResponse<String> putResponse = HttpClient.newHttpClient().send(put, HttpResponse.BodyHandlers.ofString());
         assertThat(putResponse.statusCode()).isEqualTo(200);
+        uploadedSource = response.getStorageSource();
     }
 
     @Test
     @Order(5)
+    void generateDownloadUrlServesTheDeployedSource() throws Exception {
+        client.updateFunctionAsync(UpdateFunctionRequest.newBuilder()
+                        .setFunction(Function.newBuilder()
+                                .setName(FUNCTION_NAME)
+                                .setBuildConfig(BuildConfig.newBuilder()
+                                        .setSource(Source.newBuilder()
+                                                .setStorageSource(StorageSource.newBuilder()
+                                                        .setBucket(uploadedSource.getBucket())
+                                                        .setObject(uploadedSource.getObject())
+                                                        .build())
+                                                .build())
+                                        .build())
+                                .build())
+                        .setUpdateMask(FieldMask.newBuilder().addPaths("build_config.source").build())
+                        .build())
+                .get(10, TimeUnit.SECONDS);
+
+        GenerateDownloadUrlResponse response = client.generateDownloadUrl(GenerateDownloadUrlRequest.newBuilder()
+                .setName(FUNCTION_NAME)
+                .build());
+
+        assertThat(response.getDownloadUrl())
+                .startsWith(TestFixtures.endpoint() + "/" + uploadedSource.getBucket() + "/" + uploadedSource.getObject() + "?")
+                .contains("X-Goog-Expires=1800");
+        HttpResponse<String> download = HttpClient.newHttpClient().send(
+                HttpRequest.newBuilder(URI.create(response.getDownloadUrl())).GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertThat(download.statusCode()).isEqualTo(200);
+        assertThat(download.body()).isEqualTo("fake source zip");
+    }
+
+    @Test
+    @Order(6)
     void updateFunctionWithMaskAndLro() throws Exception {
         Function updated = client.updateFunctionAsync(UpdateFunctionRequest.newBuilder()
                         .setFunction(Function.newBuilder()
@@ -159,7 +198,7 @@ class CloudFunctionsTest {
     }
 
     @Test
-    @Order(6)
+    @Order(7)
     void iamPolicyRoundTrip() {
         Policy empty = client.getIamPolicy(GetIamPolicyRequest.newBuilder()
                 .setResource(FUNCTION_NAME)
@@ -191,7 +230,7 @@ class CloudFunctionsTest {
     }
 
     @Test
-    @Order(7)
+    @Order(8)
     void deleteFunctionWithLro() throws Exception {
         client.deleteFunctionAsync(DeleteFunctionRequest.newBuilder()
                         .setName(FUNCTION_NAME)

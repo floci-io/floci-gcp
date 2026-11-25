@@ -240,6 +240,110 @@ class CloudFunctionsRestIntegrationTest {
     }
 
     @Test
+    void generateDownloadUrlReturnsASignedUrlThatServesTheUploadedSource() {
+        String project = "functions-it-download";
+        String base = "/v2/projects/" + project + "/locations/us-central1/functions";
+
+        Response uploadTarget = given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .body("{}")
+                .when().post(base + ":generateUploadUrl")
+                .then()
+                .statusCode(200)
+                .extract().response();
+        String sourceBucket = uploadTarget.path("storageSource.bucket");
+        String sourceObject = uploadTarget.path("storageSource.object");
+        given()
+                .contentType("application/zip")
+                .body("deployed source".getBytes(StandardCharsets.UTF_8))
+                .when().put(URI.create(uploadTarget.<String>path("uploadUrl")).getRawPath())
+                .then()
+                .statusCode(200);
+
+        given()
+                .contentType("application/json")
+                .queryParam("functionId", "fn")
+                .body("{\"buildConfig\":{\"runtime\":\"java21\",\"source\":{\"storageSource\":"
+                        + "{\"bucket\":\"" + sourceBucket + "\",\"object\":\"" + sourceObject + "\"}}}}")
+                .when().post(base)
+                .then()
+                .statusCode(200);
+
+        String downloadUrl = given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .body("{}")
+                .when().post(base + "/fn:generateDownloadUrl")
+                .then()
+                .statusCode(200)
+                .body("downloadUrl", startsWith("http://"))
+                .body("downloadUrl", containsString("/" + sourceBucket + "/" + sourceObject + "?"))
+                .body("downloadUrl", containsString("X-Goog-Expires=1800"))
+                .extract().path("downloadUrl");
+
+        URI signed = URI.create(downloadUrl);
+        given()
+                .urlEncodingEnabled(false)
+                .when().get(signed.getRawPath() + "?" + signed.getRawQuery())
+                .then()
+                .statusCode(200)
+                .body(equalTo("deployed source"));
+    }
+
+    @Test
+    void generateDownloadUrlHonorsForwardedSchemeAndHost() {
+        String base = "/v2/projects/functions-it-download-forwarded/locations/us-central1/functions";
+        given()
+                .contentType("application/json")
+                .queryParam("functionId", "fn")
+                .body("{\"buildConfig\":{\"source\":{\"storageSource\":{\"bucket\":\"b\",\"object\":\"o.zip\"}}}}")
+                .when().post(base)
+                .then()
+                .statusCode(200);
+
+        given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .header("X-Forwarded-Proto", "https")
+                .header("X-Forwarded-Host", "functions.example.test")
+                .body("{}")
+                .when().post(base + "/fn:generateDownloadUrl")
+                .then()
+                .statusCode(200)
+                .body("downloadUrl", startsWith("https://functions.example.test/b/o.zip?"));
+    }
+
+    @Test
+    void generateDownloadUrlUsesGcpErrorsForAMissingFunctionAndAFunctionWithoutStorageSource() {
+        String base = "/v2/projects/functions-it-download-errors/locations/us-central1/functions";
+        given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .body("{}")
+                .when().post(base + "/missing:generateDownloadUrl")
+                .then()
+                .statusCode(404)
+                .body("error.status", equalTo("NOT_FOUND"));
+
+        given()
+                .contentType("application/json")
+                .queryParam("functionId", "no-source")
+                .body("{}")
+                .when().post(base)
+                .then()
+                .statusCode(200);
+        given()
+                .urlEncodingEnabled(false)
+                .contentType("application/json")
+                .body("{}")
+                .when().post(base + "/no-source:generateDownloadUrl")
+                .then()
+                .statusCode(400)
+                .body("error.status", equalTo("FAILED_PRECONDITION"));
+    }
+
+    @Test
     void iamPolicyRoundTripsAndDiesWithTheFunction() {
         String base = "/v2/projects/functions-it-iam/locations/us-central1/functions";
         String create = "{\"buildConfig\":{\"runtime\":\"java21\"}}";

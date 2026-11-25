@@ -1265,15 +1265,22 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(5)
-    void unixSecondsRoundsDownForPositiveAndNegativeFractionalTimestamps() {
+    void unixSecondsRoundsDownAcrossTimestampRange() {
         query(Map.of("query", """
                 SELECT
                   UNIX_SECONDS(TIMESTAMP '1970-01-01 00:00:01.8+00') AS positive_fraction,
                   UNIX_SECONDS(TIMESTAMP '1969-12-31 23:59:59.5+00') AS negative_fraction,
-                  UNIX_SECONDS(TIMESTAMP '2026-01-01 23:59:59.999999+00') AS near_next_second
+                  UNIX_SECONDS(TIMESTAMP '2026-01-01 23:59:59.999999+00') AS near_next_second,
+                  UNIX_SECONDS(TIMESTAMP '2300-01-01 00:00:00.999999+00') AS year_2300,
+                  UNIX_SECONDS(TIMESTAMP '9999-12-31 23:59:59.999999+00') AS maximum_timestamp,
+                  UNIX_SECONDS(TIMESTAMP '0001-01-01 00:00:00.000001+00') AS minimum_year,
+                  UNIX_SECONDS(TIMESTAMP '1969-12-31 23:59:59.999999+00') AS before_epoch,
+                  UNIX_SECONDS(TIMESTAMP '1970-01-01 00:00:00+00') AS epoch
                 """, "useLegacySql", false))
                 .then().statusCode(200)
-                .body("rows[0].f.v", equalTo(List.of("1", "-1", "1767311999")));
+                .body("rows[0].f.v", equalTo(List.of(
+                        "1", "-1", "1767311999", "10413792000", "253402300799",
+                        "-62135596800", "-1", "0")));
     }
 
     @Test

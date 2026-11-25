@@ -1,5 +1,6 @@
 package io.floci.gcp.services.cloudfunctions;
 
+import com.google.cloud.functions.v2.GenerateDownloadUrlRequest;
 import com.google.cloud.functions.v2.GenerateUploadUrlRequest;
 import com.google.iam.v1.SetIamPolicyRequest;
 import com.google.iam.v1.TestIamPermissionsRequest;
@@ -120,6 +121,18 @@ public class CloudFunctionsController {
                                       String body) {
         ProtoJson.merge(body, GenerateUploadUrlRequest.newBuilder()).build();
         return json(ProtoJson.print(service.generateUploadUrl(project, location, requestBaseUrl(headers, config.effectiveBaseUrl()))));
+    }
+
+    @POST
+    @Path("/functions/{functionId}:generateDownloadUrl")
+    public Response generateDownloadUrl(@PathParam("project") String project,
+                                        @PathParam("location") String location,
+                                        @PathParam("functionId") String functionId,
+                                        @Context HttpHeaders headers,
+                                        String body) {
+        ProtoJson.merge(body, GenerateDownloadUrlRequest.newBuilder()).build();
+        return json(ProtoJson.print(service.generateDownloadUrl(functionName(project, location, functionId),
+                requestBaseUrl(headers, config.effectiveBaseUrl()))));
     }
 
     private static Response json(String json) {

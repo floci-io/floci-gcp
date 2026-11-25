@@ -738,11 +738,13 @@ literal   := 'string' | "string" | integer | float | TRUE | FALSE
   coerces a `STRUCT` field only when the value is a literal.
 - A decimal literal (`0.5`, `1.5e2`) is `FLOAT64`, as in BigQuery, and becomes `NUMERIC` where it meets a
   `NUMERIC` value (`CAST(1 AS NUMERIC) + 0.5`, `COALESCE(n, 0.5)`). floci sees that value only when it is a
-  `NUMERIC` or `BIGNUMERIC` column of a table, a cast, a typed literal or a parameter, or `SUM`, `MIN`,
-  `MAX`, `ABS`, `ROUND`, `TRUNC`, `CEIL` or `FLOOR` of one. `AVG` of a `NUMERIC` value is `FLOAT64` here
-  (#724), so a literal beside it is too. Beside a `NUMERIC` value it cannot type
+  `NUMERIC` or `BIGNUMERIC` column of a table, a cast, a typed literal or a parameter, or `SUM`, `AVG`,
+  `MIN`, `MAX`, `ABS`, `ROUND`, `TRUNC`, `CEIL` or `FLOOR` of one. Beside a `NUMERIC` value it cannot type
   (an `UNNEST` element, a subquery or CTE column, another function's result), the literal stays `FLOAT64`
   and so does the expression, where BigQuery types it `NUMERIC`.
+- `AVG` of a `NUMERIC` value is `NUMERIC`, rounded to 9 decimal places, as in BigQuery, but DuckDB divides a
+  decimal through `DOUBLE`, so an average past about 16 significant digits keeps only those. It applies where
+  floci sees the argument is `NUMERIC`, as for decimal literals above.
 - A reserved keyword used as a loop or block label runs here, where BigQuery refuses it with
   `Reserved keyword 'outer' may not be used as a label name without backticks`.
 - An unknown name answers `Unrecognized name: x`, as in BigQuery, without its ` at [line:col]`. Most other

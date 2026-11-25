@@ -1557,6 +1557,7 @@ final class SqlDialectTranslator {
         rejectScripts();
         collectCteNames();
         typeDecimalLiterals();
+        castNumericAverages();
         rewriteTypedArrayLiterals();
         rewriteArraySubscripts();
         rewriteSelectAsStruct();
@@ -3118,6 +3119,7 @@ final class SqlDialectTranslator {
         collectCteNames();
         coerceLowercaseTemporalParameters();
         typeDecimalLiterals();
+        castNumericAverages();
         rewriteTypedArrayLiterals();
         rewriteTypedStructConstructors();
         // After the typed constructors, whose STRUCT<a INT64, b INT64> commas would split a select item.
@@ -4154,6 +4156,7 @@ final class SqlDialectTranslator {
         collectCteNames();
         coerceLowercaseTemporalParameters();
         typeDecimalLiterals();
+        castNumericAverages();
         topLevelOutputNames = topLevelOutputNames();
         duplicateOutputNames = duplicateNames(topLevelOutputNames);
         validateSelectNameAmbiguity();
@@ -11207,12 +11210,49 @@ final class SqlDialectTranslator {
             "PARSE_DATETIME", "PARSE_DATE", "TIMESTAMP_SECONDS", "TIMESTAMP_MILLIS", "TIMESTAMP_MICROS");
 
     private static final Set<String> NUMERIC_TYPE_NAMES = Set.of("NUMERIC", "BIGNUMERIC", "DECIMAL", "BIGDECIMAL");
-    private static final Set<String> NUMERIC_KEEPING_FUNCTIONS = Set.of("SUM", "MIN", "MAX", "ANY_VALUE", "ABS",
+    private static final Set<String> NUMERIC_KEEPING_FUNCTIONS = Set.of("SUM", "AVG", "MIN", "MAX", "ANY_VALUE", "ABS",
             "ROUND", "TRUNC", "CEIL", "CEILING", "FLOOR");
     private static final Set<String> COMMON_TYPE_FUNCTIONS = Set.of("COALESCE", "IFNULL", "IF", "GREATEST", "LEAST",
             "NULLIF");
     private static final Set<String> MULTIPLICATIVE = Set.of("*", "/");
     private static final Set<String> ADDITIVE = Set.of("+", "-");
+
+    /**
+     * BigQuery averages a NUMERIC or BIGNUMERIC value as NUMERIC (rounded to 9 decimal places), where DuckDB's
+     * {@code avg} of a DECIMAL returns DOUBLE. An {@code AVG} whose argument is visibly NUMERIC, after an optional
+     * DISTINCT, is wrapped with its {@code OVER} window in {@code CAST(... AS NUMERIC)}. DuckDB divides a DECIMAL
+     * through DOUBLE in every form, so an average past about 16 significant digits keeps only those.
+     */
+    private void castNumericAverages() {
+        for (int i = tokens.size() - 1; i >= 0; i--) {
+            int open = nextSignificant(i + 1, tokens.size());
+            if (!tokens.get(i).isKeyword("AVG") || open < 0 || !tokens.get(open).isPunct("(")) {
+                continue;
+            }
+            int close = matchingParen(open);
+            List<int[]> args = argumentRanges(open, close);
+            if (args.size() != 1) {
+                continue;
+            }
+            int argument = args.getFirst()[0];
+            int modifier = nextSignificant(argument, args.getFirst()[1]);
+            if (modifier >= 0 && tokens.get(modifier).isKeyword("DISTINCT")) {
+                argument = modifier + 1;
+            }
+            if (!valueNumeric(argument, args.getFirst()[1])) {
+                continue;
+            }
+            int end = close;
+            int over = nextSignificant(close + 1, tokens.size());
+            if (over >= 0 && tokens.get(over).isKeyword("OVER")) {
+                int window = nextSignificant(over + 1, tokens.size());
+                end = window < 0 ? over : tokens.get(window).isPunct("(") ? matchingParen(window) : window;
+            }
+            // Ordinary tokens, so later passes (an implicit alias after the call, for one) read a plain cast.
+            tokens.addAll(end + 1, new Lexer(" AS NUMERIC)").tokenize());
+            tokens.addAll(i, new Lexer("CAST(").tokenize());
+        }
+    }
 
     /**
      * BigQuery types a decimal literal ({@code 0.5}, {@code 1.5e2}) FLOAT64, where DuckDB reads it as a DECIMAL,
@@ -11223,7 +11263,7 @@ final class SqlDialectTranslator {
      * literal alone on its side takes NUMERIC from the other side of a comparison, an {@code IN} list or
      * {@code BETWEEN}, or another value of a {@code COALESCE}-like call, an array literal or {@code CASE} results;
      * parentheses that only group it are looked through. Visibly NUMERIC means a NUMERIC or BIGNUMERIC column, cast,
-     * typed literal, query or temporary function parameter, or SUM, MIN, MAX, ABS, ROUND, TRUNC, CEIL or FLOOR of
+     * typed literal, query or temporary function parameter, or SUM, AVG, MIN, MAX, ABS, ROUND, TRUNC, CEIL or FLOOR of
      * one. A bare value of INSERT ... VALUES or of an UPDATE or MERGE SET keeps its DECIMAL, so DuckDB casts it to the
      * column exactly, as does a {@code TABLESAMPLE} percentage.
      */

@@ -5086,6 +5086,17 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(5)
+    void unixTimestampFunctionsReturnNullForUntypedNull() {
+        query("""
+                {"query": "SELECT UNIX_SECONDS(NULL) AS s, UNIX_MILLIS(NULL) AS m, UNIX_MICROS(NULL) AS u, UNIX_DATE(NULL) AS d",
+                 "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("rows[0].f.v", equalTo(Arrays.asList(null, null, null, null)));
+    }
+
+    @Test
+    @Order(5)
     void parsedTimestampZonesOverrideTheFallbackZone() {
         query(Map.of("query", """
                 SELECT

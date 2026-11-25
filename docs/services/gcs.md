@@ -311,8 +311,8 @@ The embedded DNS server resolves `*.localhost.floci.io` to floci-gcp's container
 **Cloud Storage gRPC v2:**
 
 - Buckets: `CreateBucket`, `GetBucket`, `ListBuckets`, `UpdateBucket`, `DeleteBucket`
-- Objects: `ComposeObject`, `GetObject`, `ListObjects`, `UpdateObject`, `DeleteObject`;
-  object system metadata (`cacheControl`, `contentDisposition`, `contentEncoding`,
+- Objects: `ComposeObject`, `GetObject`, `ListObjects`, `UpdateObject`, `DeleteObject`,
+  `RewriteObject`; object system metadata (`cacheControl`, `contentDisposition`, `contentEncoding`,
   `contentLanguage`, `customTime`, `storageClass`) round-trips with the REST path
 - Data path: `ReadObject`, `WriteObject`, `BidiWriteObject`
 - Resumable writes: `StartResumableWrite`, `QueryWriteStatus`
@@ -327,7 +327,7 @@ bucket resource), so listing by project survives a restart. Buckets persisted by
 older emulator versions, which did not record it, are assigned to
 `floci-gcp.default-project-id` and report that project's number.
 
-The v2 MVP does not implement IAM policy RPCs, retention locking, rewrite,
+The v2 MVP does not implement IAM policy RPCs, retention locking,
 move, restore, resumable cancellation, bidi reads, appendable objects, write
 handles, or redirection. Unsupported RPCs return gRPC `UNIMPLEMENTED`.
 
@@ -407,10 +407,12 @@ handles, or redirection. Unsupported RPCs return gRPC `UNIMPLEMENTED`.
   patch or an unset gRPC `custom_time` under the mask is a no-op), and a decrease is
   rejected with `400` / `INVALID_ARGUMENT`
 - `ComposeObject` (concatenate 1 to 32 source objects; 0 or more than 32 is a 400)
-- `RewriteObject` (multi-call when the source and destination span storage classes or bucket
-  locations: a `maxBytesRewrittenPerCall`, which must be a multiple of 1 MiB, below the object
-  size returns `done: false` with a `rewriteToken` and the client loops until it completes; a
-  same-class, same-location copy finishes in one call whatever limit is sent, as in GCS)
+- `RewriteObject` (REST `objects.rewrite` and gRPC `RewriteObject` share the same rewrite
+  session: multi-call when the source and destination span storage classes or bucket
+  locations: a `maxBytesRewrittenPerCall` / `max_bytes_rewritten_per_call`, which must be a
+  multiple of 1 MiB, below the object size returns `done: false` with a `rewriteToken` /
+  `rewrite_token` and the client loops until it completes; a same-class, same-location copy
+  finishes in one call whatever limit is sent, as in GCS)
 - `hmacKeys` are stored through the emulator's storage backend, so they survive restarts in
   persistent mode and are cleared by the reset endpoint
 - Soft delete (`softDeletePolicy` on the bucket, `?softDeleted=true` listing, `objects.restore`).

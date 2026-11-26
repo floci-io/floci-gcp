@@ -12244,7 +12244,9 @@ final class SqlDialectTranslator {
      * Rewrites a typed struct constructor, {@code STRUCT<n INT64, m STRING>(x, 'a')}, to a DuckDB struct literal
      * with each value cast to its declared type, {@code {'n': CAST(x AS BIGINT), 'm': CAST('a' AS VARCHAR)}}. A
      * type written without a name gets BigQuery's {@code _field_1}, {@code _field_2}, ... The literal form is one
-     * {@link #structSelectAliases} reads, so {@code ORDER BY s.n} works on it. A value count that differs from the
+     * {@link #structSelectAliases} reads, so {@code ORDER BY s.n} works on it. A field whose type holds a STRUCT
+     * keeps its GoogleSQL type, so {@link #renderCast} matches the value's fields by position as BigQuery does:
+     * {@code STRUCT<m STRUCT<a INT64>>(STRUCT(1 AS p))} is {@code {m: {a: 1}}}. A value count that differs from the
      * type list, or a missing value, fails with BigQuery's message.
      */
     private void rewriteTypedStructConstructors() {
@@ -12293,9 +12295,20 @@ final class SqlDialectTranslator {
                 if (k > 0) {
                     literal.addAll(new Lexer(", ").tokenize());
                 }
+                List<Token> fieldType = named ? type.subList(1, type.size()) : type;
                 literal.addAll(new Lexer(DuckTypes.quoteLiteral(name) + ": CAST(").tokenize());
                 literal.addAll(values.get(k));
-                literal.add(Token.raw(" AS " + translateType(named ? type.subList(1, type.size()) : type)));
+                if (fieldType.stream().anyMatch(token -> token.isKeyword("STRUCT"))) {
+                    // DuckDB casts a STRUCT by field name; leaving the GoogleSQL type in place lets renderCast
+                    // match it by position, as BigQuery coerces a nested STRUCT value.
+                    literal.addAll(new Lexer(" AS").tokenize());
+                    for (Token token : fieldType) {
+                        literal.addAll(new Lexer(" ").tokenize());
+                        literal.add(token);
+                    }
+                } else {
+                    literal.add(Token.raw(" AS " + translateType(fieldType)));
+                }
                 literal.addAll(new Lexer(")").tokenize());
             }
             literal.addAll(new Lexer("}").tokenize());

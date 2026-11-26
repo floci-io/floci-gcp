@@ -5062,4 +5062,12 @@ class SqlDialectTranslatorTest {
         String inIf = sql("SELECT IF(b, STRUCT<n INT64, m STRING>(x, 'a'), NULL) AS s FROM ds.t");
         assertTrue(inIf.contains("THEN {'n': CAST(x AS BIGINT), 'm': CAST('a' AS VARCHAR)} ELSE NULL"), inIf);
     }
+
+    @Test
+    void typedStructConstructorCastsANestedStructValueByPosition() {
+        String nested = sql("SELECT STRUCT<m STRUCT<a INT64, k INT64>>(STRUCT(x AS p, y AS q)) AS s FROM ds.t");
+        assertTrue(nested.contains("struct_extract_at(\"_floci_struct_cast_0\", 1)"), nested);
+        assertTrue(nested.contains("\"k\" := CAST(struct_extract_at(\"_floci_struct_cast_0\", 2) AS BIGINT)"), nested);
+        assertFalse(nested.contains("AS STRUCT(\"a\" BIGINT, \"k\" BIGINT)"), nested);
+    }
 }

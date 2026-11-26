@@ -3986,6 +3986,32 @@ class BigQueryDuckIntegrationTest {
         }
     }
 
+    @Test
+    @Order(5)
+    void typedStructConstructorMatchesANestedStructValueByPositionLikeBigQuery() {
+        String source = " FROM UNNEST([2, 1]) x ORDER BY x";
+        for (String[] c : new String[][] {
+                {"SELECT STRUCT<m STRUCT<INT64, k INT64>>(STRUCT(x + 1, x)) AS s" + source, "_field_1,k"},
+                {"SELECT STRUCT<STRUCT<INT64, k INT64>>(STRUCT(x + 1, x)) AS s" + source, "_field_1,k"},
+                {"SELECT STRUCT<m STRUCT<a INT64, k INT64>>(STRUCT(x + 1, x)) AS s" + source, "a,k"},
+                {"SELECT STRUCT<m STRUCT<a INT64, k INT64>>(STRUCT(x + 1 AS p, x AS q)) AS s" + source, "a,k"},
+        }) {
+            query(Map.of("query", c[0], "useLegacySql", false))
+                    .then().statusCode(200)
+                    .body("schema.fields[0].fields[0].fields.name.join(',')", equalTo(c[1]))
+                    .body("rows.collect { it.f[0].v.f[0].v.f.v.join(':') }.join(',')", equalTo("2:1,3:2"));
+        }
+        query(Map.of("query", "SELECT STRUCT<m STRUCT<a INT64, k INT64>>(STRUCT(x + 1 AS p, x AS q)) AS s"
+                + " FROM UNNEST([1, 2]) x ORDER BY s.m.k DESC", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows.collect { it.f[0].v.f[0].v.f[1].v }.join(',')", equalTo("2,1"));
+        query(Map.of("query", "SELECT STRUCT<a ARRAY<STRUCT<z INT64>>>([STRUCT(x AS q)]) AS s FROM UNNEST([1]) x",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].fields[0].fields.name", equalTo(List.of("z")))
+                .body("rows[0].f[0].v.f[0].v[0].v.f[0].v", equalTo("1"));
+    }
+
     private static void assertNullElementError(String sql, String field) {
         query("{\"query\": \"" + sql + "\", \"useLegacySql\": false}")
                 .then().statusCode(400)

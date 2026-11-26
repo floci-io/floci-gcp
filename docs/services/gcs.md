@@ -404,8 +404,20 @@ handles, or redirection. Unsupported RPCs return gRPC `UNIMPLEMENTED`.
   `cacheControl`, `customTime`, `storageClass`) in the JSON metadata part of a
   multipart/resumable upload; on the upload URL only `contentEncoding` is honoured, as on GCS
 - `customTime` follows the GCS rules: rendered in UTC, never removed once set (a `null`
-  patch or an unset gRPC `custom_time` under the mask is a no-op), and a decrease is
-  rejected with `400` / `INVALID_ARGUMENT`
+  patch or an unset gRPC `custom_time` under an explicit mask is a no-op; on `PUT` it is a
+  `400`), and a decrease is rejected with `400` / `INVALID_ARGUMENT`
+- `objects.update` (JSON `PUT`) replaces the resource: `contentType`, `contentDisposition`,
+  `contentEncoding`, `contentLanguage`, `cacheControl` and `metadata` left out of the body are
+  cleared, and once the object has a `customTime` the body must carry one that is equal or
+  later, or the request fails with `400` / `INVALID_ARGUMENT`. A body-less `PUT` is a `400`.
+  `temporaryHold` and `eventBasedHold` left out of the body are kept; that choice is not
+  verified against GCS. `acl` in the body is not applied on `PUT` or `PATCH` (use the
+  `objectAccessControls` endpoints), and object `retention` and `contexts` are not modelled.
+  gRPC `UpdateObject` with the mask `*` follows the same rules: unset content fields and
+  metadata are cleared, an unset `custom_time` on an object that has one is
+  `INVALID_ARGUMENT`, an unset `event_based_hold` is kept, and `temporary_hold` is applied only
+  when `true` (proto3 cannot tell unset from `false`; name `temporary_hold` in an explicit mask
+  to release it)
 - `ComposeObject` (concatenate 1 to 32 source objects; 0 or more than 32 is a 400)
 - `RewriteObject` (REST `objects.rewrite` and gRPC `RewriteObject` share the same rewrite
   session: multi-call when the source and destination span storage classes or bucket

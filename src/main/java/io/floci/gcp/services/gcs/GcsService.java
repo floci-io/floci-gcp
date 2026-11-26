@@ -1082,6 +1082,10 @@ public class GcsService {
     }
 
     private static final int MAX_COMPOSE_SOURCES = 32;
+    private static final List<String> REPLACED_ON_UPDATE = List.of("contentType", "contentDisposition",
+            "contentEncoding", "contentLanguage", "cacheControl", "metadata");
+    private static final List<String> PATCHED_STRING_FIELDS = List.of("contentType", "contentDisposition",
+            "contentEncoding", "contentLanguage", "cacheControl", "customTime");
 
     // ── Soft delete ──────────────────────────────────────────────────────────
     //
@@ -1480,10 +1484,19 @@ public class GcsService {
         return patchObject(bucket, objectName, new GcsObjectPatch(fields, updates, removals), preconditions);
     }
 
-    /** JSON {@code objects.update}: the request's {@code metadata} replaces the object's custom metadata. */
+    /**
+     * JSON {@code objects.update}: a full replace, so a cleared writable field the request leaves out
+     * is removed and the request's {@code metadata} replaces the object's custom metadata. An empty or
+     * absent {@code acl} is ignored, and once the object has a customTime the request must carry one.
+     */
     public GcsObjectMeta updateObject(String bucket, String objectName, Map<String, Object> update,
             GcsObjectPreconditions preconditions) {
-        Map<String, Object> fields = new LinkedHashMap<>(update);
+        if (update == null) {
+            throw GcpException.invalidArgument("Request body must be a JSON object");
+        }
+        Map<String, Object> fields = new LinkedHashMap<>();
+        REPLACED_ON_UPDATE.forEach(field -> fields.put(field, null));
+        fields.putAll(update);
         if (update.get("metadata") instanceof Map<?, ?> requested) {
             Map<String, String> metadata = new LinkedHashMap<>();
             requested.forEach((key, value) -> {
@@ -1493,14 +1506,35 @@ public class GcsService {
             });
             fields.put("metadata", metadata.isEmpty() ? null : metadata);
         }
-        return patchObject(bucket, objectName, new GcsObjectPatch(fields, Map.of(), Set.of()), preconditions);
+        return patchObject(bucket, objectName, new GcsObjectPatch(fields, Map.of(), Set.of(), true), preconditions);
     }
 
     GcsObjectMeta patchObject(String bucket, String objectName, GcsObjectPatch patch,
             GcsObjectPreconditions preconditions) {
+        requireFieldTypes(patch.fields());
         synchronized (objectLock(bucket, objectName)) {
             checkPreconditions(bucket, objectName, preconditions);
             return patchObjectLocked(bucket, objectName, patch);
+        }
+    }
+
+    /**
+     * Rejects a wrongly typed field before anything is applied, so a bad update never leaves the
+     * stored object half changed.
+     */
+    private static void requireFieldTypes(Map<String, Object> patch) {
+        for (String field : PATCHED_STRING_FIELDS) {
+            requireFieldType(patch, field, String.class, "a string");
+        }
+        requireFieldType(patch, "temporaryHold", Boolean.class, "a boolean");
+        requireFieldType(patch, "eventBasedHold", Boolean.class, "a boolean");
+        requireFieldType(patch, "metadata", Map.class, "an object");
+    }
+
+    private static void requireFieldType(Map<String, Object> patch, String field, Class<?> type, String expected) {
+        Object value = patch.get(field);
+        if (value != null && !type.isInstance(value)) {
+            throw GcpException.invalidArgument("Invalid value for field '" + field + "': expected " + expected);
         }
     }
 
@@ -1516,6 +1550,8 @@ public class GcsService {
         if (patch.get("customTime") instanceof String requested) {
             customTime = GcsCustomTime.normalize(requested);
             GcsCustomTime.requireNotDecreased(meta.getCustomTime(), customTime);
+        } else if (objectPatch.fullReplace()) {
+            GcsCustomTime.requireKeptOnUpdate(meta.getCustomTime());
         }
         if (patch.containsKey("contentType")) {
             meta.setContentType((String) patch.get("contentType"));

@@ -1294,6 +1294,39 @@ class GcsServiceTest {
     }
 
     @Test
+    void updateReplacesTheWritableFieldsAndRequiresAnExistingCustomTime() {
+        service.createBucket("bucket", "p1", BASE_URL, Map.of());
+        service.putObject("bucket", "obj.txt", "text/plain", new byte[]{1},
+                GcsCustomerEncryption.none(), BASE_URL);
+        service.patchObject("bucket", "obj.txt", Map.of(
+                "contentEncoding", "gzip",
+                "contentDisposition", "attachment",
+                "contentLanguage", "en",
+                "cacheControl", "no-cache",
+                "metadata", Map.of("env", "dev"),
+                "temporaryHold", true));
+
+        GcsObjectMeta updated = service.updateObject("bucket", "obj.txt", Map.of("contentLanguage", "fr"),
+                GcsObjectPreconditions.NONE);
+        assertEquals("fr", updated.getContentLanguage());
+        assertNull(updated.getContentType());
+        assertNull(updated.getContentEncoding());
+        assertNull(updated.getContentDisposition());
+        assertNull(updated.getCacheControl());
+        assertNull(updated.getMetadata());
+        assertEquals(Boolean.TRUE, updated.getTemporaryHold());
+
+        service.patchObject("bucket", "obj.txt", Map.of("customTime", "2026-01-01T00:00:00Z"));
+        String metageneration = service.getObjectMeta("bucket", "obj.txt").getMetageneration();
+        GcpException missing = assertThrows(GcpException.class, () -> service.updateObject("bucket", "obj.txt",
+                Map.of("contentType", "text/csv"), GcsObjectPreconditions.NONE));
+        assertEquals(400, missing.getHttpStatus());
+        assertEquals(metageneration, service.getObjectMeta("bucket", "obj.txt").getMetageneration());
+        assertEquals("2026-01-02T00:00:00Z", service.updateObject("bucket", "obj.txt",
+                Map.of("customTime", "2026-01-02T00:00:00Z"), GcsObjectPreconditions.NONE).getCustomTime());
+    }
+
+    @Test
     void overwriteAndRestoreKeepTheReplacedObjectsMetadata() {
         service.createBucket("bucket", "p1", BASE_URL,
                 Map.of("softDeletePolicy", Map.of("retentionDurationSeconds", "604800")));

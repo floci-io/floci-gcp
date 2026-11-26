@@ -1051,8 +1051,8 @@ class GcsGrpcControllerTest {
     }
 
     /**
-     * GCS never removes a custom time. Naming custom_time in the mask without a value, or
-     * sending a "*" mask with the field unset, leaves the existing value in place.
+     * GCS never removes a custom time. Naming custom_time in an explicit mask without a value
+     * leaves the existing value in place.
      */
     @Test
     void objectUpdateWithAnUnsetCustomTimeKeepsTheValue() {
@@ -1068,12 +1068,96 @@ class GcsGrpcControllerTest {
                 object("grpc-keep-custom-time-bucket", "object").toBuilder(), "custom_time");
         assertNull(masked.error);
         assertEquals(customTime, masked.single().getCustomTime());
+    }
 
-        RecordingObserver<com.google.storage.v2.Object> star = updateObject("grpc-keep-custom-time-bucket",
-                object("grpc-keep-custom-time-bucket", "object").toBuilder().setCacheControl("max-age=1"), "*");
+    /** A "*" mask is the JSON API's objects.update: a full replace of the writable fields. */
+    @Test
+    void objectUpdateWithTheWildcardMaskReplacesLikeJsonUpdate() {
+        createBucket("grpc-star-replace-bucket");
+        service.putObject("grpc-star-replace-bucket", "object", "text/plain",
+                new byte[] {1}, GcsCustomerEncryption.none(), Map.of("env", "dev"), BASE_URL);
+        updateObject("grpc-star-replace-bucket",
+                object("grpc-star-replace-bucket", "object").toBuilder()
+                        .setContentDisposition("attachment")
+                        .setContentEncoding("identity")
+                        .setContentLanguage("en")
+                        .setCacheControl("no-cache")
+                        .setTemporaryHold(true)
+                        .setEventBasedHold(true),
+                "content_disposition", "content_encoding", "content_language", "cache_control",
+                "temporary_hold", "event_based_hold");
+
+        RecordingObserver<com.google.storage.v2.Object> star = updateObject("grpc-star-replace-bucket",
+                com.google.storage.v2.Object.newBuilder()
+                        .setBucket("projects/_/buckets/grpc-star-replace-bucket")
+                        .setName("object")
+                        .setContentLanguage("fr"),
+                "*");
+
         assertNull(star.error);
-        assertEquals("max-age=1", star.single().getCacheControl());
-        assertEquals(customTime, star.single().getCustomTime());
+        assertEquals("fr", star.single().getContentLanguage());
+        GcsObjectMeta stored = service.getObjectMeta("grpc-star-replace-bucket", "object");
+        assertNull(stored.getContentType());
+        assertNull(stored.getContentDisposition());
+        assertNull(stored.getContentEncoding());
+        assertNull(stored.getCacheControl());
+        assertNull(stored.getMetadata());
+        assertEquals(Boolean.TRUE, stored.getTemporaryHold());
+        assertEquals(Boolean.TRUE, stored.getEventBasedHold());
+    }
+
+    @Test
+    void objectUpdateWithTheWildcardMaskMustRestateAnExistingCustomTime() {
+        createBucket("grpc-star-custom-time-bucket");
+        service.putObject("grpc-star-custom-time-bucket", "object", "text/plain",
+                new byte[] {1}, BASE_URL);
+        Timestamp customTime = timestamp("2026-06-20T08:00:00Z");
+        String metageneration = String.valueOf(updateObject("grpc-star-custom-time-bucket",
+                object("grpc-star-custom-time-bucket", "object").toBuilder()
+                        .setCustomTime(customTime).setCacheControl("no-cache"),
+                "custom_time", "cache_control").single().getMetageneration());
+
+        RecordingObserver<com.google.storage.v2.Object> missing = updateObject("grpc-star-custom-time-bucket",
+                object("grpc-star-custom-time-bucket", "object").toBuilder().setCacheControl("max-age=1"), "*");
+
+        assertEquals(Status.Code.INVALID_ARGUMENT, Status.fromThrowable(missing.error).getCode());
+        GcsObjectMeta stored = service.getObjectMeta("grpc-star-custom-time-bucket", "object");
+        assertEquals(metageneration, stored.getMetageneration());
+        assertEquals("no-cache", stored.getCacheControl());
+        assertEquals("text/plain", stored.getContentType());
+
+        RecordingObserver<com.google.storage.v2.Object> restated = updateObject("grpc-star-custom-time-bucket",
+                object("grpc-star-custom-time-bucket", "object").toBuilder()
+                        .setCustomTime(customTime).setCacheControl("max-age=1"), "*");
+        assertNull(restated.error);
+        assertEquals("max-age=1", restated.single().getCacheControl());
+        assertEquals(customTime, restated.single().getCustomTime());
+    }
+
+    @Test
+    void objectUpdateWithAnExplicitMaskStillPatchesOnlyItsPaths() {
+        createBucket("grpc-explicit-mask-bucket");
+        service.putObject("grpc-explicit-mask-bucket", "object", "text/plain",
+                new byte[] {1}, GcsCustomerEncryption.none(), Map.of("env", "dev"), BASE_URL);
+        updateObject("grpc-explicit-mask-bucket",
+                object("grpc-explicit-mask-bucket", "object").toBuilder()
+                        .setCustomTime(timestamp("2026-06-20T08:00:00Z")).setTemporaryHold(true),
+                "custom_time", "temporary_hold");
+
+        RecordingObserver<com.google.storage.v2.Object> response = updateObject("grpc-explicit-mask-bucket",
+                com.google.storage.v2.Object.newBuilder()
+                        .setBucket("projects/_/buckets/grpc-explicit-mask-bucket")
+                        .setName("object")
+                        .setCacheControl("no-store"),
+                "cache_control");
+
+        assertNull(response.error);
+        GcsObjectMeta stored = service.getObjectMeta("grpc-explicit-mask-bucket", "object");
+        assertEquals("no-store", stored.getCacheControl());
+        assertEquals("text/plain", stored.getContentType());
+        assertEquals(Map.of("env", "dev"), stored.getMetadata());
+        assertEquals(Boolean.TRUE, stored.getTemporaryHold());
+        assertNotNull(stored.getCustomTime());
     }
 
     @Test

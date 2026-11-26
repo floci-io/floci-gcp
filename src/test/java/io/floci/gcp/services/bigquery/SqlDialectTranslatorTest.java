@@ -4129,6 +4129,28 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void outermostOrderByItemsThatCanBeAStructComeWithATypingQuery() {
+        SqlDialectTranslator.OrderByTypes orderBy = SqlDialectTranslator.translate(
+                "SELECT t.s AS s FROM ds.t ORDER BY s.m DESC NULLS LAST, 2, x + 1, CASE WHEN x = 1 THEN t.s END,"
+                        + " first LIMIT 2", "test-project", null, SqlDialectTranslator.QueryParameters.none())
+                .orderByTypes();
+        assertEquals(List.of(new SqlDialectTranslator.OrderByItem(0, List.of("s", "m"), "_floci_order_1"),
+                new SqlDialectTranslator.OrderByItem(2, null, null),
+                new SqlDialectTranslator.OrderByItem(0, null, "_floci_order_3"),
+                new SqlDialectTranslator.OrderByItem(0, List.of("first"), "_floci_order_4")), orderBy.items());
+        assertEquals("SELECT t.s AS s, s.m AS \"_floci_order_1\", CASE WHEN x = 1 THEN t.s END AS \"_floci_order_3\","
+                + " first AS \"_floci_order_4\" FROM \"ds\".\"t\" LIMIT 2", orderBy.typingSql());
+        for (String sql : new String[] {
+                "SELECT x FROM ds.t",
+                "SELECT x FROM ds.t ORDER BY x + 1, NOT b, x IS NULL",
+                "SELECT x FROM ds.t UNION ALL SELECT y FROM ds.u ORDER BY x",
+        }) {
+            assertNull(SqlDialectTranslator.translate(sql, "test-project", null,
+                    SqlDialectTranslator.QueryParameters.none()).orderByTypes(), sql);
+        }
+    }
+
+    @Test
     void laterSetOperationStructsRenderAsUnnamedRows() {
         String union = sql("SELECT STRUCT(x AS n) AS s FROM ds.t UNION ALL SELECT STRUCT(y AS z) FROM ds.u");
         assertTrue(union.contains("{'n': x}"), union);

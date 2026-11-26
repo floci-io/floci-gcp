@@ -3658,6 +3658,46 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(5)
+    void orderByAStructExpressionFailsLikeBigQuery() {
+        String source = " FROM UNNEST([2, 1]) x";
+        for (String[] c : new String[][] {
+                {"SELECT STRUCT(x AS n) AS s" + source + " ORDER BY s", "STRUCT<n INT64>"},
+                {"SELECT x" + source + " ORDER BY STRUCT(x AS n)", "STRUCT<n INT64>"},
+                {"SELECT STRUCT(STRUCT(x + 1) AS m) AS s" + source + " ORDER BY s.m", "STRUCT<INT64>"},
+                {"SELECT STRUCT(x AS n) AS s FROM UNNEST(ARRAY<INT64>[]) x ORDER BY s", "STRUCT<n INT64>"},
+                {"SELECT STRUCT(x AS n, 'a' AS m) AS s" + source + " ORDER BY 1 DESC", "STRUCT<n INT64, m STRING>"},
+                {"SELECT x" + source + " ORDER BY x, STRUCT(x AS n) DESC NULLS LAST", "STRUCT<n INT64>"},
+                {"SELECT t.x FROM (SELECT STRUCT(1 AS n) AS s, 1 AS x) t ORDER BY t.s", "STRUCT<n INT64>"},
+                {"SELECT x" + source + " ORDER BY IF(x > 1, STRUCT(x AS n), STRUCT(0 AS n))", "STRUCT<n INT64>"},
+        }) {
+            query(Map.of("query", c[0], "useLegacySql", false))
+                    .then().statusCode(400)
+                    .body("error.message", equalTo("ORDER BY does not support expressions of type " + c[1]));
+        }
+        query(Map.of("query", "SELECT STRUCT(x AS n) AS s" + source + " ORDER BY s", "useLegacySql", false,
+                "dryRun", true))
+                .then().statusCode(400)
+                .body("error.message", equalTo("ORDER BY does not support expressions of type STRUCT<n INT64>"));
+    }
+
+    @Test
+    @Order(5)
+    void orderByAScalarReachedThroughAStructStillSorts() {
+        String source = " FROM UNNEST([2, 1, 3]) x";
+        for (String[] c : new String[][] {
+                {"SELECT x, STRUCT(x AS n) AS s" + source + " ORDER BY s.n", "1,2,3"},
+                {"SELECT x" + source + " ORDER BY STRUCT(x AS n).n DESC", "3,2,1"},
+                {"SELECT x" + source + " ORDER BY CASE WHEN x = 1 THEN 9 ELSE x END", "2,3,1"},
+                {"SELECT x" + source + " ORDER BY STRUCT(x AS n) = STRUCT(2 AS n) DESC, x", "2,1,3"},
+        }) {
+            query(Map.of("query", c[0], "useLegacySql", false))
+                    .then().statusCode(200)
+                    .body("rows.collect { it.f[0].v.toString() }.join(',')", equalTo(c[1]));
+        }
+    }
+
+    @Test
+    @Order(5)
     void orderByAMissingStructAliasFieldNamesTheFieldLikeBigQuery() {
         for (String[] c : new String[][] {
                 {"SELECT STRUCT(x AS n) AS s FROM UNNEST([3, 1, 2]) x ORDER BY s.zz", "zz", "STRUCT<n INT64>"},

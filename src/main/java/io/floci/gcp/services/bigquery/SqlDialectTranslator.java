@@ -51,11 +51,12 @@ final class SqlDialectTranslator {
      */
     record Translation(String sql, Set<TableRef> tables, Set<InformationSchema.Ref> informationSchema,
                        boolean needsUnicodeCaseFold, List<String> duplicateOutputNames,
-                       List<MissingStructField> missingStructFields, OrderByFieldPaths orderByFieldPaths) {
+                       List<MissingStructField> missingStructFields, OrderByFieldPaths orderByFieldPaths,
+                       OrderByTypes orderByTypes) {
 
         Translation(String sql, Set<TableRef> tables, Set<InformationSchema.Ref> informationSchema,
                     boolean needsUnicodeCaseFold) {
-            this(sql, tables, informationSchema, needsUnicodeCaseFold, List.of(), List.of(), null);
+            this(sql, tables, informationSchema, needsUnicodeCaseFold, List.of(), List.of(), null, null);
         }
     }
 
@@ -81,13 +82,28 @@ final class SqlDialectTranslator {
     record OrderByFieldPaths(String sqlWithoutOrderBy, List<List<String>> paths) {}
 
     /**
+     * The outermost query's ORDER BY items whose type the engine checks, since BigQuery refuses to sort by a STRUCT.
+     * {@code typingSql} is the query without its ORDER BY, each path or expression item appended to its select list
+     * under the item's {@code column}; describing it types an item the result's own columns cannot.
+     */
+    record OrderByTypes(List<OrderByItem> items, String typingSql) {}
+
+    /**
+     * An ORDER BY item: an output column {@code position} (1-based, 0 otherwise), or an identifier {@code path}
+     * (null otherwise) the result's columns may type, and the {@code column} of {@link OrderByTypes#typingSql}
+     * that types it otherwise (null for a position).
+     */
+    record OrderByItem(int position, List<String> path, String column) {}
+
+    /**
      * A supported script translated for one DuckDB session. {@code setupSql} holds temporary
      * macros and statements whose results BigQuery discards; {@code sql} is the final query or DML.
      */
     record ScriptTranslation(String sql, String setupSql, Set<TableRef> tables,
                              Set<InformationSchema.Ref> informationSchema, boolean needsUnicodeCaseFold,
                              List<String> duplicateOutputNames, Statement finalStatement,
-                             List<MissingStructField> missingStructFields, OrderByFieldPaths orderByFieldPaths) {}
+                             List<MissingStructField> missingStructFields, OrderByFieldPaths orderByFieldPaths,
+                             OrderByTypes orderByTypes) {}
 
     sealed interface ScriptItem permits SqlItem, IfBlock, BeginBlock, WhileBlock, LoopBlock, RepeatBlock,
             ForBlock, CaseBlock, LoopControl {}
@@ -547,7 +563,7 @@ final class SqlDialectTranslator {
             return new ScriptTranslation(query.sql(), setup.toString(), tablesWith(tables, query.tables()),
                     informationSchemaWith(informationSchema, query.informationSchema()),
                     needsUnicodeCaseFold || query.needsUnicodeCaseFold(), query.duplicateOutputNames(),
-                    finalStatement, query.missingStructFields(), query.orderByFieldPaths());
+                    finalStatement, query.missingStructFields(), query.orderByFieldPaths(), query.orderByTypes());
         }
         throw invalidQuery("A script must end with a query or DML statement.");
     }
@@ -3160,7 +3176,7 @@ final class SqlDialectTranslator {
             out.append(" RETURNING merge_action");
         }
         return new Translation(out.toString().trim(), tables, informationSchema, needsUnicodeCaseFold,
-                List.of(), List.copyOf(missingStructFields), null);
+                List.of(), List.copyOf(missingStructFields), null, null);
     }
 
     /**
@@ -4181,7 +4197,8 @@ final class SqlDialectTranslator {
                     + ") AS \"_floci_star_replace\"";
         }
         return new Translation(rendered, tables, informationSchema, needsUnicodeCaseFold,
-                duplicateOutputNames, List.copyOf(missingStructFields), orderByFieldPaths(replacementStarExclusion));
+                duplicateOutputNames, List.copyOf(missingStructFields), orderByFieldPaths(replacementStarExclusion),
+                orderByTypes(replacementStarExclusion));
     }
 
     /**
@@ -4190,26 +4207,15 @@ final class SqlDialectTranslator {
      * cannot see into, and the engine names the struct's type from the query without its ORDER BY.
      */
     private OrderByFieldPaths orderByFieldPaths(String replacementStarExclusion) {
-        int depth = 0;
-        int first = nextSignificant(0, tokens.size());
-        int closing = previousSignificantBefore(tokens.size());
-        while (first >= 0 && closing > first && tokens.get(first).isPunct("(") && matchingParen(first) == closing) {
-            depth++;
-            first = nextSignificant(first + 1, closing);
-            closing = previousSignificantBefore(closing);
-        }
-        int order = -1;
-        int by = -1;
-        for (int i = tokens.size() - 1; i >= 0 && order < 0; i--) {
-            by = nextSignificant(i + 1, tokens.size());
-            if (tokens.get(i).isKeyword("ORDER") && parenthesisDepth(i) == depth && by >= 0
-                    && tokens.get(by).isKeyword("BY")) {
-                order = i;
-            }
-        }
-        if (order < 0) {
+        OutermostOrderBy outermost = outermostOrderBy();
+        if (outermost == null) {
             return null;
         }
+        int depth = outermost.depth();
+        int first = outermost.first();
+        int closing = outermost.closing();
+        int order = outermost.order();
+        int by = outermost.by();
         int end = clauseEnd(by + 1, depth);
         List<List<String>> paths = new ArrayList<>();
         for (int i = by + 1; i < end; i++) {
@@ -4254,6 +4260,180 @@ final class SqlDialectTranslator {
                     + ") AS \"_floci_star_replace\"";
         }
         return new OrderByFieldPaths(withoutOrderBy, List.copyOf(paths));
+    }
+
+    /**
+     * The ORDER BY at the outermost query's level, looking inside the parentheses that wrap a whole statement:
+     * {@code depth} counts them, {@code first} and {@code closing} are the statement's first token and the
+     * wrapping parenthesis that closes it, or null without such an ORDER BY.
+     */
+    private record OutermostOrderBy(int depth, int first, int closing, int order, int by) {}
+
+    private OutermostOrderBy outermostOrderBy() {
+        int depth = 0;
+        int first = nextSignificant(0, tokens.size());
+        int closing = previousSignificantBefore(tokens.size());
+        while (first >= 0 && closing > first && tokens.get(first).isPunct("(") && matchingParen(first) == closing) {
+            depth++;
+            first = nextSignificant(first + 1, closing);
+            closing = previousSignificantBefore(closing);
+        }
+        for (int i = tokens.size() - 1; i >= 0; i--) {
+            int by = nextSignificant(i + 1, tokens.size());
+            if (tokens.get(i).isKeyword("ORDER") && parenthesisDepth(i) == depth && by >= 0
+                    && tokens.get(by).isKeyword("BY")) {
+                return new OutermostOrderBy(depth, first, closing, i, by);
+            }
+        }
+        return null;
+    }
+
+    private static final Set<String> SCALAR_OPERATORS = Set.of("+", "-", "*", "/", "%", "||", "=", "!=", "<>", "<",
+            ">", "<=", ">=");
+
+    private static final Set<String> SCALAR_OPERATOR_KEYWORDS = Set.of("AND", "OR", "NOT", "IS", "LIKE", "BETWEEN",
+            "IN");
+
+    /**
+     * BigQuery fails {@code ORDER BY s} for a STRUCT {@code s} while it analyzes the query, where DuckDB sorts by it.
+     * The outermost query's ORDER BY items are recorded for the engine to type: a position or an identifier path,
+     * which the result's columns can type, and any other expression. An item whose top level applies an operator
+     * never yields a STRUCT and is left out, as is a set operation's ORDER BY, which no single select list types.
+     */
+    private OrderByTypes orderByTypes(String replacementStarExclusion) {
+        OutermostOrderBy outermost = outermostOrderBy();
+        if (outermost == null) {
+            return null;
+        }
+        int depth = outermost.depth();
+        int start = depth > 0 ? outermost.first() : 0;
+        int select = -1;
+        for (int i = start; i < outermost.order(); i++) {
+            if (tokens.get(i).isKeyword("SELECT") && parenthesisDepth(i) == depth) {
+                if (select >= 0) {
+                    return null;
+                }
+                select = i;
+            }
+        }
+        List<int[]> selectList = select < 0 ? null : selectItems(select);
+        if (selectList == null) {
+            return null;
+        }
+        int end = clauseEnd(outermost.by() + 1, depth);
+        List<OrderByItem> items = new ArrayList<>();
+        StringBuilder appended = new StringBuilder();
+        for (int[] range : orderItemRanges(outermost.by() + 1, end)) {
+            int expressionEnd = withoutSortModifiers(range[0], range[1]);
+            List<Token> item = significant(range[0], expressionEnd);
+            if (item.isEmpty() || appliesScalarOperator(range[0], expressionEnd)) {
+                continue;
+            }
+            Token only = item.getFirst();
+            if (item.size() == 1 && only.kind == Kind.NUMBER && only.text.matches("\\d{1,9}")) {
+                items.add(new OrderByItem(Integer.parseInt(only.text), null, null));
+                continue;
+            }
+            String column = "_floci_order_" + (items.size() + 1);
+            appended.append(", ").append(render(range[0], expressionEnd).trim())
+                    .append(" AS \"").append(column).append('"');
+            items.add(new OrderByItem(0, identifierPath(item), column));
+        }
+        if (items.isEmpty()) {
+            return null;
+        }
+        int insertAt = selectList.getLast()[1];
+        int stop = depth > 0 ? outermost.closing() + 1 : tokens.size();
+        String typingSql = (render(start, insertAt).stripTrailing() + appended + " "
+                + render(insertAt, outermost.order()).strip() + " " + render(end, Math.max(end, stop))).trim();
+        if (replacementStarExclusion != null) {
+            typingSql = "SELECT *" + replacementStarExclusion + " FROM (" + typingSql + ") AS \"_floci_star_replace\"";
+        }
+        return new OrderByTypes(List.copyOf(items), typingSql);
+    }
+
+    /** The comma separated items of an ORDER BY clause, splitting only outside parentheses, brackets and braces. */
+    private List<int[]> orderItemRanges(int start, int end) {
+        List<int[]> ranges = new ArrayList<>();
+        int nesting = 0;
+        int itemStart = start;
+        for (int i = start; i < end; i++) {
+            Token token = tokens.get(i);
+            if (token.isPunct("(") || token.isPunct("[") || token.isPunct("{")) {
+                nesting++;
+            } else if (token.isPunct(")") || token.isPunct("]") || token.isPunct("}")) {
+                nesting--;
+            } else if (nesting == 0 && token.isPunct(",")) {
+                ranges.add(new int[] {itemStart, i});
+                itemStart = i + 1;
+            }
+        }
+        ranges.add(new int[] {itemStart, end});
+        return ranges;
+    }
+
+    /**
+     * The end of an ORDER BY item without its {@code ASC} or {@code DESC} and {@code NULLS FIRST} or
+     * {@code NULLS LAST}; a lone {@code first} or {@code last} is a column name and stays.
+     */
+    private int withoutSortModifiers(int start, int end) {
+        int last = previousSignificantBefore(end);
+        if (last > start && (tokens.get(last).isKeyword("FIRST") || tokens.get(last).isKeyword("LAST"))) {
+            int nulls = previousSignificantBefore(last);
+            if (nulls > start && tokens.get(nulls).isKeyword("NULLS")) {
+                last = previousSignificantBefore(nulls);
+            }
+        }
+        if (last > start && (tokens.get(last).isKeyword("ASC") || tokens.get(last).isKeyword("DESC"))) {
+            last = previousSignificantBefore(last);
+        }
+        return last + 1;
+    }
+
+    /**
+     * Whether an operator joins the item at its top level, outside parentheses, brackets and braces, so the item is
+     * a number, a string or a BOOL. A {@code CASE} at the top level can return a STRUCT whatever its conditions
+     * compare, so it does not count.
+     */
+    private boolean appliesScalarOperator(int start, int end) {
+        int nesting = 0;
+        boolean operator = false;
+        for (int i = start; i < end; i++) {
+            Token token = tokens.get(i);
+            if (token.isPunct("(") || token.isPunct("[") || token.isPunct("{")) {
+                nesting++;
+            } else if (token.isPunct(")") || token.isPunct("]") || token.isPunct("}")) {
+                nesting--;
+            } else if (nesting == 0) {
+                if (token.isKeyword("CASE")) {
+                    return false;
+                }
+                operator |= token.kind == Kind.PUNCT && SCALAR_OPERATORS.contains(token.text)
+                        || token.kind == Kind.IDENT && SCALAR_OPERATOR_KEYWORDS.contains(token.upper());
+            }
+        }
+        return operator;
+    }
+
+    /** The names of an item that is only identifiers joined by dots ({@code s}, {@code t.s.m}), or null. */
+    private static List<String> identifierPath(List<Token> item) {
+        if (item.size() % 2 == 0) {
+            return null;
+        }
+        List<String> path = new ArrayList<>();
+        for (int i = 0; i < item.size(); i++) {
+            Token token = item.get(i);
+            if (i % 2 == 1) {
+                if (!token.isPunct(".")) {
+                    return null;
+                }
+            } else if (token.kind == Kind.IDENT || token.kind == Kind.QIDENT) {
+                path.add(token.identifierText());
+            } else {
+                return null;
+            }
+        }
+        return List.copyOf(path);
     }
 
     private boolean isIdentifierToken(int i) {

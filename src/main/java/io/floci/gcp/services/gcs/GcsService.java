@@ -830,13 +830,19 @@ public class GcsService {
         // OBJECT_DELETE for the replaced object"
         // (https://cloud.google.com/storage/docs/pubsub-notifications#replacing_objects).
         if (replaced != null) {
-            publishNotificationEvent(bucket, objectName, meta, "OBJECT_FINALIZE",
+            publishObjectFinalized(bucket, objectName, meta,
                     Map.of("overwroteGeneration", replaced.getGeneration()));
             publishNotificationEvent(bucket, objectName, replaced, replacedEventType,
                     Map.of("overwrittenByGeneration", meta.getGeneration()));
         } else {
-            publishNotificationEvent(bucket, objectName, meta, "OBJECT_FINALIZE");
+            publishObjectFinalized(bucket, objectName, meta, Map.of());
         }
+        return meta;
+    }
+
+    private void publishObjectFinalized(String bucket, String objectName, GcsObjectMeta meta,
+            Map<String, String> extraAttributes) {
+        publishNotificationEvent(bucket, objectName, meta, "OBJECT_FINALIZE", extraAttributes);
         if (eventarcServiceInstance != null && eventarcServiceInstance.isResolvable()) {
             try {
                 eventarcServiceInstance.get().onGcsEvent(bucket, objectName, meta, "google.cloud.storage.object.v1.finalized");
@@ -844,7 +850,6 @@ public class GcsService {
                 LOG.warnf(e, "Eventarc GCS object finalize event dispatch failed bucket=%s object=%s", bucket, objectName);
             }
         }
-        return meta;
     }
 
     private static void applyInitialObjectMetadata(GcsObjectMeta target, GcsObjectMeta template) {
@@ -1031,11 +1036,27 @@ public class GcsService {
      */
     private boolean deleteObjectLocked(String bucket, String objectName, boolean retainSoftDeleted) {
         LOG.debugf("deleteObject bucket=%s name=%s", bucket, objectName);
+        RemovedLiveObject removed = removeLiveObjectLocked(bucket, objectName, retainSoftDeleted);
+        if (removed == null) {
+            LOG.debugf("deleteObject: object metadata not found bucket=%s name=%s", bucket, objectName);
+            return false;
+        }
+        publishLiveObjectRemoved(bucket, objectName, removed, Map.of());
+        return true;
+    }
+
+    /**
+     * The live object a delete removed: {@code eventMeta} and {@code eventType} describe the
+     * OBJECT_ARCHIVE or OBJECT_DELETE notification, {@code removed} is the live record as it was.
+     */
+    private record RemovedLiveObject(GcsObjectMeta eventMeta, String eventType, GcsObjectMeta removed) {
+    }
+
+    private RemovedLiveObject removeLiveObjectLocked(String bucket, String objectName, boolean retainSoftDeleted) {
         String key = objectKey(bucket, objectName);
         GcsObjectMeta live = getLiveObjectMeta(bucket, objectName).orElse(null);
         if (live == null) {
-            LOG.debugf("deleteObject: object metadata not found bucket=%s name=%s", bucket, objectName);
-            return false;
+            return null;
         }
         if (live.getTimeDeleted() == null) {
             checkObjectMutable(live);
@@ -1065,20 +1086,22 @@ public class GcsService {
             // when that noncurrent version is deleted, in deleteObjectVersionLocked.
             softDelete(bucket, objectName, live);
         }
-        GcsObjectMeta deletedMeta = live;
         objectMetaStore.delete(key);
         objectDataStore.delete(key);
-        if (deletedMeta != null) {
-            publishNotificationEvent(bucket, objectName, eventMeta, eventType);
-            if (eventarcServiceInstance != null && eventarcServiceInstance.isResolvable()) {
-                try {
-                    eventarcServiceInstance.get().onGcsEvent(bucket, objectName, deletedMeta, "google.cloud.storage.object.v1.deleted");
-                } catch (Exception e) {
-                    LOG.warnf(e, "Eventarc GCS object delete event dispatch failed bucket=%s object=%s", bucket, objectName);
-                }
+        return new RemovedLiveObject(eventMeta, eventType, live);
+    }
+
+    private void publishLiveObjectRemoved(String bucket, String objectName, RemovedLiveObject removed,
+            Map<String, String> extraAttributes) {
+        publishNotificationEvent(bucket, objectName, removed.eventMeta(), removed.eventType(), extraAttributes);
+        if (eventarcServiceInstance != null && eventarcServiceInstance.isResolvable()) {
+            try {
+                eventarcServiceInstance.get().onGcsEvent(bucket, objectName, removed.removed(),
+                        "google.cloud.storage.object.v1.deleted");
+            } catch (Exception e) {
+                LOG.warnf(e, "Eventarc GCS object delete event dispatch failed bucket=%s object=%s", bucket, objectName);
             }
         }
-        return true;
     }
 
     private static final int MAX_COMPOSE_SOURCES = 32;
@@ -1391,30 +1414,50 @@ public class GcsService {
                 // it when versioning is on, and retains it under the soft delete policy otherwise.
                 // Writing straight over it would destroy a live generation, which is the opposite of
                 // what this feature exists to do.
+                RemovedLiveObject displaced = null;
                 if (getLiveObjectMeta(bucket, objectName).isPresent()) {
                     if (requireOverwritePermission != null) {
                         requireOverwritePermission.run();
                     }
-                    deleteObjectLocked(bucket, objectName);
+                    displaced = removeLiveObjectLocked(bucket, objectName, true);
                 }
+                // "A new copy of that object is created", with a new generation, metageneration 1 and
+                // createTime set to the restore time, while the soft-deleted version "remains in the
+                // background until its retention period officially expires"
+                // (https://cloud.google.com/storage/docs/json_api/v1/objects/restore,
+                // https://cloud.google.com/storage/docs/soft-delete).
+                String restoredGeneration = String.valueOf(nextGeneration());
+                String restoreTime = nowTimestamp();
                 GcsObjectMeta restored = cloneMeta(archived);
+                restored.setId(bucket + "/" + objectName + "/" + restoredGeneration);
+                restored.setGeneration(restoredGeneration);
+                restored.setMetageneration("1");
+                restored.setTimeCreated(restoreTime);
+                restored.setUpdated(restoreTime);
+                if (archived.getSelfLink() != null) {
+                    restored.setMediaLink(archived.getSelfLink() + "?alt=media&generation=" + restoredGeneration);
+                }
+                restored.setRetentionExpirationTime(computeRetentionExpiry(bucket, restoreTime));
                 restored.setSoftDeleteTime(null);
                 restored.setHardDeleteTime(null);
                 restored.setIsLatest(true);
                 restored.setTimeDeleted(null);
-                restored.setUpdated(nowTimestamp());
 
                 objectDataStore.get(archiveKey).ifPresent(data -> objectDataStore.put(key, data));
                 objectMetaStore.put(key, restored);
-                objectMetaStore.delete(archiveKey);
-                objectDataStore.delete(archiveKey);
-                // With versioning on, the original delete also left this generation in the noncurrent
-                // namespace. It is live again now, so drop that copy: leaving both would list the same
-                // generation twice, once current and once noncurrent.
-                String versionKey = key + "\0" + generation;
-                objectMetaStore.delete(versionKey);
-                objectDataStore.delete(versionKey);
-                LOG.debugf("restoreObject bucket=%s name=%s generation=%s", bucket, objectName, generation);
+                LOG.debugf("restoreObject bucket=%s name=%s generation=%s restoredGeneration=%s",
+                        bucket, objectName, generation, restoredGeneration);
+                // A restore that displaces a live object is a replace: "OBJECT_FINALIZE for the new
+                // version of the object and either OBJECT_ARCHIVE or OBJECT_DELETE for the replaced
+                // object" (https://cloud.google.com/storage/docs/pubsub-notifications#replacing_objects).
+                if (displaced != null) {
+                    publishObjectFinalized(bucket, objectName, restored,
+                            Map.of("overwroteGeneration", displaced.removed().getGeneration()));
+                    publishLiveObjectRemoved(bucket, objectName, displaced,
+                            Map.of("overwrittenByGeneration", restoredGeneration));
+                } else {
+                    publishObjectFinalized(bucket, objectName, restored, Map.of());
+                }
                 return restored;
             }
         }

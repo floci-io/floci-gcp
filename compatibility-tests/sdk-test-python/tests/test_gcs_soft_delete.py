@@ -54,6 +54,17 @@ def test_deleted_object_leaves_live_listing_and_can_be_restored(
 
     restored = soft_delete_bucket.restore_blob("restore-me.txt", generation=generation)
     assert restored.name == "restore-me.txt"
+    # "A new generation is assigned and the metageneration is reset to 1", and the soft-deleted
+    # version stays listed until its retention expires
+    # (https://cloud.google.com/storage/docs/json_api/v1/objects/restore).
+    assert restored.generation != generation
+    assert restored.metageneration == 1
+    still_soft_deleted = [
+        b.generation
+        for b in storage_client.list_blobs(soft_delete_bucket, soft_deleted=True)
+        if b.name == "restore-me.txt"
+    ]
+    assert generation in still_soft_deleted
 
     # Back in the live view, with its bytes intact.
     live = [b.name for b in storage_client.list_blobs(soft_delete_bucket)]

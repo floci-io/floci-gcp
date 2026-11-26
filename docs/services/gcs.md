@@ -434,8 +434,11 @@ handles, or redirection. Unsupported RPCs return gRPC `UNIMPLEMENTED`.
   Versioning, an object replaced by an upload, compose, copy, rewrite or move is soft-deleted, as a
   deleted one is; with versioning it becomes noncurrent. `effectiveTime` is
   set by the server and moves forward when the retention grows. Buckets saved by older emulator
-  versions keep the policy they had. Once its `hardDeleteTime` passes, a soft-deleted object
-  leaves the listing and can no longer be restored, and a background sweep frees its bytes
+  versions keep the policy they had. `objects.restore` creates a new live generation with
+  `metageneration: "1"` and `timeCreated` set to the restore time, publishes `OBJECT_FINALIZE`,
+  and leaves the soft-deleted generation listed until it expires. A restore over a live object
+  is notified as a replace (`overwroteGeneration` / `overwrittenByGeneration`). Once its
+  `hardDeleteTime` passes, a soft-deleted object leaves the listing and can no longer be restored, and a background sweep frees its bytes
 - Pre-signed GET/PUT URLs (V4 signature via IAM `SignBlob`)
 - Batch requests (`/batch/storage/v1`), including when the container's published port
   differs from its internal one (`docker run -p 9000:4588`)
@@ -446,7 +449,7 @@ Object names containing `/`, spaces, `+`, or percent-encoded sequences round-tri
 **Pub/Sub notifications (REST JSON):**
 
 - `CreateNotification` / `ListNotifications` / `GetNotification` / `DeleteNotification` (`/storage/v1/b/{bucket}/notificationConfigs`), object changes publish to the configured Pub/Sub topic in the local backend
-- Event types: `OBJECT_FINALIZE` (upload, copy, rewrite, compose), `OBJECT_METADATA_UPDATE` (JSON `objects.patch` / `objects.update`, gRPC `UpdateObject`), `OBJECT_DELETE`, and `OBJECT_ARCHIVE` when the bucket has versioning enabled. Replacing an object sends `OBJECT_FINALIZE` with `overwroteGeneration` plus `OBJECT_DELETE` or `OBJECT_ARCHIVE` with `overwrittenByGeneration`
+- Event types: `OBJECT_FINALIZE` (upload, copy, rewrite, compose, restore), `OBJECT_METADATA_UPDATE` (JSON `objects.patch` / `objects.update`, gRPC `UpdateObject`), `OBJECT_DELETE`, and `OBJECT_ARCHIVE` when the bucket has versioning enabled. Replacing an object sends `OBJECT_FINALIZE` with `overwroteGeneration` plus `OBJECT_DELETE` or `OBJECT_ARCHIVE` with `overwrittenByGeneration`
 - Every message carries `notificationConfig` (`projects/_/buckets/{bucket}/notificationConfigs/{id}`), `eventType`, `payloadFormat`, `bucketId`, `objectId`, `objectGeneration`, `eventTime` (RFC 3339) and the config's `custom_attributes`
 
 **Object ACLs (REST JSON):**

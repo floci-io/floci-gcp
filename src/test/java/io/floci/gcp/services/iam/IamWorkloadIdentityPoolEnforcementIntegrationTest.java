@@ -106,12 +106,23 @@ class IamWorkloadIdentityPoolEnforcementIntegrationTest {
         grant("projects/" + project, ADMIN_ROLE, callerEmail);
         createPool(poolId);
 
+        given().header("Authorization", viewerAuthorization).urlEncodingEnabled(false)
+                .when().get(item(poolId) + ":listAttestationRules")
+                .then().statusCode(403)
+                .body("error.status", equalTo("PERMISSION_DENIED"));
+
         grant(policyName(poolId), VIEWER_ROLE, viewerEmail);
 
         given().header("Authorization", viewerAuthorization)
                 .when().get(item(poolId))
                 .then().statusCode(200)
                 .body("state", equalTo("ACTIVE"));
+
+        given().header("Authorization", viewerAuthorization)
+                .urlEncodingEnabled(false)
+                .when().get(item(poolId) + ":listAttestationRules")
+                .then().statusCode(200)
+                .body("", equalTo(Map.of()));
 
         given().header("Authorization", viewerAuthorization).contentType("application/json")
                 .body(Map.of("displayName", "viewer update"))

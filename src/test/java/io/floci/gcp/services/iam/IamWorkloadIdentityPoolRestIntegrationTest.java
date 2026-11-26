@@ -111,6 +111,20 @@ class IamWorkloadIdentityPoolRestIntegrationTest {
     }
 
     @Test
+    void listingAttestationRulesReturnsEmptyResponseForAnActivePool() {
+        String poolId = "pool-" + suffix();
+        given().queryParam("workloadIdentityPoolId", poolId).contentType("application/json")
+                .body(Map.of()).when().post(BASE).then().statusCode(200);
+
+        given().urlEncodingEnabled(false).when().get(BASE + "/" + poolId + ":listAttestationRules")
+                .then().statusCode(200)
+                .body("", equalTo(Map.of()));
+
+        given().urlEncodingEnabled(false).when().get(BASE + "/missing-" + suffix() + ":listAttestationRules")
+                .then().statusCode(404);
+    }
+
+    @Test
     void providerLifecycleForOidcAndAws() {
         String poolId = "pool-" + suffix();
         String oidcId = "oidc-" + suffix();

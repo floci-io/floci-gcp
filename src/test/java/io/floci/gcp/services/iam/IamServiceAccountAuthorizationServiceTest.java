@@ -189,6 +189,8 @@ class IamServiceAccountAuthorizationServiceTest {
                         "iam.googleapis.com/workloadIdentityPools.list", "projects/p", "projects/p"),
                 new Route("getPool", Map.of("project", "p", "poolId", "pool"),
                         "iam.googleapis.com/workloadIdentityPools.get", pool, poolPolicy),
+                new Route("listAttestationRules", Map.of("project", "p", "poolId", "pool"),
+                        "iam.googleapis.com/workloadIdentityPools.get", pool, poolPolicy),
                 new Route("patchPool", Map.of("project", "p", "poolId", "pool"),
                         "iam.googleapis.com/workloadIdentityPools.update", pool, poolPolicy),
                 new Route("deletePool", Map.of("project", "p", "poolId", "pool"),

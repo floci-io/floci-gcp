@@ -181,6 +181,13 @@ public class IamWorkloadIdentityPoolService {
         return read(pools, IamWorkloadIdentityPoolNames.pool(projectId, poolId));
     }
 
+    public ObjectNode listAttestationRules(String project, String location, String poolId) {
+        String projectId = projectId(project);
+        requireGlobal(location);
+        active(pools, IamWorkloadIdentityPoolNames.pool(projectId, poolId));
+        return mapper.createObjectNode();
+    }
+
     public ObjectNode listPools(String project, String location, boolean showDeleted,
             int pageSize, String pageToken) {
         String projectId = projectId(project);

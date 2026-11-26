@@ -70,6 +70,14 @@ public class IamWorkloadIdentityPoolController {
         return json(service.getPool(project, location, poolId));
     }
 
+    @GET
+    @Path("/{poolId}:listAttestationRules")
+    public Response listAttestationRules(@PathParam("project") String project,
+            @PathParam("location") String location,
+            @PathParam("poolId") String poolId) {
+        return json(service.listAttestationRules(project, location, poolId));
+    }
+
     @PATCH
     @Path("/{poolId}")
     public Response patchPool(@PathParam("project") String project,

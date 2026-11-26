@@ -52,7 +52,8 @@ public class IamServiceAccountAuthorizationAdapter implements IamAuthorizationAd
             WORKLOAD_IDENTITY + "get", WORKLOAD_IDENTITY + "getIamPolicy", WORKLOAD_IDENTITY + "list",
             WORKLOAD_IDENTITY_PROVIDER + "get", WORKLOAD_IDENTITY_PROVIDER + "list");
     private static final Set<String> WORKLOAD_IDENTITY_METHODS = Set.of(
-            "createPool", "getPool", "listPools", "patchPool", "deletePool", "undeletePool",
+            "createPool", "getPool", "listAttestationRules", "listPools",
+            "patchPool", "deletePool", "undeletePool",
             "getPoolIamPolicy", "setPoolIamPolicy", "testPoolIamPermissions",
             "createProvider", "getProvider", "listProviders", "patchProvider", "deleteProvider",
             "undeleteProvider", "getPoolOperation", "getProviderOperation");
@@ -217,6 +218,7 @@ public class IamServiceAccountAuthorizationAdapter implements IamAuthorizationAd
             case "TestIamPermissions" -> null;
             case "CreateWorkloadIdentityPool" -> WORKLOAD_IDENTITY + "create";
             case "GetWorkloadIdentityPool" -> WORKLOAD_IDENTITY + "get";
+            case "ListWorkloadIdentityPoolAttestationRules" -> WORKLOAD_IDENTITY + "get";
             case "ListWorkloadIdentityPools" -> WORKLOAD_IDENTITY + "list";
             case "UpdateWorkloadIdentityPool" -> WORKLOAD_IDENTITY + "update";
             case "DeleteWorkloadIdentityPool" -> WORKLOAD_IDENTITY + "delete";
@@ -345,6 +347,8 @@ public class IamServiceAccountAuthorizationAdapter implements IamAuthorizationAd
         return switch (method) {
             case "createPool" -> new IamOperation("CreateWorkloadIdentityPool", project);
             case "getPool" -> new IamOperation("GetWorkloadIdentityPool", pool);
+            case "listAttestationRules" ->
+                    new IamOperation("ListWorkloadIdentityPoolAttestationRules", pool);
             case "listPools" -> new IamOperation("ListWorkloadIdentityPools", project);
             case "patchPool" -> new IamOperation("UpdateWorkloadIdentityPool", pool);
             case "deletePool" -> new IamOperation("DeleteWorkloadIdentityPool", pool);

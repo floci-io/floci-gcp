@@ -628,6 +628,8 @@ either the project ID or number.
   `jwksJson`), AWS (`accountId`), and opaque SAML/X.509 configurations. OIDC
   requires `attributeMapping` with `google.subject`, as GCP does. Only one provider
   configuration may be set.
+- `listAttestationRules` returns an empty response for active pools; attestation
+  rules are not implemented.
 - Pools expose `getIamPolicy`, `setIamPolicy` and `testIamPermissions`. Provider
   permissions inherit from the parent pool policy and then the project policy.
 

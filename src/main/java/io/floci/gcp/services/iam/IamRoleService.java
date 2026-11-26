@@ -1,10 +1,18 @@
 package io.floci.gcp.services.iam;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.google.protobuf.DescriptorProtos.DescriptorProto;
+import com.google.protobuf.DescriptorProtos.EnumDescriptorProto;
+import com.google.protobuf.DescriptorProtos.EnumValueDescriptorProto;
+import com.google.protobuf.DescriptorProtos.FileDescriptorProto;
+import com.google.protobuf.Descriptors.DescriptorValidationException;
+import com.google.protobuf.Descriptors.EnumDescriptor;
+import com.google.protobuf.Descriptors.FileDescriptor;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.PageToken;
 import io.floci.gcp.core.common.ProjectRecord;
 import io.floci.gcp.core.common.ProjectRegistry;
+import io.floci.gcp.core.common.ProtoJsonEnums;
 import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.core.storage.StorageFactory;
 import io.floci.gcp.services.iam.model.StoredRole;
@@ -41,10 +49,7 @@ public class IamRoleService {
     private static final Pattern PARENT = Pattern.compile("(projects|organizations)/([^/:]+)");
     private static final Pattern ROLE_NAME = Pattern.compile("((projects|organizations)/([^/:]+))/roles/([^/:]+)");
     private static final Pattern ROLE_ID = Pattern.compile("[A-Za-z0-9_.]{3,64}");
-    private static final Set<String> STAGES = Set.of("ALPHA", "BETA", "GA", "DEPRECATED", "DISABLED", "EAP");
-    // Proto3 JSON also accepts enum numbers; RoleLaunchStage skips 3.
-    private static final Map<Integer, String> STAGE_NUMBERS = Map.of(0, "ALPHA", 1, "BETA", 2, "GA",
-            4, "DEPRECATED", 5, "DISABLED", 6, "EAP");
+    private static final EnumDescriptor ROLE_LAUNCH_STAGE = roleLaunchStage();
     private static final Set<String> MUTABLE_FIELDS = Set.of("title", "description", "includedPermissions", "stage");
     private static final int DEFAULT_PAGE_SIZE = 300;
     private static final int MAX_PAGE_SIZE = 1000;
@@ -339,14 +344,34 @@ public class IamRoleService {
             target.setIncludedPermissions(permissions(source.get("includedPermissions")));
         }
         if (fields.contains("stage")) {
-            Object value = source.get("stage");
-            String stage = value instanceof Integer number ? STAGE_NUMBERS.get(number)
-                    : value != null ? value.toString() : StoredRole.ALPHA;
-            if (stage == null || !STAGES.contains(stage)) {
-                throw GcpException.invalidArgument("Invalid value at 'role.stage' "
-                        + "(type.googleapis.com/google.iam.admin.v1.Role.RoleLaunchStage), \"" + value + "\"");
+            String stage = ProtoJsonEnums.name(source.get("stage"), ROLE_LAUNCH_STAGE, "role.stage");
+            target.setStage(stage != null ? stage : StoredRole.ALPHA);
+        }
+    }
+
+    /**
+     * google.iam.admin.v1.Role.RoleLaunchStage from google/iam/admin/v1/iam.proto. No IAM admin
+     * stub artifact is on the classpath, so the enum is described here; it skips 3.
+     */
+    private static EnumDescriptor roleLaunchStage() {
+        EnumDescriptorProto.Builder stage = EnumDescriptorProto.newBuilder().setName("RoleLaunchStage");
+        String[] names = {"ALPHA", "BETA", "GA", null, "DEPRECATED", "DISABLED", "EAP"};
+        for (int number = 0; number < names.length; number++) {
+            if (names[number] != null) {
+                stage.addValue(EnumValueDescriptorProto.newBuilder().setName(names[number]).setNumber(number));
             }
-            target.setStage(stage);
+        }
+        FileDescriptorProto file = FileDescriptorProto.newBuilder()
+                .setName("floci/iam/admin/v1/role_launch_stage.proto")
+                .setPackage("google.iam.admin.v1")
+                .setSyntax("proto3")
+                .addMessageType(DescriptorProto.newBuilder().setName("Role").addEnumType(stage))
+                .build();
+        try {
+            return FileDescriptor.buildFrom(file, new FileDescriptor[0])
+                    .findMessageTypeByName("Role").findEnumTypeByName("RoleLaunchStage");
+        } catch (DescriptorValidationException e) {
+            throw new IllegalStateException(e);
         }
     }
 

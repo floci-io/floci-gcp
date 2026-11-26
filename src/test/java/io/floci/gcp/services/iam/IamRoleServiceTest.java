@@ -13,6 +13,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.math.BigInteger;
 import java.nio.file.Path;
 import java.util.Base64;
 import java.util.Collections;
@@ -146,6 +147,27 @@ class IamRoleServiceTest {
 
         StoredRole restored = service.undelete(ROLE, deleted.getEtag());
         assertNull(restored.getDeleted());
+    }
+
+    @Test
+    void stageAcceptsItsNumberOfAnyNumericTypeAndRejectsUndefinedNumbers() throws Exception {
+        Map<String, Object> json = new ObjectMapper().readValue(
+                "{\"stage\": 4294967298, \"description\": \"long\"}", new TypeReference<>() {});
+        assertEquals(Long.class, json.get("stage").getClass());
+
+        assertEquals("BETA", service.create("projects/p", "long_stage", Map.of("stage", 1L)).getStage());
+        assertEquals("DEPRECATED",
+                service.create("projects/p", "big_stage", Map.of("stage", BigInteger.valueOf(4))).getStage());
+        assertEquals("EAP", service.create("projects/p", "double_stage", Map.of("stage", 6.0d)).getStage());
+        assertNull(service.create("projects/p", "zero_stage", Map.of("stage", 0)).getStage());
+
+        String prefix = "Invalid value at 'role.stage' (type.googleapis.com/google.iam.admin.v1.Role.RoleLaunchStage), ";
+        assertMessage(prefix + "4294967298", () -> service.create("projects/p", "huge_stage", json));
+        assertMessage(prefix + "3", () -> service.create("projects/p", "gap_stage", Map.of("stage", 3)));
+        assertMessage(prefix + "7", () -> service.create("projects/p", "unknown_stage", Map.of("stage", 7)));
+        assertMessage(prefix + "\"UNKNOWN\"",
+                () -> service.create("projects/p", "named_stage", Map.of("stage", "UNKNOWN")));
+        assertMessage(prefix + "1.5", () -> service.create("projects/p", "fraction_stage", Map.of("stage", 1.5d)));
     }
 
     @Test

@@ -29,6 +29,7 @@ which mode is active and the supported service list.
 | Cloud Logging sinks | REST JSON and gRPC create/get/list/update/delete for project and organization sinks. Folder and billing-account parents fail closed for evaluated callers; sink IAM policy methods fail closed in enforce mode. See [Sink management IAM](logging.md#sink-management-iam) |
 | Secret Manager | REST JSON and gRPC secret and version operations; see [Secret Manager IAM enforcement](secret-manager.md#iam-enforcement) |
 | IAM service accounts and keys | REST JSON service-account CRUD, disable and enable, key management, IAM policy methods over REST and shared IAM gRPC, `signBlob`, and IAM Credentials `generateAccessToken`, `generateIdToken`, `signBlob`, and `signJwt` |
+| IAM Workload Identity Pools | REST JSON pool and provider create/get/list/patch/delete/undelete, pool IAM policy methods, and `roles/iam.workloadIdentityPoolAdmin` and `roles/iam.workloadIdentityPoolViewer` evaluation. See [Workload Identity Pools](#workload-identity-pools) |
 | IAM custom roles | REST JSON project and organization role create, get, list, patch, delete, and undelete. Bindings to stored custom roles grant their `includedPermissions` on every surface above except GCS bucket policies. See [Custom roles](#custom-roles) |
 | GCS ACLs and GCS gRPC | **Not IAM-enforced.** Existing downscoped-token CAB checks still apply |
 | Cloud Run jobs, worker pools, instances, invocation and operations, all other services | **Not IAM-enforced**, including any policies those services store |
@@ -604,6 +605,38 @@ curl -X POST \
 curl http://localhost:4588/v1/projects/floci-local/serviceAccounts/my-sa@floci-local.iam.gserviceaccount.com/keys
 ```
 
+## Workload Identity Pools
+
+`projects.locations.workloadIdentityPools` and their `providers` are served under
+`/v1/projects/{project}/locations/global/workloadIdentityPools`. Pool and provider
+resource names use the project number, as GCP returns them, while requests may use
+either the project ID or number.
+
+- Pool and provider create, patch, delete and undelete return completed
+  `google.longrunning.Operation`s; get and list return the resources directly.
+  The operation name is nested under the pool or provider
+  (`.../workloadIdentityPools/{pool}/operations/{id}` or
+  `.../providers/{provider}/operations/{id}`), matching the IAM discovery document.
+- `patch` requires an `updateMask`; `list` accepts `showDeleted`, `pageSize` and
+  `pageToken`.
+- Delete is soft: the resource reports `state: DELETED` and a 30-day `expireTime`,
+  disappears from `list` unless `showDeleted=true`, and can be undeleted. The
+  emulator does not permanently purge soft-deleted resources. While a pool is
+  deleted, its providers are unreachable and return `NOT_FOUND`; undeleting the
+  pool makes them reachable again with the state they had.
+- Providers support OIDC (`issuerUri`, `allowedAudiences`, `discoveryUri`,
+  `jwksJson`), AWS (`accountId`), and opaque SAML/X.509 configurations. OIDC
+  requires `attributeMapping` with `google.subject`, as GCP does. Only one provider
+  configuration may be set.
+- `listAttestationRules` returns an empty response for active pools; attestation
+  rules are not implemented.
+- Pools expose `getIamPolicy`, `setIamPolicy` and `testIamPermissions`. Provider
+  permissions inherit from the parent pool policy and then the project policy.
+
+This is the control plane only. Exchanging an external OIDC or AWS credential for
+an access token at STS is not implemented yet; the [STS service](sts.md) still
+supports only access-token-to-access-token downscoping.
+
 ## IAM Policy Bindings
 
 ```bash
@@ -647,6 +680,13 @@ The signing key is not returned by `ListServiceAccountKeys` (real IAM lists it a
 - `SignBlob`
 - `CreateRole`, `GetRole`, `ListRoles`, `UpdateRole`, `DeleteRole`, `UndeleteRole` for
   project and organization custom roles
+- `CreateWorkloadIdentityPool`, `GetWorkloadIdentityPool`, `ListWorkloadIdentityPools`,
+  `UpdateWorkloadIdentityPool`, `DeleteWorkloadIdentityPool`,
+  `UndeleteWorkloadIdentityPool`
+- `CreateWorkloadIdentityPoolProvider`, `GetWorkloadIdentityPoolProvider`,
+  `ListWorkloadIdentityPoolProviders`, `UpdateWorkloadIdentityPoolProvider`,
+  `DeleteWorkloadIdentityPoolProvider`, `UndeleteWorkloadIdentityPoolProvider`
+- Pool `GetIamPolicy`, `SetIamPolicy`, `TestIamPermissions`
 
 ## Related: Service Account Impersonation
 

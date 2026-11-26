@@ -2,6 +2,8 @@ package io.floci.gcp.services.iam;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.gcp.core.common.GcpException;
+import io.floci.gcp.core.common.ProjectRecord;
+import io.floci.gcp.core.common.ProjectRegistry;
 import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.services.iam.authorization.IamAuthorizationRegistry;
 import io.floci.gcp.services.iam.authorization.IamOperation;
@@ -135,11 +137,26 @@ class IamServiceAccountAuthorizationServiceTest {
     @Test
     void roleSlicesMatchUpstreamAndDoNotGrantImpersonationThroughBasicRoles() {
         IamRoleCatalog roles = new IamRoleCatalog(new IamAuthorizationRegistry(List.of(adapter)));
-        for (String role : adapter.roles().keySet()) {
+        for (String role : List.of("roles/iam.serviceAccountAdmin", "roles/iam.serviceAccountKeyAdmin",
+                "roles/iam.serviceAccountUser", "roles/iam.serviceAccountTokenCreator")) {
             assertTrue(roles.grants(role, "iam.serviceAccounts.get"));
             assertTrue(roles.grants(role, "iam.serviceAccounts.list"));
             assertTrue(roles.grants(role, "resourcemanager.projects.get"));
         }
+        for (String role : List.of("roles/iam.workloadIdentityPoolAdmin",
+                "roles/iam.workloadIdentityPoolViewer")) {
+            assertTrue(roles.grants(role, "iam.googleapis.com/workloadIdentityPools.get"));
+            assertTrue(roles.grants(role, "iam.googleapis.com/workloadIdentityPools.list"));
+            assertTrue(roles.grants(role, "resourcemanager.projects.get"));
+        }
+        assertTrue(roles.grants("roles/iam.workloadIdentityPoolAdmin",
+                "iam.googleapis.com/workloadIdentityPools.create"));
+        assertTrue(roles.grants("roles/iam.workloadIdentityPoolAdmin",
+                "iam.googleapis.com/workloadIdentityPoolProviders.create"));
+        assertFalse(roles.grants("roles/iam.workloadIdentityPoolViewer",
+                "iam.googleapis.com/workloadIdentityPools.create"));
+        assertFalse(roles.grants("roles/iam.workloadIdentityPoolViewer",
+                "iam.googleapis.com/workloadIdentityPools.update"));
         for (String role : List.of("roles/owner", "roles/editor", "roles/viewer")) {
             assertTrue(roles.grants(role, "iam.serviceAccountKeys.get"));
             assertFalse(roles.grants(role, "iam.serviceAccounts.getAccessToken"));
@@ -151,6 +168,76 @@ class IamServiceAccountAuthorizationServiceTest {
         assertFalse(roles.grants("roles/editor", "iam.serviceAccounts.setIamPolicy"));
         assertFalse(roles.grants("roles/viewer", "iam.serviceAccounts.create"));
         assertFalse(roles.grants("roles/iam.serviceAccountAdmin", "iam.serviceAccountKeys.create"));
+    }
+
+    @Test
+    void workloadIdentityPoolRoutesUseExactPermissions() {
+        ProjectRegistry registry = mock(ProjectRegistry.class);
+        ProjectRecord record = new ProjectRecord();
+        record.setProjectId("p");
+        when(registry.require(anyString())).thenReturn(record);
+        IamServiceAccountAuthorizationAdapter resolved = new IamServiceAccountAuthorizationAdapter(
+                mock(Instance.class), registry);
+        String pool = IamWorkloadIdentityPoolNames.pool("p", "pool");
+        String poolPolicy = IamWorkloadIdentityPoolNames.policyPool("p", "pool");
+        String provider = IamWorkloadIdentityPoolNames.provider("p", "pool", "provider");
+        record Route(String method, Map<String, String> path, String permission, String target, String policy) {}
+        List<Route> routes = List.of(
+                new Route("createPool", Map.of("project", "p", "location", "global"),
+                        "iam.googleapis.com/workloadIdentityPools.create", "projects/p", "projects/p"),
+                new Route("listPools", Map.of("project", "p", "location", "global"),
+                        "iam.googleapis.com/workloadIdentityPools.list", "projects/p", "projects/p"),
+                new Route("getPool", Map.of("project", "p", "poolId", "pool"),
+                        "iam.googleapis.com/workloadIdentityPools.get", pool, poolPolicy),
+                new Route("listAttestationRules", Map.of("project", "p", "poolId", "pool"),
+                        "iam.googleapis.com/workloadIdentityPools.get", pool, poolPolicy),
+                new Route("patchPool", Map.of("project", "p", "poolId", "pool"),
+                        "iam.googleapis.com/workloadIdentityPools.update", pool, poolPolicy),
+                new Route("deletePool", Map.of("project", "p", "poolId", "pool"),
+                        "iam.googleapis.com/workloadIdentityPools.delete", pool, poolPolicy),
+                new Route("undeletePool", Map.of("project", "p", "poolId", "pool"),
+                        "iam.googleapis.com/workloadIdentityPools.undelete", pool, poolPolicy),
+                new Route("getPoolIamPolicy", Map.of("project", "p", "poolId", "pool"),
+                        "iam.googleapis.com/workloadIdentityPools.getIamPolicy", pool, poolPolicy),
+                new Route("setPoolIamPolicy", Map.of("project", "p", "poolId", "pool"),
+                        "iam.googleapis.com/workloadIdentityPools.setIamPolicy", pool, poolPolicy),
+                new Route("createProvider", Map.of("project", "p", "poolId", "pool"),
+                        "iam.googleapis.com/workloadIdentityPoolProviders.create", pool, poolPolicy),
+                new Route("listProviders", Map.of("project", "p", "poolId", "pool"),
+                        "iam.googleapis.com/workloadIdentityPoolProviders.list", pool, poolPolicy),
+                new Route("getProvider", Map.of("project", "p", "poolId", "pool", "providerId", "provider"),
+                        "iam.googleapis.com/workloadIdentityPoolProviders.get", provider, poolPolicy),
+                new Route("patchProvider", Map.of("project", "p", "poolId", "pool", "providerId", "provider"),
+                        "iam.googleapis.com/workloadIdentityPoolProviders.update", provider, poolPolicy),
+                new Route("deleteProvider", Map.of("project", "p", "poolId", "pool", "providerId", "provider"),
+                        "iam.googleapis.com/workloadIdentityPoolProviders.delete", provider, poolPolicy),
+                new Route("undeleteProvider", Map.of("project", "p", "poolId", "pool", "providerId", "provider"),
+                        "iam.googleapis.com/workloadIdentityPoolProviders.undelete", provider, poolPolicy));
+        for (Route route : routes) {
+            IamOperation operation = resolved.restOperation(route.method(), route.path(), mapper.createObjectNode());
+            IamPermissionCheck check = resolved.checks(operation).getFirst();
+            assertEquals(route.permission(), check.permission(), route.toString());
+            assertEquals(route.target(), check.resource().name(), route.toString());
+            assertEquals(route.policy(), check.resource().policyResource(), route.toString());
+            assertTrue(adapter.roles().get("roles/iam.workloadIdentityPoolAdmin")
+                    .contains(route.permission()), route.toString());
+        }
+        assertTrue(resolved.checks(resolved.restOperation("getPoolOperation",
+                Map.of("project", "p", "poolId", "pool", "operationId", "op"), mapper.createObjectNode())).isEmpty());
+        assertTrue(resolved.checks(resolved.restOperation("getProviderOperation",
+                Map.of("project", "p", "poolId", "pool", "providerId", "provider", "operationId", "op"),
+                mapper.createObjectNode())).isEmpty());
+        assertTrue(resolved.checks(resolved.restOperation("testPoolIamPermissions",
+                Map.of("project", "p", "poolId", "pool"), mapper.createObjectNode())).isEmpty());
+
+        IamPermissionCheck getPolicy = resolved.checks(new IamOperation("GetIamPolicy", pool)).getFirst();
+        assertEquals("iam.googleapis.com/workloadIdentityPools.getIamPolicy", getPolicy.permission());
+        assertEquals(poolPolicy, getPolicy.resource().policyResource());
+        IamPermissionCheck setPolicy = resolved.checks(new IamOperation("SetIamPolicy", pool)).getFirst();
+        assertEquals("iam.googleapis.com/workloadIdentityPools.setIamPolicy", setPolicy.permission());
+        assertEquals(poolPolicy, setPolicy.resource().policyResource());
+        assertTrue(resolved.supportsIamPolicyMethod("GetIamPolicy", pool));
+        assertFalse(resolved.supportsIamPolicyMethod("GetIamPolicy", provider));
     }
 
     @Test

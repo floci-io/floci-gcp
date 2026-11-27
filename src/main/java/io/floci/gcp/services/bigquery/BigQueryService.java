@@ -1921,6 +1921,10 @@ public class BigQueryService {
             String defaultExpression = defaultPosition >= 0
                     ? remainder.substring(defaultPosition + "DEFAULT".length()).trim() : null;
             String type = typeExpression.isBlank() ? null : normalizeScriptVariableType(typeExpression);
+            if (type != null && hasUnnamedStructField(new ScriptVariableTypeParser(typeExpression).parse())) {
+                // BigQuery refuses a variable type with an unnamed STRUCT field at any depth, quoting it as written.
+                throw QueryEngine.invalidQuery("Unsupported variable type: " + typeExpression);
+            }
             if (type == null && defaultExpression == null) {
                 throw QueryEngine.invalidQuery("A variable declaration without a type requires a DEFAULT expression.");
             }
@@ -2302,6 +2306,21 @@ public class BigQueryService {
         private GcpException invalidType() {
             return QueryEngine.invalidQuery("Variable type is not supported by the floci BigQuery emulator.");
         }
+    }
+
+    /** Whether a STRUCT in the type, also inside an ARRAY or another STRUCT, has a field without a name. */
+    private static boolean hasUnnamedStructField(ScriptVariableType type) {
+        if (type.isArray()) {
+            return hasUnnamedStructField(type.elementType());
+        }
+        if (type.isStruct()) {
+            for (ScriptVariableField field : type.fields()) {
+                if (field.name() == null || hasUnnamedStructField(field.type())) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private static String normalizeScriptVariableType(String type) {

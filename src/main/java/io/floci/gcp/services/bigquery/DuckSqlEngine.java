@@ -66,7 +66,9 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         SqlDialectTranslator.ScriptTranslation translation = SqlDialectTranslator.translateScript(request.sql(),
                 request.projectId(), request.jobProjectId(), request.defaultDatasetId(),
                 new SqlDialectTranslator.QueryParameters(request.queryParameters(), request.parameterMode()),
-                ref -> columnNames(tables, ref), ref -> columnFields(tables, ref));
+                ref -> columnNames(tables, ref), ref -> columnFields(tables, ref),
+                (querySql, refs, temporarySetup) -> describeTemporaryTable(request.projectId(), querySql, refs,
+                        temporarySetup, tables));
 
         String flociEndpoint = flociEndpoint();
         Staging staging = stage(request.projectId(), translation.tables(), translation.informationSchema(),
@@ -397,7 +399,9 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         SqlDialectTranslator.ScriptTranslation translation = SqlDialectTranslator.translateScript(request.sql(),
                 request.projectId(), request.jobProjectId(), request.defaultDatasetId(),
                 new SqlDialectTranslator.QueryParameters(request.queryParameters(), request.parameterMode()),
-                ref -> columnNames(tables, ref), ref -> columnFields(tables, ref));
+                ref -> columnNames(tables, ref), ref -> columnFields(tables, ref),
+                (querySql, refs, temporarySetup) -> describeTemporaryTable(request.projectId(), querySql, refs,
+                        temporarySetup, tables));
         String flociEndpoint = flociEndpoint();
         Staging staging = stage(request.projectId(), translation.tables(), translation.informationSchema(),
                 translation.needsUnicodeCaseFold(), tables, flociEndpoint);
@@ -423,7 +427,9 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         SqlDialectTranslator.ScriptTranslation script = SqlDialectTranslator.translateScript(request.sql(),
                 request.projectId(), request.jobProjectId(), request.defaultDatasetId(),
                 new SqlDialectTranslator.QueryParameters(request.queryParameters(), request.parameterMode()),
-                ref -> columnNames(tables, ref), ref -> columnFields(tables, ref));
+                ref -> columnNames(tables, ref), ref -> columnFields(tables, ref),
+                (querySql, refs, temporarySetup) -> describeTemporaryTable(request.projectId(), querySql, refs,
+                        temporarySetup, tables));
         SqlDialectTranslator.Statement statement = script.finalStatement();
         if (!statement.isDml()) {
             throw SqlDialectTranslator.invalidQuery("A DML script must end with INSERT, UPDATE, DELETE or MERGE.");
@@ -1076,6 +1082,25 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
 
     private static TableSchema schemaOf(List<Column> columns) {
         return new TableSchema(columns.stream().map(Column::field).toList());
+    }
+
+    /**
+     * The columns of a temporary table's AS query, so a later statement of the script can type them: its sources are
+     * staged empty and the query is described behind the temporary tables created before it. Null when it cannot be
+     * described, which leaves the columns untyped as before.
+     */
+    private List<TableFieldSchema> describeTemporaryTable(
+            String projectId, String sql, Set<SqlDialectTranslator.TableRef> refs, String temporarySetup,
+            Tables tables) {
+        String flociEndpoint = flociEndpoint();
+        try {
+            Staging staging = stage(projectId, refs, tables, flociEndpoint);
+            return columns(describeRows(sql, staging.emptySetup() + temporarySetup, flociEndpoint)).stream()
+                    .map(Column::field).toList();
+        } catch (GcpException e) {
+            LOG.debugf("Could not describe a temporary table's query: %s", e.getMessage());
+            return null;
+        }
     }
 
     private List<Map<String, Object>> describeRows(String sql, String setup, String flociEndpoint) {

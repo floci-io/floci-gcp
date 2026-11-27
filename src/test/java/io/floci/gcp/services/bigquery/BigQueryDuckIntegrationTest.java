@@ -3287,6 +3287,36 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(5)
+    void lowercaseTimestampParameterIsCoercedAgainstATemporaryTableColumnLikeBigQuery() {
+        for (String script : new String[] {
+                "CREATE TEMP TABLE t AS SELECT TIMESTAMP '2014-09-27 20:00:00+00' AS ts;"
+                        + " SELECT COUNT(*) AS n FROM t WHERE ts > @a",
+                "CREATE TEMP TABLE t (ts TIMESTAMP); INSERT INTO t (ts) VALUES (TIMESTAMP '2014-09-27 20:00:00+00');"
+                        + " SELECT COUNT(*) AS n FROM t WHERE ts > @a",
+                "CREATE TEMP TABLE a AS SELECT TIMESTAMP '2014-09-27 20:00:00+00' AS ts;"
+                        + " CREATE TEMP TABLE b AS SELECT ts FROM a;"
+                        + " SELECT COUNT(*) AS n FROM _SESSION.b WHERE ts > @a",
+                "CREATE TEMP TABLE b AS SELECT TIMESTAMP '2014-09-27 20:00:00+00' AS ts;"
+                        + " SELECT COUNT(*) AS n FROM `_SESSION.b` WHERE ts > @a",
+        }) {
+            query(Map.of("query", script, "useLegacySql", false, "parameterMode", "NAMED",
+                    "queryParameters", List.of(Map.of("name", "a", "parameterType", Map.of("type", "STRING"),
+                            "parameterValue", Map.of("value", "2014-09-27t12:30:00")))))
+                    .then().statusCode(200)
+                    .body("rows[0].f[0].v", equalTo("1"));
+        }
+        // A CTE named like the temporary table hides it, so its STRING column keeps the parameter a STRING.
+        query(Map.of("query", "CREATE TEMP TABLE t (ts TIMESTAMP);"
+                + " WITH t AS (SELECT 'hello' AS ts) SELECT COUNTIF(ts = @a) AS n FROM t", "useLegacySql", false,
+                "parameterMode", "NAMED",
+                "queryParameters", List.of(Map.of("name", "a", "parameterType", Map.of("type", "STRING"),
+                        "parameterValue", Map.of("value", "hello")))))
+                .then().statusCode(200)
+                .body("rows[0].f[0].v", equalTo("1"));
+    }
+
+    @Test
+    @Order(5)
     void lowercaseTimestampStringParameterIsCoercedWhereComparedWithATimestampLikeBigQuery() {
         query(Map.of("query", "CREATE TABLE shop.lowercase_ts AS SELECT TIMESTAMP '2014-09-27 20:00:00+00' AS ts"
                 + " UNION ALL SELECT TIMESTAMP '2014-09-26 00:00:00+00'", "useLegacySql", false))

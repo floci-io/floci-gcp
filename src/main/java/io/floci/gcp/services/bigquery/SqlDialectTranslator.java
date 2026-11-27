@@ -13744,17 +13744,20 @@ final class SqlDialectTranslator {
                 String message = "Field name " + tokens.get(field).identifierText() + " does not exist in STRUCT";
                 expression = List.of(Token.raw("error('" + message.replace("'", "''") + "')"));
             }
-            if (expression != null && orderBy && !anonymousFields.isEmpty()) {
+            if (expression != null && orderBy) {
                 List<String> path = new ArrayList<>(List.of(fieldKey));
+                Map<String, List<Token>> nested = nestedStructFields(expression);
                 int last = field;
                 int nextDot = nextSignificant(last + 1, end);
                 int next = nextDot < 0 ? -1 : nextSignificant(nextDot + 1, end);
                 while (next >= 0 && tokens.get(nextDot).isPunct(".")
                         && (tokens.get(next).kind == Kind.IDENT || tokens.get(next).kind == Kind.QIDENT)) {
                     List<String> parents = List.copyOf(path);
-                    path.add(tokens.get(next).identifierText().toLowerCase(Locale.ROOT));
-                    if (anonymousFields.contains(path)) {
-                        // An anonymous field one level down is no more reachable by its position than at the top.
+                    String segment = tokens.get(next).identifierText().toLowerCase(Locale.ROOT);
+                    path.add(segment);
+                    if (anonymousFields.contains(path) || nested != null && !nested.containsKey(segment)) {
+                        // A field one level down is missing, or anonymous and no more reachable by its position than
+                        // at the top; the nested STRUCT the alias was built from tells which.
                         String name = tokens.get(next).identifierText();
                         missingStructFields.add(new MissingStructField(alias.identifierText(), name,
                                 parenthesisDepth(start) == 0, Set.copyOf(anonymousFields), parents));
@@ -13763,6 +13766,7 @@ final class SqlDialectTranslator {
                         field = next;
                         break;
                     }
+                    nested = nested == null ? null : nestedStructFields(nested.get(segment));
                     last = next;
                     nextDot = nextSignificant(last + 1, end);
                     next = nextDot < 0 ? -1 : nextSignificant(nextDot + 1, end);
@@ -13780,6 +13784,46 @@ final class SqlDialectTranslator {
             // A nested path is longer than its replacement, so the clause's end moves with it.
             end += replacement.size() - (field + 1 - i);
         }
+    }
+
+    /**
+     * The fields of the {@code STRUCT(...)} or {@code {...}} literal a STRUCT select alias's field is written as, read
+     * where its tokens still stand, or null when the field is anything else (a column, a function), whose fields are
+     * not known here.
+     */
+    private Map<String, List<Token>> nestedStructFields(List<Token> expression) {
+        if (expression == null || expression.isEmpty()) {
+            return null;
+        }
+        int start = -1;
+        int last = -1;
+        for (int i = 0; i < tokens.size() && (start < 0 || last < 0); i++) {
+            if (tokens.get(i) == expression.getFirst()) {
+                start = i;
+            }
+            if (tokens.get(i) == expression.getLast()) {
+                last = i;
+            }
+        }
+        if (start < 0 || last < start) {
+            return null;
+        }
+        Map<String, List<Token>> fields;
+        if (tokens.get(start).isPunct("{")) {
+            if (matchingBrace(start) != last) {
+                return null;
+            }
+            fields = structFields(start, last);
+        } else if (tokens.get(start).isKeyword("STRUCT")) {
+            int open = nextSignificant(start + 1, last + 1);
+            if (open < 0 || !tokens.get(open).isPunct("(") || matchingParen(open) != last) {
+                return null;
+            }
+            fields = googleSqlStructFields(open, last);
+        } else {
+            return null;
+        }
+        return fields.isEmpty() ? null : fields;
     }
 
     /**

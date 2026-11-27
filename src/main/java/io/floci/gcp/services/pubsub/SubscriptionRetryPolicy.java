@@ -23,16 +23,19 @@ final class SubscriptionRetryPolicy {
     private static final String MAXIMUM_BACKOFF = "maximumBackoff";
     private static final Duration DEFAULT_MINIMUM_BACKOFF = Durations.fromSeconds(10);
     private static final Duration DEFAULT_MAXIMUM_BACKOFF = Durations.fromSeconds(600);
+    // Pub/Sub's push backoff, which is all that slows redelivery when a subscription has no retry policy.
+    private static final Duration PUSH_BACKOFF_MINIMUM = Durations.fromMillis(100);
+    private static final Duration PUSH_BACKOFF_MAXIMUM = Durations.fromSeconds(60);
 
     private SubscriptionRetryPolicy() {}
 
-    // Nanoseconds, so a sub-millisecond minimum still grows. A subscription without a policy gets the proto defaults.
+    // Nanoseconds, so a sub-millisecond minimum still grows. Without a policy, only the push backoff applies.
     static long pushBackoffNanos(Map<String, Object> stored, int attempt) {
         RetryPolicy policy = toProto(stored);
-        long min = saturatedNanos(
-                policy != null && policy.hasMinimumBackoff() ? policy.getMinimumBackoff() : DEFAULT_MINIMUM_BACKOFF);
-        long max = saturatedNanos(
-                policy != null && policy.hasMaximumBackoff() ? policy.getMaximumBackoff() : DEFAULT_MAXIMUM_BACKOFF);
+        long min = saturatedNanos(policy == null ? PUSH_BACKOFF_MINIMUM
+                : policy.hasMinimumBackoff() ? policy.getMinimumBackoff() : DEFAULT_MINIMUM_BACKOFF);
+        long max = saturatedNanos(policy == null ? PUSH_BACKOFF_MAXIMUM
+                : policy.hasMaximumBackoff() ? policy.getMaximumBackoff() : DEFAULT_MAXIMUM_BACKOFF);
         long delay = min;
         for (int i = 1; i < attempt && delay < max; i++) {
             delay = delay > Long.MAX_VALUE / 2 ? Long.MAX_VALUE : delay * 2;

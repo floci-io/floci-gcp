@@ -1775,7 +1775,7 @@ class PubSubServiceTest {
     }
 
     @Test
-    void pushRetryDefaultsToTenSecondsWithoutRetryPolicy() throws Exception {
+    void pushRetryWithoutRetryPolicyUsesPushBackoff() throws Exception {
         service.createTopic("projects/p1/topics/t1");
         AtomicInteger hits = new AtomicInteger();
         HttpServer server = failingPushServer(hits, 0);
@@ -1785,7 +1785,8 @@ class PubSubServiceTest {
             publish("m");
             awaitRetries(1);
 
-            assertEquals(Duration.ofSeconds(10), retryExecutor.delays.get(0));
+            assertEquals(Duration.ofMillis(100), retryExecutor.delays.get(0));
+            assertEquals(60_000_000_000L, SubscriptionRetryPolicy.pushBackoffNanos(null, 200));
         } finally {
             stopPushServer(server);
         }

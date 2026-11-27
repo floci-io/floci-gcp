@@ -83,6 +83,7 @@ public class IamService {
     private final StorageBackend<String, StoredServiceAccountKey> keyStore;
     private final StorageBackend<String, StoredPolicy> policyStore;
     private final StorageBackend<String, StoredSigningKey> signingKeyStore;
+    private static final String PLATFORM_SIGNING_KEY = "signing-key:platform";
     private final Object signingKeyLock = new Object();
     private final ServiceRegistry serviceRegistry;
     private final EmulatorConfig config;
@@ -875,7 +876,26 @@ public class IamService {
             }
             key = signingKey(ref);
         }
-        byte[] data = input.apply(account, key.getKeyId());
+        return sign(key, input.apply(account, key.getKeyId()));
+    }
+
+    /**
+     * Signs with the emulator's own key rather than a service account's, for tokens the emulator
+     * issues on behalf of an account that need not exist here. {@code input} gets the key id.
+     */
+    public SignedBytes signWithPlatformKey(Function<String, byte[]> input) {
+        StoredSigningKey key;
+        synchronized (signingKeyLock) {
+            key = signingKeyStore.get(PLATFORM_SIGNING_KEY).orElseGet(() -> {
+                StoredSigningKey created = newSigningKey();
+                signingKeyStore.put(PLATFORM_SIGNING_KEY, created);
+                return created;
+            });
+        }
+        return sign(key, input.apply(key.getKeyId()));
+    }
+
+    private static SignedBytes sign(StoredSigningKey key, byte[] data) {
         try {
             PrivateKey privateKey = KeyFactory.getInstance("RSA")
                     .generatePrivate(new PKCS8EncodedKeySpec(Base64.getDecoder().decode(key.getPrivateKey())));
@@ -903,22 +923,26 @@ public class IamService {
             if (existing.isPresent()) {
                 return existing.get();
             }
-            KeyPairGenerator generator;
-            try {
-                generator = KeyPairGenerator.getInstance("RSA");
-            } catch (NoSuchAlgorithmException e) {
-                throw GcpException.internal("Key generation failed: " + e.getMessage());
-            }
-            generator.initialize(2048);
-            KeyPair keyPair = generator.generateKeyPair();
-            byte[] keyIdBytes = new byte[20];
-            ThreadLocalRandom.current().nextBytes(keyIdBytes);
-            StoredSigningKey created = new StoredSigningKey(HexFormat.of().formatHex(keyIdBytes),
-                    Base64.getEncoder().encodeToString(keyPair.getPrivate().getEncoded()));
+            StoredSigningKey created = newSigningKey();
             signingKeyStore.put(storageKey, created);
             LOG.debugf("created signing key project=%s email=%s keyId=%s", ref.project(), ref.email(), created.getKeyId());
             return created;
         }
+    }
+
+    private static StoredSigningKey newSigningKey() {
+        KeyPairGenerator generator;
+        try {
+            generator = KeyPairGenerator.getInstance("RSA");
+        } catch (NoSuchAlgorithmException e) {
+            throw GcpException.internal("Key generation failed: " + e.getMessage());
+        }
+        generator.initialize(2048);
+        KeyPair keyPair = generator.generateKeyPair();
+        byte[] keyIdBytes = new byte[20];
+        ThreadLocalRandom.current().nextBytes(keyIdBytes);
+        return new StoredSigningKey(HexFormat.of().formatHex(keyIdBytes),
+                Base64.getEncoder().encodeToString(keyPair.getPrivate().getEncoded()));
     }
 
     private static String signingKeyStorageKey(String project, String email) {

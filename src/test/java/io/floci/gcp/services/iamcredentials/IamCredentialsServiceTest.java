@@ -137,6 +137,24 @@ class IamCredentialsServiceTest {
     }
 
     @Test
+    void mintIdTokenForUnknownServiceAccount() throws Exception {
+        String token = signingService.mintIdToken("taltap@appspot.gserviceaccount.com", "https://supply-api.taltap.run");
+
+        String[] parts = token.split("\\.");
+        JsonNode claims = new ObjectMapper().readTree(Base64.getUrlDecoder().decode(parts[1]));
+        assertEquals("https://accounts.google.com", claims.get("iss").asText());
+        assertEquals("https://supply-api.taltap.run", claims.get("aud").asText());
+        assertEquals("taltap@appspot.gserviceaccount.com", claims.get("email").asText());
+        assertEquals("taltap@appspot.gserviceaccount.com", claims.get("sub").asText());
+        assertTrue(claims.get("email_verified").asBoolean());
+        assertEquals(3600, claims.get("exp").asLong() - claims.get("iat").asLong());
+        StoredSigningKey key = signingKeys.scan(k -> true).get(0);
+        assertTrue(SigningKeyFixtures.verifies(SigningKeyFixtures.publicKey(key),
+                (parts[0] + "." + parts[1]).getBytes(StandardCharsets.US_ASCII),
+                Base64.getUrlDecoder().decode(parts[2])));
+    }
+
+    @Test
     void generateIdTokenAddsEmailClaimsOnlyWhenAsked() throws Exception {
         iam.createServiceAccount("p1", "signer", "", "");
 

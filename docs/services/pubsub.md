@@ -315,6 +315,13 @@ subscriptionAdminClient.createSubscription(
 
 Messages are delivered as HTTP POST requests to the configured endpoint.
 
+With `PushConfig.oidc_token` set, each request carries `Authorization: Bearer <ID token>`. The token
+is an RS256 JWT with `iss` `https://accounts.google.com`, `aud` from `oidc_token.audience` (the push
+endpoint when unset), and `email` and `sub` set to `oidc_token.service_account_email` with
+`email_verified` true; it expires after one hour. The service account does not have to exist in floci
+IAM, and IAM enforcement does not apply. The token is signed with a key of floci's own; floci does not
+publish its public key, so a receiver has to skip signature verification locally.
+
 ## Snapshots
 
 A snapshot keeps what its subscription had not acknowledged when it was created, plus every message

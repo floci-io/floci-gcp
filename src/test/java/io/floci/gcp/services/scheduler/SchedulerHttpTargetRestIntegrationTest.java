@@ -1,14 +1,22 @@
 package io.floci.gcp.services.scheduler;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sun.net.httpserver.HttpServer;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.json.JsonPath;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.Test;
+import java.net.InetSocketAddress;
+import java.util.Base64;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.UUID;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 class SchedulerHttpTargetRestIntegrationTest {
@@ -81,5 +89,43 @@ class SchedulerHttpTargetRestIntegrationTest {
         JsonPath job = get("kept");
         assertEquals("https://example.test/a", job.getString("httpTarget.uri"));
         assertNull(job.get("description"));
+    }
+
+    private JsonNode runAgainstServerAndDecodeBearer(Map<String, Object> target) throws Exception {
+        AtomicReference<String> authorization = new AtomicReference<>();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/hook", exchange -> {
+            authorization.set(exchange.getRequestHeaders().getFirst("Authorization"));
+            exchange.sendResponseHeaders(204, -1);
+            exchange.close();
+        });
+        server.start();
+        try {
+            Map<String, Object> httpTarget = new java.util.HashMap<>(target);
+            httpTarget.put("uri", "http://127.0.0.1:" + server.getAddress().getPort() + "/hook");
+            create("target", httpTarget).then().statusCode(200);
+            given().urlEncodingEnabled(false).contentType("application/json").body("{}").post(jobs + "/target:run").then().statusCode(200);
+        } finally {
+            server.stop(0);
+        }
+        assertNotNull(authorization.get(), "no Authorization header received");
+        assertTrue(authorization.get().startsWith("Bearer "), authorization.get());
+        String jwt = authorization.get().substring("Bearer ".length());
+        return new ObjectMapper().readTree(Base64.getUrlDecoder().decode(jwt.split("\\.")[1]));
+    }
+
+    @Test void httpTargetWithOidcTokenSendsBearer() throws Exception {
+        JsonNode claims = runAgainstServerAndDecodeBearer(Map.of("oidcToken", Map.of("serviceAccountEmail", EMAIL)));
+
+        assertEquals(EMAIL, claims.get("email").asText());
+        assertTrue(claims.get("aud").asText().endsWith("/hook"), claims.toString());
+    }
+
+    @Test void httpTargetOidcAudienceAndAuthorizationHeaderAreReplaced() throws Exception {
+        JsonNode claims = runAgainstServerAndDecodeBearer(Map.of(
+                "headers", Map.of("Authorization", "Bearer static"),
+                "oidcToken", Map.of("serviceAccountEmail", EMAIL, "audience", "https://aud.test")));
+
+        assertEquals("https://aud.test", claims.get("aud").asText());
     }
 }

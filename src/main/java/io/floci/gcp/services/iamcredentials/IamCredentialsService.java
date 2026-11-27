@@ -27,6 +27,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.BiFunction;
 import java.util.function.Function;
 
 @ApplicationScoped
@@ -185,10 +186,35 @@ public class IamCredentialsService {
                 .toString();
     }
 
+    /**
+     * Mints an ID token for {@code audience} on behalf of {@code serviceAccountEmail}, signed with the
+     * emulator's own key. As with GCP's service agents that push and scheduler calls run as, the
+     * account need not exist here and no IAM check applies.
+     */
+    public String mintIdToken(String serviceAccountEmail, String audience) {
+        long now = clock.instant().getEpochSecond();
+        String claims = MAPPER.createObjectNode()
+                .put("aud", audience)
+                .put("email", serviceAccountEmail)
+                .put("email_verified", true)
+                .put("exp", now + ID_TOKEN_LIFETIME_SECONDS)
+                .put("iat", now)
+                .put("iss", ID_TOKEN_ISSUER)
+                .put("sub", serviceAccountEmail)
+                .toString();
+        return assembleJwt(input -> iamService.signWithPlatformKey(keyId -> input.apply(null, keyId)),
+                account -> claims).jwt();
+    }
+
     private SignedJwt signClaims(String serviceAccount, Function<StoredServiceAccount, String> claims) {
-        // The header and claims are built inside signAs so they name the key and account that sign them.
+        return assembleJwt(input -> iamService.signAs(WILDCARD_PROJECT, serviceAccount, input), claims);
+    }
+
+    private SignedJwt assembleJwt(Function<BiFunction<StoredServiceAccount, String, byte[]>, IamService.SignedBytes> signer,
+            Function<StoredServiceAccount, String> claims) {
+        // The header and claims are built inside the signer so they name the key and account that sign them.
         String[] signingInput = new String[1];
-        IamService.SignedBytes signed = iamService.signAs(WILDCARD_PROJECT, serviceAccount, (account, keyId) -> {
+        IamService.SignedBytes signed = signer.apply((account, keyId) -> {
             signingInput[0] = jwtSigningInput(keyId, claims.apply(account));
             return signingInput[0].getBytes(StandardCharsets.US_ASCII);
         });

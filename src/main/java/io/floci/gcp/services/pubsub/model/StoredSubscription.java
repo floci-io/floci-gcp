@@ -17,6 +17,8 @@ public class StoredSubscription {
     private Map<String, String> labels;
     private String filter;
     private String pushEndpoint;
+    private String pushOidcServiceAccountEmail;
+    private String pushOidcAudience;
     private boolean retainAckedMessages;
     private String messageRetentionDuration;
     private Map<String, Object> bigQueryConfig;
@@ -60,6 +62,12 @@ public class StoredSubscription {
 
     public String getPushEndpoint() { return pushEndpoint; }
     public void setPushEndpoint(String pushEndpoint) { this.pushEndpoint = pushEndpoint; }
+
+    public String getPushOidcServiceAccountEmail() { return pushOidcServiceAccountEmail; }
+    public void setPushOidcServiceAccountEmail(String email) { this.pushOidcServiceAccountEmail = email; }
+
+    public String getPushOidcAudience() { return pushOidcAudience; }
+    public void setPushOidcAudience(String audience) { this.pushOidcAudience = audience; }
 
     public boolean isRetainAckedMessages() { return retainAckedMessages; }
     public void setRetainAckedMessages(boolean retainAckedMessages) { this.retainAckedMessages = retainAckedMessages; }

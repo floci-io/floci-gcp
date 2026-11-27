@@ -2,6 +2,7 @@ package io.floci.gcp.services.scheduler;
 
 import com.google.protobuf.ByteString;
 import com.google.pubsub.v1.PubsubMessage;
+import io.floci.gcp.services.iamcredentials.IamCredentialsService;
 import io.floci.gcp.services.pubsub.PubSubService;
 import io.floci.gcp.services.scheduler.model.StoredJob;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -38,18 +39,20 @@ public class ScheduleInvoker {
     private static final int CODE_UNKNOWN = 2;
 
     private final PubSubService pubSubService;
+    private final IamCredentialsService iamCredentialsService;
     private final HttpClient httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(10))
             .build();
 
     @Inject
-    public ScheduleInvoker(PubSubService pubSubService) {
+    public ScheduleInvoker(PubSubService pubSubService, IamCredentialsService iamCredentialsService) {
         this.pubSubService = pubSubService;
+        this.iamCredentialsService = iamCredentialsService;
     }
 
     // Test constructor.
     ScheduleInvoker(PubSubService pubSubService, boolean ignored) {
-        this.pubSubService = pubSubService;
+        this(pubSubService, null);
     }
 
     /** Result of a dispatch attempt, mapped onto the job's google.rpc.Status. */
@@ -115,6 +118,12 @@ public class ScheduleInvoker {
                     // java.net.http disallows some headers (Host, Content-Length, …); skip them.
                 }
             }
+        }
+        if (job.getHttpOidcServiceAccountEmail() != null) {
+            String audience = job.getHttpOidcAudience() != null ? job.getHttpOidcAudience() : job.getHttpUri();
+            // Replaces any Authorization header from httpHeaders, as GCP does.
+            req.setHeader("Authorization",
+                    "Bearer " + iamCredentialsService.mintIdToken(job.getHttpOidcServiceAccountEmail(), audience));
         }
         HttpResponse<Void> resp = httpClient.send(req.build(), HttpResponse.BodyHandlers.discarding());
         int status = resp.statusCode();

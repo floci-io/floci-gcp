@@ -15,6 +15,8 @@ import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.services.iam.IamService;
 import io.floci.gcp.services.iam.IamServices;
 import io.floci.gcp.services.iam.model.StoredPolicy;
+import io.floci.gcp.services.iamcredentials.IamCredentialsService;
+import io.floci.gcp.services.iamcredentials.IamCredentialsServices;
 import io.floci.gcp.services.pubsub.model.StoredSnapshot;
 import io.floci.gcp.services.pubsub.model.StoredSubscription;
 import io.floci.gcp.services.pubsub.model.StoredTopic;
@@ -1664,6 +1666,69 @@ class PubSubServiceTest {
             oldServer.stop(0);
             replacementServer.stop(0);
         }
+    }
+
+    private JsonNode pushAndDecodeBearer(PubSubService.PushOidcToken oidcToken, AtomicReference<String> endpointUsed)
+            throws Exception {
+        AtomicReference<String> authorization = new AtomicReference<>();
+        CountDownLatch delivered = new CountDownLatch(1);
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/hook", exchange -> {
+            authorization.set(exchange.getRequestHeaders().getFirst("Authorization"));
+            exchange.sendResponseHeaders(204, -1);
+            exchange.close();
+            delivered.countDown();
+        });
+        server.start();
+        PubSubService withCredentials = new PubSubService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), iamService, clock, PUSH_RETRY_DELAY, credentials());
+        try {
+            String endpoint = "http://127.0.0.1:" + server.getAddress().getPort() + "/hook";
+            endpointUsed.set(endpoint);
+            withCredentials.createTopic("projects/p/topics/t");
+            withCredentials.createSubscription("projects/p/subscriptions/s", "projects/p/topics/t", 10, null, false,
+                    null, null, endpoint, oidcToken, null, null, null, null, 0, false, false);
+            withCredentials.publish("projects/p/topics/t",
+                    List.of(PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("body")).build()));
+            assertTrue(delivered.await(5, TimeUnit.SECONDS), "Timed out waiting for push delivery");
+        } finally {
+            server.stop(0);
+            withCredentials.shutdownExecutors();
+        }
+        if (authorization.get() == null) {
+            return null;
+        }
+        assertTrue(authorization.get().startsWith("Bearer "), authorization.get());
+        String jwt = authorization.get().substring("Bearer ".length());
+        return new ObjectMapper().readTree(Base64.getUrlDecoder().decode(jwt.split("\\.")[1]));
+    }
+
+    private IamCredentialsService credentials() {
+        return IamCredentialsServices.over(iamService, clock);
+    }
+
+    @Test
+    void pushWithOidcTokenSendsBearer() throws Exception {
+        JsonNode claims = pushAndDecodeBearer(new PubSubService.PushOidcToken(
+                "taltap@appspot.gserviceaccount.com", "https://supply-api.taltap.run"), new AtomicReference<>());
+
+        assertEquals("https://supply-api.taltap.run", claims.get("aud").asText());
+        assertEquals("taltap@appspot.gserviceaccount.com", claims.get("email").asText());
+    }
+
+    @Test
+    void pushWithOidcTokenWithoutAudienceUsesEndpoint() throws Exception {
+        AtomicReference<String> endpoint = new AtomicReference<>();
+
+        JsonNode claims = pushAndDecodeBearer(
+                new PubSubService.PushOidcToken("taltap@appspot.gserviceaccount.com", null), endpoint);
+
+        assertEquals(endpoint.get(), claims.get("aud").asText());
+    }
+
+    @Test
+    void pushWithoutOidcTokenSendsNoAuthorization() throws Exception {
+        assertNull(pushAndDecodeBearer(null, new AtomicReference<>()));
     }
 
     @Test

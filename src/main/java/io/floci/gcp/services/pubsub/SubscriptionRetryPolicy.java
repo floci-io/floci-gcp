@@ -23,8 +23,34 @@ final class SubscriptionRetryPolicy {
     private static final String MAXIMUM_BACKOFF = "maximumBackoff";
     private static final Duration DEFAULT_MINIMUM_BACKOFF = Durations.fromSeconds(10);
     private static final Duration DEFAULT_MAXIMUM_BACKOFF = Durations.fromSeconds(600);
+    // Pub/Sub's push backoff, which is all that slows redelivery when a subscription has no retry policy.
+    private static final Duration PUSH_BACKOFF_MINIMUM = Durations.fromMillis(100);
+    private static final Duration PUSH_BACKOFF_MAXIMUM = Durations.fromSeconds(60);
 
     private SubscriptionRetryPolicy() {}
+
+    // Nanoseconds, so a sub-millisecond minimum still grows. Without a policy, only the push backoff applies.
+    static long pushBackoffNanos(Map<String, Object> stored, int attempt) {
+        RetryPolicy policy = toProto(stored);
+        long min = saturatedNanos(policy == null ? PUSH_BACKOFF_MINIMUM
+                : policy.hasMinimumBackoff() ? policy.getMinimumBackoff() : DEFAULT_MINIMUM_BACKOFF);
+        long max = saturatedNanos(policy == null ? PUSH_BACKOFF_MAXIMUM
+                : policy.hasMaximumBackoff() ? policy.getMaximumBackoff() : DEFAULT_MAXIMUM_BACKOFF);
+        long delay = min;
+        for (int i = 1; i < attempt && delay < max; i++) {
+            delay = delay > Long.MAX_VALUE / 2 ? Long.MAX_VALUE : delay * 2;
+        }
+        return Math.min(delay, max);
+    }
+
+    // The proto allows durations of centuries, which overflow a long of nanoseconds.
+    private static long saturatedNanos(Duration duration) {
+        try {
+            return Durations.toNanos(duration);
+        } catch (ArithmeticException e) {
+            return Long.MAX_VALUE;
+        }
+    }
 
     /** Returns the stored form of a gRPC retry policy, or null when the request has none. */
     static Map<String, Object> toStored(boolean present, RetryPolicy policy) {

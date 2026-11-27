@@ -313,14 +313,23 @@ subscriptionAdminClient.createSubscription(
     0);
 ```
 
-Messages are delivered as HTTP POST requests to the configured endpoint.
+Messages are delivered as HTTP POST requests to the configured endpoint. Any response other than
+102, 200, 201, 202 or 204, and a request that takes longer than 10 seconds, is a failed attempt.
+
+A failed push is retried with exponential backoff from the subscription's `retryPolicy`: the minimum
+backoff (10 seconds by default) doubles on each attempt up to the maximum (600 seconds by default). Without a
+`retryPolicy`, redelivery is immediate apart from Pub/Sub's push backoff: 100 milliseconds doubling up to
+60 seconds. With a
+dead-letter policy, the message is forwarded to the dead-letter topic once it has failed
+`maxDeliveryAttempts` times, exactly as for pull subscriptions.
 
 ## Snapshots
 
 A snapshot keeps what its subscription had not acknowledged when it was created, plus every message
 published to the topic afterwards. Seeking a subscription on the same topic to it makes exactly those
 messages unacknowledged again, through the seeking subscription's filter; a push subscription gets them
-pushed again. A message still waiting in the subscription keeps its delivery attempt count.
+pushed again. A message still waiting in the subscription keeps its delivery attempt count; a push
+redelivery after a seek starts counting its attempts again from one.
 
 A snapshot expires 7 days after the oldest unacknowledged message it captured (7 days after creation
 when there was none), and `CreateSnapshot` fails with `FAILED_PRECONDITION` when that is less than an

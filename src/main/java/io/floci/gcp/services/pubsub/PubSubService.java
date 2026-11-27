@@ -107,7 +107,7 @@ public class PubSubService {
     // topic's lock, so a message is either captured by them or added after them, never both and never neither.
     // It is taken before a subscription's lease lock, never inside it.
     private final ConcurrentHashMap<String, Object> topicLocks = new ConcurrentHashMap<>();
-    private static final Duration PUSH_RETRY_DELAY = Duration.ofSeconds(1);
+    private static final Duration PUSH_REQUEST_TIMEOUT = Duration.ofSeconds(10);
     private final AtomicLong messageIdCounter = new AtomicLong(0);
 
     private final ServiceRegistry serviceRegistry;
@@ -119,7 +119,7 @@ public class PubSubService {
     private final ScheduledExecutorService pushRetryExecutor;
     private final ScheduledExecutorService leaseExpiryExecutor;
     private final Clock clock;
-    private final Duration pushRetryDelay;
+    private final Duration pushRequestTimeout;
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     @Inject
@@ -139,7 +139,7 @@ public class PubSubService {
         this.pushRetryExecutor = Executors.newScheduledThreadPool(1);
         this.leaseExpiryExecutor = Executors.newSingleThreadScheduledExecutor();
         this.clock = Clock.systemUTC();
-        this.pushRetryDelay = PUSH_RETRY_DELAY;
+        this.pushRequestTimeout = PUSH_REQUEST_TIMEOUT;
         this.topicStore = storageFactory.createGlobal("pubsub-topics", "pubsub-topics.json",
                 new TypeReference<Map<String, StoredTopic>>() {});
         this.subStore = storageFactory.createGlobal("pubsub-subs", "pubsub-subs.json",
@@ -160,7 +160,8 @@ public class PubSubService {
             StorageBackend<String, StoredSnapshot> snapshotStore,
             IamService iamService,
             Clock clock) {
-        this(topicStore, subStore, snapshotStore, iamService, clock, PUSH_RETRY_DELAY);
+        this(topicStore, subStore, snapshotStore, iamService, clock, Executors.newScheduledThreadPool(1),
+                PUSH_REQUEST_TIMEOUT);
     }
 
     PubSubService(StorageBackend<String, StoredTopic> topicStore,
@@ -168,7 +169,8 @@ public class PubSubService {
             StorageBackend<String, StoredSnapshot> snapshotStore,
             IamService iamService,
             Clock clock,
-            Duration pushRetryDelay) {
+            ScheduledExecutorService pushRetryExecutor,
+            Duration pushRequestTimeout) {
         this.topicStore = topicStore;
         this.subStore = subStore;
         this.snapshotStore = snapshotStore;
@@ -177,14 +179,20 @@ public class PubSubService {
                 .connectTimeout(Duration.ofSeconds(10))
                 .build();
         this.pushDeliveryExecutor = Executors.newCachedThreadPool();
-        this.pushRetryExecutor = Executors.newScheduledThreadPool(1);
+        this.pushRetryExecutor = pushRetryExecutor;
         this.leaseExpiryExecutor = Executors.newSingleThreadScheduledExecutor();
         this.clock = clock;
-        this.pushRetryDelay = pushRetryDelay;
+        this.pushRequestTimeout = pushRequestTimeout;
         this.serviceRegistry = null;
         this.config = null;
         this.grpcServerManager = null;
         registerPolicyResolvers();
+    }
+
+    /** Stops accepting push deliveries and waits for the running ones to end, for tests. */
+    boolean drainPushDeliveries(Duration timeout) throws InterruptedException {
+        pushDeliveryExecutor.shutdown();
+        return pushDeliveryExecutor.awaitTermination(timeout.toMillis(), TimeUnit.MILLISECONDS);
     }
 
     @PreDestroy
@@ -577,7 +585,7 @@ public class PubSubService {
         return messageIds;
     }
 
-    private void deliverPushMessage(StoredSubscription subscription, StoredMessage message) {
+    private void deliverPushMessage(StoredSubscription subscription, StoredMessage message, int attempt) {
         Map<String, Object> messageBody = new LinkedHashMap<>();
         messageBody.put("data", Base64.getEncoder().encodeToString(message.getData()));
         messageBody.put("attributes",
@@ -599,7 +607,7 @@ public class PubSubService {
 
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(subscription.getPushEndpoint()))
-                    .timeout(Duration.ofSeconds(10))
+                    .timeout(pushRequestTimeout)
                     .header("Content-Type", "application/json")
                     .POST(HttpRequest.BodyPublishers.ofString(body))
                     .build();
@@ -612,25 +620,25 @@ public class PubSubService {
                 LOG.debugf("Push delivery succeeded subscription=%s messageId=%s status=%d",
                         subscription.getName(), message.getMessageId(), response.statusCode());
             } else {
-                LOG.warnf("Push delivery failed subscription=%s messageId=%s status=%d; retrying",
-                        subscription.getName(), message.getMessageId(), response.statusCode());
-                schedulePushRetry(subscription, message);
+                LOG.warnf("Push delivery failed subscription=%s messageId=%s status=%d attempt=%d",
+                        subscription.getName(), message.getMessageId(), response.statusCode(), attempt);
+                retryOrDeadLetterPush(subscription, message, attempt);
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             LOG.debugf("Push delivery interrupted subscription=%s messageId=%s",
                     subscription.getName(), message.getMessageId());
         } catch (Exception e) {
-            LOG.warnf(e, "Push delivery failed subscription=%s messageId=%s; retrying",
-                    subscription.getName(), message.getMessageId());
-            schedulePushRetry(subscription, message);
+            LOG.warnf(e, "Push delivery failed subscription=%s messageId=%s attempt=%d",
+                    subscription.getName(), message.getMessageId(), attempt);
+            retryOrDeadLetterPush(subscription, message, attempt);
         }
     }
 
     private void submitPush(StoredSubscription subscription, StoredMessage message) {
         pendingPush.computeIfAbsent(subscription.getName(), key -> new ConcurrentHashMap<>())
                 .merge(message, 1, Integer::sum);
-        pushDeliveryExecutor.submit(() -> deliverPushMessage(subscription, message));
+        pushDeliveryExecutor.submit(() -> deliverPushMessage(subscription, message, 1));
     }
 
     /** How many push deliveries of a message are still unacknowledged, for tests. */
@@ -649,21 +657,53 @@ public class PubSubService {
         }
     }
 
-    private void schedulePushRetry(StoredSubscription subscription, StoredMessage message) {
-        pushRetryExecutor.schedule(() -> {
-            Optional<StoredSubscription> current = subStore.get(subscription.getName());
+    // The subscription as it is now, or empty once it was deleted, replaced, detached or stopped being push.
+    private Optional<StoredSubscription> livePushSubscription(StoredSubscription original) {
+        return subStore.get(original.getName())
+                .filter(current -> Objects.equals(current.getCreationId(), original.getCreationId())
+                        && !current.isDetached()
+                        && current.getPushEndpoint() != null);
+    }
 
-            if (current.isEmpty()
-                    || !Objects.equals(current.get().getCreationId(), subscription.getCreationId())
-                    || current.get().isDetached()
-                    || current.get().getPushEndpoint() == null) {
+    private void retryOrDeadLetterPush(StoredSubscription started, StoredMessage message, int attempt) {
+        Optional<StoredSubscription> live = livePushSubscription(started);
+        if (live.isEmpty()) {
+            pushSettled(started.getName(), message);
+            return;
+        }
+        StoredSubscription subscription = live.get();
+        if (attempt >= deadLetterThreshold(subscription) && forwardPushToDeadLetterTopic(subscription, message, attempt)) {
+            pushSettled(subscription.getName(), message);
+            return;
+        }
+        schedulePushRetry(subscription, message, attempt);
+    }
+
+    // False when the dead-letter topic vanished after the threshold check, so the push is retried instead of lost.
+    private boolean forwardPushToDeadLetterTopic(StoredSubscription subscription, StoredMessage message,
+            int attempt) {
+        try {
+            publish(subscription.getDeadLetterTopic(),
+                    List.of(deadLetterMessage(subscription, new Lease(message, attempt, clock.instant()))));
+            return true;
+        } catch (GcpException e) {
+            LOG.warnf("dead-letter forwarding failed subscription=%s topic=%s: %s",
+                    subscription.getName(), subscription.getDeadLetterTopic(), e.getMessage());
+            return false;
+        }
+    }
+
+    private void schedulePushRetry(StoredSubscription subscription, StoredMessage message, int attempt) {
+        long delayNanos = SubscriptionRetryPolicy.pushBackoffNanos(subscription.getRetryPolicy(), attempt);
+        pushRetryExecutor.schedule(() -> {
+            Optional<StoredSubscription> current = livePushSubscription(subscription);
+            if (current.isEmpty()) {
                 pushSettled(subscription.getName(), message);
                 return;
             }
-
             pushDeliveryExecutor.submit(
-                    () -> deliverPushMessage(current.get(), message));
-        }, pushRetryDelay.toMillis(), TimeUnit.MILLISECONDS);
+                    () -> deliverPushMessage(current.get(), message, attempt + 1));
+        }, delayNanos, TimeUnit.NANOSECONDS);
     }
 
     // A mask makes "filter" itself the trigger, as in GCP. Without a mask GCP rejects the request

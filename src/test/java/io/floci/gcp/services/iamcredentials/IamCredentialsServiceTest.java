@@ -145,13 +145,39 @@ class IamCredentialsServiceTest {
         assertEquals("https://accounts.google.com", claims.get("iss").asText());
         assertEquals("https://supply-api.taltap.run", claims.get("aud").asText());
         assertEquals("taltap@appspot.gserviceaccount.com", claims.get("email").asText());
-        assertEquals("taltap@appspot.gserviceaccount.com", claims.get("sub").asText());
+        assertTrue(claims.get("sub").asText().matches("1\\d{20}"), claims.get("sub").asText());
+        assertEquals(claims.get("sub").asText(), claims.get("azp").asText());
         assertTrue(claims.get("email_verified").asBoolean());
         assertEquals(3600, claims.get("exp").asLong() - claims.get("iat").asLong());
         StoredSigningKey key = signingKeys.scan(k -> true).get(0);
         assertTrue(SigningKeyFixtures.verifies(SigningKeyFixtures.publicKey(key),
                 (parts[0] + "." + parts[1]).getBytes(StandardCharsets.US_ASCII),
                 Base64.getUrlDecoder().decode(parts[2])));
+    }
+
+    @Test
+    void mintIdTokenGivesAnUnknownServiceAccountAStableNumericId() throws Exception {
+        String first = mintedClaims("a@p.iam.gserviceaccount.com").get("sub").asText();
+
+        assertEquals(first, mintedClaims("a@p.iam.gserviceaccount.com").get("sub").asText());
+        assertNotEquals(first, mintedClaims("b@p.iam.gserviceaccount.com").get("sub").asText());
+    }
+
+    @Test
+    void mintIdTokenUsesAKnownServiceAccountsUniqueId() throws Exception {
+        iam.createServiceAccount("p1", "signer", "", "");
+        String uniqueId = iam.getServiceAccount("p1", SIGNER).getUniqueId();
+
+        JsonNode claims = mintedClaims(SIGNER);
+
+        assertEquals(uniqueId, claims.get("sub").asText());
+        assertEquals(uniqueId, claims.get("azp").asText());
+        assertEquals(SIGNER, claims.get("email").asText());
+    }
+
+    private JsonNode mintedClaims(String serviceAccountEmail) throws Exception {
+        String token = signingService.mintIdToken(serviceAccountEmail, "https://aud.test");
+        return new ObjectMapper().readTree(Base64.getUrlDecoder().decode(token.split("\\.")[1]));
     }
 
     @Test

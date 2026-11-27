@@ -317,8 +317,9 @@ Messages are delivered as HTTP POST requests to the configured endpoint.
 
 With `PushConfig.oidc_token` set, each request carries `Authorization: Bearer <ID token>`. The token
 is an RS256 JWT with `iss` `https://accounts.google.com`, `aud` from `oidc_token.audience` (the push
-endpoint when unset), and `email` and `sub` set to `oidc_token.service_account_email` with
-`email_verified` true; it expires after one hour. The service account does not have to exist in floci
+endpoint when unset), `email` set to `oidc_token.service_account_email` with `email_verified` true, and
+`sub` and `azp` set to the account's numeric unique ID; it expires after one hour. For an account floci IAM
+does not know, the ID is derived from the email, so it is the same on every token. The service account does not have to exist in floci
 IAM, and IAM enforcement does not apply. The token is signed with a key of floci's own; floci does not
 publish its public key, so a receiver has to skip signature verification locally.
 floci does not check `iam.serviceAccounts.actAs` when a push `oidcToken` is configured, unlike Scheduler, which

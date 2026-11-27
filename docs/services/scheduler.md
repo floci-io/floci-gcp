@@ -30,8 +30,9 @@ overriding the API endpoint / transport channel and disabling credentials:
   `HttpTarget.oauth_token` and `oidc_token` are stored and returned, and `UpdateJob` masks reach
   each token field. With `oidc_token` set, the outbound request carries `Authorization: Bearer <ID token>`
   (replacing any `Authorization` in `headers`), an RS256 JWT with `iss` `https://accounts.google.com`,
-  `aud` from `oidc_token.audience` (the target URI when unset), and `email` and `sub` set to the service
-  account email; it expires after one hour. The account does not have to exist in floci IAM, and the token
+  `aud` from `oidc_token.audience` (the target URI when unset), `email` set to the service account email,
+  and `sub` and `azp` set to its numeric unique ID (derived from the email when floci IAM does not know the
+  account); it expires after one hour. The account does not have to exist in floci IAM, and the token
   is signed with a key of floci's own. No OAuth access token is minted for `oauth_token`.
   `HttpTarget.uri` must begin with `http://` or `https://`.
 - `schedule` is standard five-field unix-cron, interpreted in `time_zone` (default UTC).

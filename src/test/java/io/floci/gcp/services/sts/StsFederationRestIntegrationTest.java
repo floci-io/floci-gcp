@@ -246,6 +246,47 @@ class StsFederationRestIntegrationTest {
                 .body("error", equalTo("invalid_target"));
     }
 
+    @Test
+    void exchangesAws4RequestWithDefaultAttributeMapping() {
+        String providerId = "aws-default-map";
+        String expectedRole = "arn:aws:sts::" + AWS_ACCOUNT + ":assumed-role/default-role";
+        given()
+                .contentType("application/json")
+                .body(Map.of(
+                        "aws", Map.of("accountId", AWS_ACCOUNT),
+                        "attributeCondition", "attribute.aws_role == '" + expectedRole + "'"))
+                .when().post("/v1/projects/" + project + "/locations/global/workloadIdentityPools/"
+                        + poolId + "/providers?workloadIdentityPoolProviderId=" + providerId)
+                .then()
+                .statusCode(200);
+
+        String audience = "//iam.googleapis.com/projects/" + projectNumber
+                + "/locations/global/workloadIdentityPools/" + poolId + "/providers/" + providerId;
+        String allowedArn = expectedRole + "/session-1";
+        String allowedToken = StsFederationTestFixtures.urlEncode(
+                StsFederationTestFixtures.awsSubjectTokenJson("us-west-2", "ASIA123456", Instant.now(),
+                        audience, allowedArn));
+
+        String accessToken = postJsonExchange(StsService.AWS4_REQUEST_TOKEN_TYPE, allowedToken, audience)
+                .statusCode(200)
+                .body("access_token", startsWith(CredentialTokenService.FEDERATED_TOKEN_PREFIX))
+                .extract().path("access_token");
+
+        StoredCredentialToken stored = tokenService.lookupBearerToken(accessToken).orElseThrow();
+        String expectedPoolPath = "iam.googleapis.com/projects/" + projectNumber
+                + "/locations/global/workloadIdentityPools/" + poolId;
+        assertEquals("principal://" + expectedPoolPath + "/subject/" + allowedArn, stored.getPrincipal());
+        assertTrue(stored.getPrincipalSets().contains("principalSet://" + expectedPoolPath
+                + "/attribute.aws_role/" + expectedRole));
+
+        String otherRoleToken = StsFederationTestFixtures.urlEncode(
+                StsFederationTestFixtures.awsSubjectTokenJson("us-west-2", "ASIA123456", Instant.now(),
+                        audience, "arn:aws:sts::" + AWS_ACCOUNT + ":assumed-role/other-role/session-2"));
+        postJsonExchange(StsService.AWS4_REQUEST_TOKEN_TYPE, otherRoleToken, audience)
+                .statusCode(400)
+                .body("error", equalTo("invalid_grant"));
+    }
+
     private void createOidcProvider(String providerId, String issuer, String allowedAudience,
             String jwksJson, Map<String, String> attributeMapping, String attributeCondition) {
         Map<String, Object> oidc = allowedAudience == null

@@ -106,8 +106,10 @@ Provider `attributeMapping` and `attributeCondition` are evaluated with CEL
 against `assertion`, `attribute`, and `google` (including GCP's
 `string.extract(template)` helper for AWS assumed-role ARN parsing).
 `google.subject` must evaluate to a non-empty string of at most 127 UTF-8
-bytes. For AWS providers without an explicit `attributeMapping`,
-`google.subject` defaults to `assertion.arn`.
+bytes. For AWS providers without an explicit `attributeMapping`, GCP's default
+mapping applies: `google.subject` maps to `assertion.arn` and
+`attribute.aws_role` maps to the assumed-role ARN without the session suffix
+(or `assertion.arn` when the ARN is not an `assumed-role`).
 
 A successful exchange mints a one-hour federated access token
 (`floci-gcp-federated-...`) carrying:

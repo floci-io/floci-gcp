@@ -32,6 +32,15 @@ public class StsService {
     static final String AWS4_REQUEST_TOKEN_TYPE = "urn:ietf:params:aws:token-type:aws4_request";
     static final String BEARER_TOKEN_TYPE = "Bearer";
 
+    private static final Map<String, String> DEFAULT_AWS_ATTRIBUTE_MAPPING = Map.of(
+            "google.subject", "assertion.arn",
+            "attribute.aws_role",
+            "assertion.arn.contains('assumed-role') "
+                    + "? assertion.arn.extract('{account_arn}assumed-role/') "
+                    + "+ 'assumed-role/' "
+                    + "+ assertion.arn.extract('assumed-role/{role_name}/') "
+                    + ": assertion.arn");
+
     private static final Pattern PROVIDER_AUDIENCE = Pattern.compile(
             "^(?:https:)?//iam\\.googleapis\\.com/projects/([^/]+)/locations/global/"
                     + "workloadIdentityPools/([^/]+)/providers/([^/]+)$");
@@ -156,7 +165,7 @@ public class StsService {
         if (AWS4_REQUEST_TOKEN_TYPE.equals(subjectTokenType)) {
             assertion = awsVerifier.verify(subjectToken, active.provider(), active.providerName(), audience.trim());
             if (attributeMapping.isEmpty()) {
-                attributeMapping = Map.of("google.subject", "assertion.arn");
+                attributeMapping = DEFAULT_AWS_ATTRIBUTE_MAPPING;
             }
         } else {
             assertion = oidcVerifier.verify(subjectToken, active.provider(), active.providerName());

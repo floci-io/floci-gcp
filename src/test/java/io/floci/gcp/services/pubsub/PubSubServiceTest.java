@@ -1668,7 +1668,7 @@ class PubSubServiceTest {
         }
     }
 
-    private JsonNode pushAndDecodeBearer(PubSubService.PushOidcToken oidcToken, AtomicReference<String> endpointUsed)
+    private String pushAndGetAuthorization(PubSubService.PushOidcToken oidcToken, AtomicReference<String> endpointUsed)
             throws Exception {
         AtomicReference<String> authorization = new AtomicReference<>();
         CountDownLatch delivered = new CountDownLatch(1);
@@ -1695,11 +1695,13 @@ class PubSubServiceTest {
             server.stop(0);
             withCredentials.shutdownExecutors();
         }
-        if (authorization.get() == null) {
-            return null;
-        }
-        assertTrue(authorization.get().startsWith("Bearer "), authorization.get());
-        String jwt = authorization.get().substring("Bearer ".length());
+        return authorization.get();
+    }
+
+    private static JsonNode bearerClaims(String authorization) throws Exception {
+        assertNotNull(authorization, "push request carried no Authorization header");
+        assertTrue(authorization.startsWith("Bearer "), authorization);
+        String jwt = authorization.substring("Bearer ".length());
         return new ObjectMapper().readTree(Base64.getUrlDecoder().decode(jwt.split("\\.")[1]));
     }
 
@@ -1709,8 +1711,8 @@ class PubSubServiceTest {
 
     @Test
     void pushWithOidcTokenSendsBearer() throws Exception {
-        JsonNode claims = pushAndDecodeBearer(new PubSubService.PushOidcToken(
-                "taltap@appspot.gserviceaccount.com", "https://supply-api.taltap.run"), new AtomicReference<>());
+        JsonNode claims = bearerClaims(pushAndGetAuthorization(new PubSubService.PushOidcToken(
+                "taltap@appspot.gserviceaccount.com", "https://supply-api.taltap.run"), new AtomicReference<>()));
 
         assertEquals("https://supply-api.taltap.run", claims.get("aud").asText());
         assertEquals("taltap@appspot.gserviceaccount.com", claims.get("email").asText());
@@ -1720,15 +1722,15 @@ class PubSubServiceTest {
     void pushWithOidcTokenWithoutAudienceUsesEndpoint() throws Exception {
         AtomicReference<String> endpoint = new AtomicReference<>();
 
-        JsonNode claims = pushAndDecodeBearer(
-                new PubSubService.PushOidcToken("taltap@appspot.gserviceaccount.com", null), endpoint);
+        JsonNode claims = bearerClaims(pushAndGetAuthorization(
+                new PubSubService.PushOidcToken("taltap@appspot.gserviceaccount.com", null), endpoint));
 
         assertEquals(endpoint.get(), claims.get("aud").asText());
     }
 
     @Test
     void pushWithoutOidcTokenSendsNoAuthorization() throws Exception {
-        assertNull(pushAndDecodeBearer(null, new AtomicReference<>()));
+        assertNull(pushAndGetAuthorization(null, new AtomicReference<>()));
     }
 
     @Test

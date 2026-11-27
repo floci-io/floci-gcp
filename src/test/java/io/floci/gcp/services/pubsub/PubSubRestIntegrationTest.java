@@ -929,4 +929,63 @@ class PubSubRestIntegrationTest {
         given().when().delete(base + "/snapshots/before-ack").then().statusCode(200);
         given().when().get(base + "/snapshots/before-ack").then().statusCode(404);
     }
+
+    @Test
+    void pushConfigOidcTokenRoundTripsAndAPushConfigMaskClearsIt() {
+        String project = "pubsub-rest-oidc";
+        given().contentType("application/json").body("{}")
+                .when().put("/v1/projects/" + project + "/topics/t").then().statusCode(200);
+
+        given().contentType("application/json")
+                .body("""
+                        {
+                          "topic": "projects/pubsub-rest-oidc/topics/t",
+                          "pushConfig": {
+                            "pushEndpoint": "http://127.0.0.1:1/hook",
+                            "oidcToken": {"serviceAccountEmail": "sa@p.iam.gserviceaccount.com"}
+                          }
+                        }
+                        """)
+                .when().put("/v1/projects/" + project + "/subscriptions/s")
+                .then()
+                .statusCode(200)
+                .body("pushConfig.oidcToken.serviceAccountEmail", equalTo("sa@p.iam.gserviceaccount.com"))
+                .body("pushConfig.oidcToken", not(hasKey("audience")));
+
+        given().contentType("application/json")
+                .body("""
+                        {
+                          "subscription": {
+                            "pushConfig": {
+                              "pushEndpoint": "http://127.0.0.1:1/hook",
+                              "oidcToken": {"serviceAccountEmail": "sa@p.iam.gserviceaccount.com",
+                                            "audience": "https://aud.test"}
+                            }
+                          },
+                          "updateMask": "push_config"
+                        }
+                        """)
+                .when().patch("/v1/projects/" + project + "/subscriptions/s")
+                .then()
+                .statusCode(200)
+                .body("pushConfig.oidcToken.audience", equalTo("https://aud.test"));
+
+        given().contentType("application/json")
+                .body("""
+                        {
+                          "subscription": {"pushConfig": {"pushEndpoint": "http://127.0.0.1:1/hook"}},
+                          "updateMask": "push_config"
+                        }
+                        """)
+                .when().patch("/v1/projects/" + project + "/subscriptions/s")
+                .then()
+                .statusCode(200)
+                .body("pushConfig.pushEndpoint", equalTo("http://127.0.0.1:1/hook"))
+                .body("pushConfig", not(hasKey("oidcToken")));
+
+        given().when().get("/v1/projects/" + project + "/subscriptions/s")
+                .then()
+                .statusCode(200)
+                .body("pushConfig", not(hasKey("oidcToken")));
+    }
 }

@@ -321,6 +321,8 @@ endpoint when unset), and `email` and `sub` set to `oidc_token.service_account_e
 `email_verified` true; it expires after one hour. The service account does not have to exist in floci
 IAM, and IAM enforcement does not apply. The token is signed with a key of floci's own; floci does not
 publish its public key, so a receiver has to skip signature verification locally.
+floci does not check `iam.serviceAccounts.actAs` when a push `oidcToken` is configured, unlike Scheduler in
+enforce mode.
 
 ## Snapshots
 

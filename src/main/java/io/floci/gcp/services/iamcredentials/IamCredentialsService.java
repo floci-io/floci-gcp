@@ -27,7 +27,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.function.BiFunction;
 import java.util.function.Function;
 
 @ApplicationScoped
@@ -151,7 +150,8 @@ public class IamCredentialsService {
         }
         Map<String, String> response = new LinkedHashMap<>();
         response.put("token", signClaims(serviceAccount,
-                account -> idTokenClaims(account, audience, includeEmail)).jwt());
+                account -> idTokenClaims(audience, account.getUniqueId(), account.getUniqueId(),
+                        includeEmail ? account.getEmail() : null)).jwt());
         return response;
     }
 
@@ -171,54 +171,45 @@ public class IamCredentialsService {
         }
     }
 
-    private String idTokenClaims(StoredServiceAccount account, String audience, boolean includeEmail) {
+    private String idTokenClaims(String audience, String subject, String azp, String email) {
         long now = clock.instant().getEpochSecond();
-        ObjectNode claims = MAPPER.createObjectNode()
-                .put("aud", audience)
-                .put("azp", account.getUniqueId());
-        if (includeEmail) {
-            claims.put("email", account.getEmail()).put("email_verified", true);
+        ObjectNode claims = MAPPER.createObjectNode().put("aud", audience);
+        if (azp != null) {
+            claims.put("azp", azp);
+        }
+        if (email != null) {
+            claims.put("email", email).put("email_verified", true);
         }
         return claims.put("exp", now + ID_TOKEN_LIFETIME_SECONDS)
                 .put("iat", now)
                 .put("iss", ID_TOKEN_ISSUER)
-                .put("sub", account.getUniqueId())
+                .put("sub", subject)
                 .toString();
     }
 
-    /**
-     * Mints an ID token for {@code audience} on behalf of {@code serviceAccountEmail}, signed with the
-     * emulator's own key. As with GCP's service agents that push and scheduler calls run as, the
-     * account need not exist here and no IAM check applies.
-     */
+    /** Signs with floci's own key, so the account need not exist in floci IAM. */
     public String mintIdToken(String serviceAccountEmail, String audience) {
-        long now = clock.instant().getEpochSecond();
-        String claims = MAPPER.createObjectNode()
-                .put("aud", audience)
-                .put("email", serviceAccountEmail)
-                .put("email_verified", true)
-                .put("exp", now + ID_TOKEN_LIFETIME_SECONDS)
-                .put("iat", now)
-                .put("iss", ID_TOKEN_ISSUER)
-                .put("sub", serviceAccountEmail)
-                .toString();
-        return assembleJwt(input -> iamService.signWithPlatformKey(keyId -> input.apply(null, keyId)),
-                account -> claims).jwt();
+        String claims = idTokenClaims(audience, serviceAccountEmail, null, serviceAccountEmail);
+        String[] signingInput = new String[1];
+        IamService.SignedBytes signed = iamService.signWithPlatformKey(keyId -> {
+            signingInput[0] = jwtSigningInput(keyId, claims);
+            return signingInput[0].getBytes(StandardCharsets.US_ASCII);
+        });
+        return signedJwt(signed, signingInput[0]).jwt();
     }
 
     private SignedJwt signClaims(String serviceAccount, Function<StoredServiceAccount, String> claims) {
-        return assembleJwt(input -> iamService.signAs(WILDCARD_PROJECT, serviceAccount, input), claims);
-    }
-
-    private SignedJwt assembleJwt(Function<BiFunction<StoredServiceAccount, String, byte[]>, IamService.SignedBytes> signer,
-            Function<StoredServiceAccount, String> claims) {
-        // The header and claims are built inside the signer so they name the key and account that sign them.
+        // The header and claims are built inside signAs so they name the key and account that sign them.
         String[] signingInput = new String[1];
-        IamService.SignedBytes signed = signer.apply((account, keyId) -> {
+        IamService.SignedBytes signed = iamService.signAs(WILDCARD_PROJECT, serviceAccount, (account, keyId) -> {
             signingInput[0] = jwtSigningInput(keyId, claims.apply(account));
             return signingInput[0].getBytes(StandardCharsets.US_ASCII);
         });
-        return new SignedJwt(signed.keyId(), signingInput[0] + "." + base64Url(signed.signature()));
+        return signedJwt(signed, signingInput[0]);
+    }
+
+    private static SignedJwt signedJwt(IamService.SignedBytes signed, String signingInput) {
+        return new SignedJwt(signed.keyId(), signingInput + "." + base64Url(signed.signature()));
     }
 
     private record SignedJwt(String keyId, String jwt) {}

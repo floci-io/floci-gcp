@@ -132,10 +132,10 @@ public class PubSubService {
             StorageFactory storageFactory, GrpcServerManager grpcServerManager, IamService iamService,
             IamCredentialsService iamCredentialsService) {
         this.serviceRegistry = serviceRegistry;
-        this.iamCredentialsService = iamCredentialsService;
         this.config = config;
         this.grpcServerManager = grpcServerManager;
         this.iamService = iamService;
+        this.iamCredentialsService = iamCredentialsService;
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
                 .build();
@@ -183,11 +183,11 @@ public class PubSubService {
             Clock clock,
             Duration pushRetryDelay,
             IamCredentialsService iamCredentialsService) {
-        this.iamCredentialsService = iamCredentialsService;
         this.topicStore = topicStore;
         this.subStore = subStore;
         this.snapshotStore = snapshotStore;
         this.iamService = iamService;
+        this.iamCredentialsService = iamCredentialsService;
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
                 .build();
@@ -558,7 +558,10 @@ public class PubSubService {
         }
     }
 
-    private static void setPushOidcToken(StoredSubscription sub, PushOidcToken token) {
+    private void setPushOidcToken(StoredSubscription sub, PushOidcToken token) {
+        if (token != null && iamCredentialsService == null) {
+            throw new IllegalStateException("push oidcToken needs an IamCredentialsService to sign with");
+        }
         sub.setPushOidcServiceAccountEmail(token == null ? null : blankToNull(token.serviceAccountEmail()));
         sub.setPushOidcAudience(token == null ? null : blankToNull(token.audience()));
     }

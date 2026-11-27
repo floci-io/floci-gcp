@@ -120,6 +120,9 @@ public class ScheduleInvoker {
             }
         }
         if (job.getHttpOidcServiceAccountEmail() != null) {
+            if (iamCredentialsService == null) {
+                throw new IllegalStateException("oidcToken needs an IamCredentialsService to sign with");
+            }
             String audience = job.getHttpOidcAudience() != null ? job.getHttpOidcAudience() : job.getHttpUri();
             // Replaces any Authorization header from httpHeaders, as GCP does.
             req.setHeader("Authorization",

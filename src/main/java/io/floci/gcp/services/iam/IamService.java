@@ -79,11 +79,12 @@ public class IamService {
     private static final Pattern WORKLOAD_IDENTITY_POOL_POLICY =
             Pattern.compile("projects/[0-9]+/locations/global/workloadIdentityPools/[^/]+");
 
+    private static final String PLATFORM_SIGNING_KEY = "signing-key:platform";
+
     private final StorageBackend<String, StoredServiceAccount> saStore;
     private final StorageBackend<String, StoredServiceAccountKey> keyStore;
     private final StorageBackend<String, StoredPolicy> policyStore;
     private final StorageBackend<String, StoredSigningKey> signingKeyStore;
-    private static final String PLATFORM_SIGNING_KEY = "signing-key:platform";
     private final Object signingKeyLock = new Object();
     private final ServiceRegistry serviceRegistry;
     private final EmulatorConfig config;

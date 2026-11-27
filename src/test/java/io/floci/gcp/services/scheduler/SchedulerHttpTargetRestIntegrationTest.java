@@ -9,11 +9,13 @@ import io.restassured.response.Response;
 import org.junit.jupiter.api.Test;
 import java.net.InetSocketAddress;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.UUID;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -91,8 +93,11 @@ class SchedulerHttpTargetRestIntegrationTest {
         assertNull(job.get("description"));
     }
 
-    private JsonNode runAgainstServerAndDecodeBearer(Map<String, Object> target) throws Exception {
+    private record Received(String uri, String authorization, JsonNode claims) {}
+
+    private Received runAgainstServerAndDecodeBearer(Map<String, Object> target) throws Exception {
         AtomicReference<String> authorization = new AtomicReference<>();
+        AtomicReference<String> uri = new AtomicReference<>();
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/hook", exchange -> {
             authorization.set(exchange.getRequestHeaders().getFirst("Authorization"));
@@ -101,8 +106,9 @@ class SchedulerHttpTargetRestIntegrationTest {
         });
         server.start();
         try {
-            Map<String, Object> httpTarget = new java.util.HashMap<>(target);
-            httpTarget.put("uri", "http://127.0.0.1:" + server.getAddress().getPort() + "/hook");
+            Map<String, Object> httpTarget = new HashMap<>(target);
+            uri.set("http://127.0.0.1:" + server.getAddress().getPort() + "/hook");
+            httpTarget.put("uri", uri.get());
             create("target", httpTarget).then().statusCode(200);
             given().urlEncodingEnabled(false).contentType("application/json").body("{}").post(jobs + "/target:run").then().statusCode(200);
         } finally {
@@ -111,21 +117,23 @@ class SchedulerHttpTargetRestIntegrationTest {
         assertNotNull(authorization.get(), "no Authorization header received");
         assertTrue(authorization.get().startsWith("Bearer "), authorization.get());
         String jwt = authorization.get().substring("Bearer ".length());
-        return new ObjectMapper().readTree(Base64.getUrlDecoder().decode(jwt.split("\\.")[1]));
+        return new Received(uri.get(), authorization.get(),
+                new ObjectMapper().readTree(Base64.getUrlDecoder().decode(jwt.split("\\.")[1])));
     }
 
     @Test void httpTargetWithOidcTokenSendsBearer() throws Exception {
-        JsonNode claims = runAgainstServerAndDecodeBearer(Map.of("oidcToken", Map.of("serviceAccountEmail", EMAIL)));
+        Received received = runAgainstServerAndDecodeBearer(Map.of("oidcToken", Map.of("serviceAccountEmail", EMAIL)));
 
-        assertEquals(EMAIL, claims.get("email").asText());
-        assertTrue(claims.get("aud").asText().endsWith("/hook"), claims.toString());
+        assertEquals(EMAIL, received.claims().get("email").asText());
+        assertEquals(received.uri(), received.claims().get("aud").asText());
     }
 
     @Test void httpTargetOidcAudienceAndAuthorizationHeaderAreReplaced() throws Exception {
-        JsonNode claims = runAgainstServerAndDecodeBearer(Map.of(
+        Received received = runAgainstServerAndDecodeBearer(Map.of(
                 "headers", Map.of("Authorization", "Bearer static"),
                 "oidcToken", Map.of("serviceAccountEmail", EMAIL, "audience", "https://aud.test")));
 
-        assertEquals("https://aud.test", claims.get("aud").asText());
+        assertNotEquals("Bearer static", received.authorization());
+        assertEquals("https://aud.test", received.claims().get("aud").asText());
     }
 }

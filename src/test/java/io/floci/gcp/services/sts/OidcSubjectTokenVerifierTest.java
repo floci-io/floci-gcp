@@ -168,13 +168,33 @@ class OidcSubjectTokenVerifierTest {
                     return currentTime.get();
                 }
             };
-            OidcSubjectTokenVerifier discoveryVerifier =
-                    new OidcSubjectTokenVerifier(mapper, mutableClock);
+            // Default verifier rejects local HTTP and private/loopback discovery destinations
+            OidcSubjectTokenVerifier strictVerifier = new OidcSubjectTokenVerifier(mapper, mutableClock);
             ObjectNode provider = oidcProvider(issuer, List.of("https://expected.aud"), "");
 
             String jwt1 = StsFederationTestFixtures.signJwt("RS256", "key-1",
                     StsFederationTestFixtures.oidcClaims(issuer, "https://expected.aud",
                             "alice", NOW, 600, Map.of()), firstKey.getPrivate());
+            assertInvalidGrant(() -> strictVerifier.verify(jwt1, provider, PROVIDER_NAME));
+            assertEquals(0, jwksFetches.get(), "default verifier must reject local HTTP/loopback discovery");
+
+            String httpsLoopbackIssuer = "https://127.0.0.1:" + server.getAddress().getPort();
+            ObjectNode httpsLoopbackProvider = oidcProvider(httpsLoopbackIssuer, List.of("https://expected.aud"), "");
+            String httpsLoopbackJwt = StsFederationTestFixtures.signJwt("RS256", "key-1",
+                    StsFederationTestFixtures.oidcClaims(httpsLoopbackIssuer, "https://expected.aud",
+                            "alice", NOW, 600, Map.of()), firstKey.getPrivate());
+            assertInvalidGrant(() -> strictVerifier.verify(httpsLoopbackJwt, httpsLoopbackProvider, PROVIDER_NAME));
+
+            String httpsPrivateIssuer = "https://10.0.0.1";
+            ObjectNode httpsPrivateProvider = oidcProvider(httpsPrivateIssuer, List.of("https://expected.aud"), "");
+            String httpsPrivateJwt = StsFederationTestFixtures.signJwt("RS256", "key-1",
+                    StsFederationTestFixtures.oidcClaims(httpsPrivateIssuer, "https://expected.aud",
+                            "alice", NOW, 600, Map.of()), firstKey.getPrivate());
+            assertInvalidGrant(() -> strictVerifier.verify(httpsPrivateJwt, httpsPrivateProvider, PROVIDER_NAME));
+
+            OidcSubjectTokenVerifier discoveryVerifier =
+                    new OidcSubjectTokenVerifier(mapper, mutableClock, true);
+
             assertEquals("alice", discoveryVerifier.verify(jwt1, provider, PROVIDER_NAME).get("sub"));
             assertEquals("alice", discoveryVerifier.verify(jwt1, provider, PROVIDER_NAME).get("sub"));
             assertEquals(1, jwksFetches.get(), "second verification should use cached JWKS");

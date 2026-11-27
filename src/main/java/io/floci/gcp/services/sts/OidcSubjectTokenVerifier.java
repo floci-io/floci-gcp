@@ -2,6 +2,7 @@ package io.floci.gcp.services.sts;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.gcp.config.EmulatorConfig;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -54,22 +55,30 @@ public class OidcSubjectTokenVerifier {
     private final ObjectMapper mapper;
     private final Clock clock;
     private final HttpClient httpClient;
+    private final boolean allowPrivateOidcDiscovery;
     private final ConcurrentHashMap<String, CachedJwks> discoveredJwksCache = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Object> refreshLocks = new ConcurrentHashMap<>();
 
     @Inject
-    public OidcSubjectTokenVerifier(ObjectMapper mapper) {
-        this(mapper, Clock.systemUTC(), defaultHttpClient());
+    public OidcSubjectTokenVerifier(ObjectMapper mapper, EmulatorConfig config) {
+        this(mapper, Clock.systemUTC(), defaultHttpClient(),
+                config.services().sts().allowPrivateOidcDiscovery());
     }
 
     OidcSubjectTokenVerifier(ObjectMapper mapper, Clock clock) {
-        this(mapper, clock, defaultHttpClient());
+        this(mapper, clock, defaultHttpClient(), false);
     }
 
-    OidcSubjectTokenVerifier(ObjectMapper mapper, Clock clock, HttpClient httpClient) {
+    OidcSubjectTokenVerifier(ObjectMapper mapper, Clock clock, boolean allowPrivateOidcDiscovery) {
+        this(mapper, clock, defaultHttpClient(), allowPrivateOidcDiscovery);
+    }
+
+    OidcSubjectTokenVerifier(ObjectMapper mapper, Clock clock, HttpClient httpClient,
+            boolean allowPrivateOidcDiscovery) {
         this.mapper = mapper;
         this.clock = clock;
         this.httpClient = httpClient;
+        this.allowPrivateOidcDiscovery = allowPrivateOidcDiscovery;
     }
 
     private static HttpClient defaultHttpClient() {
@@ -306,7 +315,8 @@ public class OidcSubjectTokenVerifier {
                 throw new StsException("invalid_grant",
                         "OIDC discovery document is missing jwks_uri.");
             }
-            boolean requireHttps = "https".equalsIgnoreCase(discoveryUri.getScheme());
+            boolean requireHttps = !allowPrivateOidcDiscovery
+                    || "https".equalsIgnoreCase(discoveryUri.getScheme());
             URI jwksUri = parseDiscoveryUri(jwksUriText, "OIDC jwks_uri", requireHttps);
             String jwksBody = fetchHttpGet(jwksUri, "OIDC JWKS");
             List<JwkKey> keys = parseJwks(jwksBody);
@@ -316,16 +326,17 @@ public class OidcSubjectTokenVerifier {
         }
     }
 
-    private static URI buildDiscoveryUri(String issuerUri) {
+    private URI buildDiscoveryUri(String issuerUri) {
         if (issuerUri == null || issuerUri.isBlank()) {
             throw new StsException("invalid_grant",
                     "OIDC provider has no jwksJson or discoverable issuerUri configured.");
         }
         String base = issuerUri.endsWith("/") ? issuerUri.substring(0, issuerUri.length() - 1) : issuerUri;
-        return parseDiscoveryUri(base + "/.well-known/openid-configuration", "OIDC discovery URI", false);
+        return parseDiscoveryUri(base + "/.well-known/openid-configuration", "OIDC discovery URI",
+                !allowPrivateOidcDiscovery);
     }
 
-    private static URI parseDiscoveryUri(String rawUri, String label, boolean requireHttps) {
+    private URI parseDiscoveryUri(String rawUri, String label, boolean requireHttps) {
         URI uri;
         try {
             uri = URI.create(rawUri);
@@ -343,7 +354,7 @@ public class OidcSubjectTokenVerifier {
         return uri;
     }
 
-    private static void validateHostAddress(String host, String label) {
+    private void validateHostAddress(String host, String label) {
         try {
             for (InetAddress address : InetAddress.getAllByName(host)) {
                 if (address.isLinkLocalAddress()
@@ -351,10 +362,29 @@ public class OidcSubjectTokenVerifier {
                         || address.isMulticastAddress()) {
                     throw new StsException("invalid_grant", "Disallowed host for " + label + ".");
                 }
+                if (!allowPrivateOidcDiscovery && isPrivateOrLoopback(address)) {
+                    throw new StsException("invalid_grant", "Disallowed private host for " + label + ".");
+                }
             }
         } catch (UnknownHostException e) {
             throw new StsException("invalid_grant", "Failed to resolve host for " + label + ".");
         }
+    }
+
+    private static boolean isPrivateOrLoopback(InetAddress address) {
+        if (address.isLoopbackAddress() || address.isSiteLocalAddress()) {
+            return true;
+        }
+        byte[] bytes = address.getAddress();
+        if (bytes.length == 4) {
+            // 100.64.0.0/10 (RFC 6598 shared address space)
+            return (bytes[0] & 0xff) == 100 && (bytes[1] & 0xc0) == 64;
+        }
+        if (bytes.length == 16) {
+            // fc00::/7 (RFC 4193 IPv6 unique local addresses)
+            return (bytes[0] & 0xfe) == 0xfc;
+        }
+        return false;
     }
 
     private String fetchHttpGet(URI uri, String label) {

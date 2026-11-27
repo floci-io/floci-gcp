@@ -29,6 +29,7 @@ floci-gcp:
       enabled: true
     sts:
       enabled: true
+      allow-private-oidc-discovery: false
     datastore:
       enabled: true
     kafka:

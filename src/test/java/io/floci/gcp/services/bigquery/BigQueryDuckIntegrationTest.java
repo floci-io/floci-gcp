@@ -3698,6 +3698,23 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(5)
+    void orderByAStructAliasFieldNextToAResultColumnNamedLikeTheSourceFailsLikeBigQuery() {
+        String source = " FROM (SELECT STRUCT(STRUCT(1 AS n) AS m) AS s) t";
+        for (String query : new String[] {
+                "SELECT t.s AS r, 0 AS t" + source + " ORDER BY r.m",
+                "SELECT t.s AS r, STRUCT(STRUCT(1 AS m) AS s) AS t" + source + " ORDER BY r.m",
+        }) {
+            query(Map.of("query", query, "useLegacySql", false))
+                    .then().statusCode(400)
+                    .body("error.message", equalTo("ORDER BY does not support expressions of type STRUCT<n INT64>"));
+        }
+        query(Map.of("query", "SELECT t.s AS r, 0 AS t" + source + " ORDER BY r.m.n", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("rows[0].f[1].v", equalTo("0"));
+    }
+
+    @Test
+    @Order(5)
     void orderByAMissingStructAliasFieldNamesTheFieldLikeBigQuery() {
         for (String[] c : new String[][] {
                 {"SELECT STRUCT(x AS n) AS s FROM UNNEST([3, 1, 2]) x ORDER BY s.zz", "zz", "STRUCT<n INT64>"},

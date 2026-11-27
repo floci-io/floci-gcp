@@ -4337,7 +4337,15 @@ final class SqlDialectTranslator {
             String column = "_floci_order_" + (items.size() + 1);
             appended.append(", ").append(render(range[0], expressionEnd).trim())
                     .append(" AS \"").append(column).append('"');
-            items.add(new OrderByItem(0, identifierPath(item), column));
+            List<String> path = identifierPath(item);
+            RenamedPath renamed = renamedPaths.get(only);
+            if (path != null && renamed != null && path.size() >= renamed.names()) {
+                // A path put in place of a renamed alias names a source column; the engine types it by the alias.
+                List<String> fromAlias = new ArrayList<>(List.of(renamed.alias()));
+                fromAlias.addAll(path.subList(renamed.names(), path.size()));
+                path = List.copyOf(fromAlias);
+            }
+            items.add(new OrderByItem(0, path, column));
         }
         if (items.isEmpty()) {
             return null;

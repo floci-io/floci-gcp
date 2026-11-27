@@ -4129,6 +4129,16 @@ class SqlDialectTranslatorTest {
     }
 
     @Test
+    void anOrderByPathThroughARenamedAliasIsTypedByTheAlias() {
+        SqlDialectTranslator.OrderByTypes orderBy = SqlDialectTranslator.translate(
+                "SELECT t.s AS r, 0 AS t FROM (SELECT STRUCT(STRUCT(1 AS n) AS m) AS s) t ORDER BY r.m",
+                "test-project", null, SqlDialectTranslator.QueryParameters.none()).orderByTypes();
+        assertEquals(List.of(new SqlDialectTranslator.OrderByItem(0, List.of("r", "m"), "_floci_order_1")),
+                orderBy.items());
+        assertTrue(orderBy.typingSql().contains("t.s.m AS \"_floci_order_1\""), orderBy.typingSql());
+    }
+
+    @Test
     void outermostOrderByItemsThatCanBeAStructComeWithATypingQuery() {
         SqlDialectTranslator.OrderByTypes orderBy = SqlDialectTranslator.translate(
                 "SELECT t.s AS s FROM ds.t ORDER BY s.m DESC NULLS LAST, 2, x + 1, CASE WHEN x = 1 THEN t.s END,"

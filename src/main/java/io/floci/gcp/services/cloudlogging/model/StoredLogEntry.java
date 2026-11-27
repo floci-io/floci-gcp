@@ -15,6 +15,12 @@ public class StoredLogEntry {
     /** Parsed JSON object (Map/List/scalar) for jsonPayload; null when not a JSON entry. */
     private Object jsonPayload;
 
+    /** proto3 JSON object, {@code @type} included, for protoPayload; null when not a proto entry. */
+    private Object protoPayload;
+
+    /** proto3 JSON object for the LogEntryOperation; null when the entry has none. */
+    private Map<String, Object> operation;
+
     private String resourceType;
     private Map<String, String> resourceLabels;
     private Map<String, String> labels;
@@ -44,6 +50,12 @@ public class StoredLogEntry {
 
     public Object getJsonPayload() { return jsonPayload; }
     public void setJsonPayload(Object jsonPayload) { this.jsonPayload = jsonPayload; }
+
+    public Object getProtoPayload() { return protoPayload; }
+    public void setProtoPayload(Object protoPayload) { this.protoPayload = protoPayload; }
+
+    public Map<String, Object> getOperation() { return operation; }
+    public void setOperation(Map<String, Object> operation) { this.operation = operation; }
 
     public String getResourceType() { return resourceType; }
     public void setResourceType(String resourceType) { this.resourceType = resourceType; }

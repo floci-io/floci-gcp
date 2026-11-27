@@ -37,11 +37,39 @@ class SinkLogEntryFilterTest {
 
     @Test
     void unsupportedExpressionsNeverFallThroughToMatchAll() {
-        for (String filter : List.of("protoPayload.methodName:Group", "sample(insertId, 0.5)",
+        for (String filter : List.of("httpRequest.status=500", "sample(insertId, 0.5)",
                 "textPayload=~\"secret.*\"", "severity=ERROR OR", "labels.env=prod garbage",
                 "(severity=ERROR", "textPayload=\"unterminated", "jsonPayload..field=1", "sequence=1", "labels.env=:", "labels.env=\"prod\"garbage")) {
             assertThrows(RuntimeException.class, () -> SinkLogEntryFilter.parse(filter), filter);
         }
+    }
+
+    @Test
+    void auditLogPayloadAndOperationFieldsAreEvaluated() {
+        StoredLogEntry entry = entry();
+        entry.setJsonPayload(null);
+        entry.setProtoPayload(Map.of(
+                "@type", "type.googleapis.com/google.cloud.audit.AuditLog",
+                "serviceName", "cloudresourcemanager.googleapis.com",
+                "methodName", "SetIamPolicy",
+                "authenticationInfo", Map.of("principalEmail", "admin@example.com"),
+                "authorizationInfo", List.of(Map.of("permission", "resourcemanager.projects.setIamPolicy",
+                        "granted", true)),
+                "status", Map.of()));
+        entry.setOperation(Map.of("id", "operation-1", "producer", "compute.googleapis.com", "first", true));
+        assertTrue(SinkLogEntryFilter.parse("protoPayload.methodName=\"SetIamPolicy\"").test(entry));
+        assertTrue(SinkLogEntryFilter.parse(
+                "protoPayload.\"@type\"=\"type.googleapis.com/google.cloud.audit.AuditLog\"").test(entry));
+        assertTrue(SinkLogEntryFilter.parse("protoPayload.authenticationInfo.principalEmail:example.com").test(entry));
+        assertTrue(SinkLogEntryFilter.parse(
+                "protoPayload.authorizationInfo.permission=\"resourcemanager.projects.setIamPolicy\"").test(entry));
+        assertTrue(SinkLogEntryFilter.parse("protoPayload.authorizationInfo.granted=true").test(entry));
+        assertTrue(SinkLogEntryFilter.parse("protoPayload.status:* AND NOT protoPayload.status.code:*").test(entry));
+        assertTrue(SinkLogEntryFilter.parse("operation.first=true AND operation.producer=compute.googleapis.com")
+                .test(entry));
+        assertFalse(SinkLogEntryFilter.parse("operation.last=true").test(entry));
+        assertFalse(SinkLogEntryFilter.parse("protoPayload.methodName=CreateSink").test(entry));
+        assertFalse(SinkLogEntryFilter.parse("jsonPayload.methodName:*").test(entry));
     }
 
     @Test

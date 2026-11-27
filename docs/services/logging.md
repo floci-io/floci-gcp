@@ -133,6 +133,17 @@ regex, and nested parentheses are not supported; unrecognized clauses are ignore
 - Request-level `logName`, `resource`, and `labels` are applied to entries that omit them (entry
   labels win over request defaults).
 - Missing `insertId` and `timestamp` are filled in; `receiveTimestamp` is always set to now.
+- `protoPayload` is kept when its type is `type.googleapis.com/google.cloud.audit.AuditLog`, the payload
+  Cloud Audit Logs entries carry, and read back unchanged over both transports and in exports. Sink,
+  exclusion and log-based metric filters read its fields (see [Routing filters](#routing-filters-and-hierarchy));
+  the `ListLogEntries` subset above does not.
+  The [LogEntry reference](https://docs.cloud.google.com/logging/docs/reference/v2/rest/v2/LogEntry) supports
+  only AuditLog and `google.appengine.logging.v1.RequestLog` ("user-defined types are not supported"); a
+  RequestLog or any other type is dropped from the entry, which is still written. An AuditLog that does not
+  parse fails the write with `INVALID_ARGUMENT`. A nested `serviceData` can be IAM's
+  `type.googleapis.com/google.iam.v1.logging.AuditData`.
+- `operation` (`id`, `producer`, `first`, `last`) is kept and read back, as audit entries of long-running
+  operations use it.
 - Entries are returned ordered by `timestamp` (ascending by default; `order_by: "timestamp desc"`
   reverses).
 - `DeleteLog` removes all entries for a log name (`NOT_FOUND` if the log has no entries).
@@ -235,7 +246,9 @@ Routing uses a strict subset independent of the lenient `ListLogEntries` parser:
 - `AND`, implicit conjunction (including newlines), `OR`, `NOT`, and parentheses. As in Logging,
   `OR` binds more tightly than `AND`.
 - `logName`, `severity`, `resource.type`, `resource.labels.<key>`, `labels.<key>`, `textPayload`,
-  `jsonPayload.<path>`, `timestamp`, `receiveTimestamp`, `insertId`, `trace`, and `spanId`.
+  `jsonPayload.<path>`, `protoPayload.<path>` (such as `protoPayload.methodName` or
+  `protoPayload.authenticationInfo.principalEmail`), `operation.<path>`, `timestamp`, `receiveTimestamp`,
+  `insertId`, `trace`, and `spanId`.
 - Equality/inequality and ordering comparisons, string containment (`:`), and field presence
   (`:*`). JSON numeric fields compare numerically; incompatible object/scalar comparisons and failed
   scalar conversions do not match. Strings use Unicode NFKC case folding for equality, ordering,
@@ -397,7 +410,7 @@ DuckDB sidecar they add a network round trip to the write.
 
 Deviations: real BigQuery sinks stream in small batches with some latency, shorten audit log
 payload names, store `protoPayload` and `httpRequest`, and email project owners on schema
-mismatches. The emulator inserts synchronously, has no `protoPayload` or `httpRequest` to store, and
+mismatches. The emulator inserts synchronously, does not store `protoPayload`, `operation` or `httpRequest`, and
 represents `labels` and `resource.labels` as `RECORD` columns keyed by label name (the saved
 documentation does not state their shape). Semantics follow
 [BigQuery routing](https://docs.cloud.google.com/logging/docs/export/bigquery).
@@ -464,7 +477,7 @@ Semantics follow the [log-based metrics overview](https://docs.cloud.google.com/
 
 ## Not Yet Supported
 
-`TailLogEntries` (streaming), `protoPayload`/`httpRequest`/`operation`/`sourceLocation`/`split`
+`TailLogEntries` (streaming), `protoPayload` types other than AuditLog, `httpRequest`/`sourceLocation`/`split`
 fields, monitored-resource-descriptor catalog, log-based metric backfill,
 log buckets and other `ConfigServiceV2` methods, advanced filter operators, and retention/dedup
 semantics.

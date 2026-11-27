@@ -127,7 +127,11 @@ public class CloudLoggingController extends LoggingServiceV2Grpc.LoggingServiceV
         switch (proto.getPayloadCase()) {
             case TEXT_PAYLOAD -> stored.setTextPayload(proto.getTextPayload());
             case JSON_PAYLOAD -> stored.setJsonPayload(Structs.toJava(proto.getJsonPayload()));
-            default -> { /* proto_payload and unset are out of MVP scope */ }
+            case PROTO_PAYLOAD -> stored.setProtoPayload(ProtoPayloads.fromAny(proto.getProtoPayload()));
+            default -> { /* unset */ }
+        }
+        if (proto.hasOperation()) {
+            stored.setOperation(ProtoPayloads.operationFromProto(proto.getOperation()));
         }
         if (proto.hasResource()) {
             stored.setResourceType(proto.getResource().getType());
@@ -168,6 +172,11 @@ public class CloudLoggingController extends LoggingServiceV2Grpc.LoggingServiceV
             builder.setTextPayload(stored.getTextPayload());
         } else if (stored.getJsonPayload() != null) {
             builder.setJsonPayload(Structs.toStruct(stored.getJsonPayload()));
+        } else if (stored.getProtoPayload() != null) {
+            builder.setProtoPayload(ProtoPayloads.toAny(stored.getProtoPayload()));
+        }
+        if (stored.getOperation() != null) {
+            builder.setOperation(ProtoPayloads.operationToProto(stored.getOperation()));
         }
         MonitoredResource.Builder resource = MonitoredResource.newBuilder();
         if (stored.getResourceType() != null) {

@@ -2,12 +2,14 @@ package io.floci.gcp.services.scheduler;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpServer;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.json.JsonPath;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.Test;
 import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.Map;
@@ -95,12 +97,26 @@ class SchedulerHttpTargetRestIntegrationTest {
 
     private record Received(String uri, String authorization, JsonNode claims) {}
 
+    private record Captured(String uri, Headers headers, String body) {}
+
     private Received runAgainstServerAndDecodeBearer(Map<String, Object> target) throws Exception {
-        AtomicReference<String> authorization = new AtomicReference<>();
+        Captured captured = runAgainstServer(target);
+        String authorization = captured.headers().getFirst("Authorization");
+        assertNotNull(authorization, "no Authorization header received");
+        assertTrue(authorization.startsWith("Bearer "), authorization);
+        String jwt = authorization.substring("Bearer ".length());
+        return new Received(captured.uri(), authorization,
+                new ObjectMapper().readTree(Base64.getUrlDecoder().decode(jwt.split("\\.")[1])));
+    }
+
+    private Captured runAgainstServer(Map<String, Object> target) throws Exception {
+        AtomicReference<Headers> headers = new AtomicReference<>();
+        AtomicReference<String> body = new AtomicReference<>();
         AtomicReference<String> uri = new AtomicReference<>();
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/hook", exchange -> {
-            authorization.set(exchange.getRequestHeaders().getFirst("Authorization"));
+            headers.set(exchange.getRequestHeaders());
+            body.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
             exchange.sendResponseHeaders(204, -1);
             exchange.close();
         });
@@ -114,11 +130,18 @@ class SchedulerHttpTargetRestIntegrationTest {
         } finally {
             server.stop(0);
         }
-        assertNotNull(authorization.get(), "no Authorization header received");
-        assertTrue(authorization.get().startsWith("Bearer "), authorization.get());
-        String jwt = authorization.get().substring("Bearer ".length());
-        return new Received(uri.get(), authorization.get(),
-                new ObjectMapper().readTree(Base64.getUrlDecoder().decode(jwt.split("\\.")[1])));
+        assertNotNull(headers.get(), "the HTTP target was not called");
+        return new Captured(uri.get(), headers.get(), body.get());
+    }
+
+    // GCP never offers h2c to an HTTP target; servers such as uvicorn drop the body of an h2c Upgrade request.
+    @Test void httpTargetToPlainHttpUriDoesNotOfferH2cUpgrade() throws Exception {
+        Captured captured = runAgainstServer(Map.of("httpMethod", "POST",
+                "body", Base64.getEncoder().encodeToString("payload".getBytes(StandardCharsets.UTF_8))));
+
+        assertNull(captured.headers().getFirst("Upgrade"));
+        assertNull(captured.headers().getFirst("HTTP2-Settings"));
+        assertEquals("payload", captured.body());
     }
 
     @Test void httpTargetWithOidcTokenSendsBearer() throws Exception {

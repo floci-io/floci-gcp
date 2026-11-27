@@ -40,7 +40,9 @@ public class ScheduleInvoker {
 
     private final PubSubService pubSubService;
     private final IamCredentialsService iamCredentialsService;
+    // HTTP/1.1 like GCP's HTTP targets: the JDK default offers an h2c upgrade, and servers such as uvicorn drop that body.
     private final HttpClient httpClient = HttpClient.newBuilder()
+            .version(HttpClient.Version.HTTP_1_1)
             .connectTimeout(Duration.ofSeconds(10))
             .build();
 

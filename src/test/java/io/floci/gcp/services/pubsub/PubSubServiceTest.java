@@ -2,6 +2,7 @@ package io.floci.gcp.services.pubsub;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpServer;
 
 import com.google.protobuf.ByteString;
@@ -1668,13 +1669,21 @@ class PubSubServiceTest {
         }
     }
 
+    private record PushedRequest(Headers headers, String body) {}
+
     private String pushAndGetAuthorization(PubSubService.PushOidcToken oidcToken, AtomicReference<String> endpointUsed)
             throws Exception {
-        AtomicReference<String> authorization = new AtomicReference<>();
+        return pushAndCapture(oidcToken, endpointUsed).headers().getFirst("Authorization");
+    }
+
+    private PushedRequest pushAndCapture(PubSubService.PushOidcToken oidcToken, AtomicReference<String> endpointUsed)
+            throws Exception {
+        AtomicReference<PushedRequest> received = new AtomicReference<>();
         CountDownLatch delivered = new CountDownLatch(1);
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/hook", exchange -> {
-            authorization.set(exchange.getRequestHeaders().getFirst("Authorization"));
+            received.set(new PushedRequest(exchange.getRequestHeaders(),
+                    new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8)));
             exchange.sendResponseHeaders(204, -1);
             exchange.close();
             delivered.countDown();
@@ -1695,7 +1704,7 @@ class PubSubServiceTest {
             server.stop(0);
             withCredentials.shutdownExecutors();
         }
-        return authorization.get();
+        return received.get();
     }
 
     private static JsonNode bearerClaims(String authorization) throws Exception {
@@ -1731,6 +1740,17 @@ class PubSubServiceTest {
     @Test
     void pushWithoutOidcTokenSendsNoAuthorization() throws Exception {
         assertNull(pushAndGetAuthorization(null, new AtomicReference<>()));
+    }
+
+    // GCP never offers h2c on a push; servers such as uvicorn drop the body of an h2c Upgrade request.
+    @Test
+    void pushToPlainHttpEndpointDoesNotOfferH2cUpgrade() throws Exception {
+        PushedRequest pushed = pushAndCapture(null, new AtomicReference<>());
+
+        assertNull(pushed.headers().getFirst("Upgrade"));
+        assertNull(pushed.headers().getFirst("HTTP2-Settings"));
+        String data = new ObjectMapper().readTree(pushed.body()).path("message").path("data").asText();
+        assertEquals("body", new String(Base64.getDecoder().decode(data), StandardCharsets.UTF_8));
     }
 
     @Test

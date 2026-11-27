@@ -137,9 +137,7 @@ public class PubSubService {
         this.grpcServerManager = grpcServerManager;
         this.iamService = iamService;
         this.iamCredentialsService = iamCredentialsService;
-        this.httpClient = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(10))
-                .build();
+        this.httpClient = newPushHttpClient();
         this.pushDeliveryExecutor = Executors.newCachedThreadPool();
         this.pushRetryExecutor = Executors.newScheduledThreadPool(1);
         this.leaseExpiryExecutor = Executors.newSingleThreadScheduledExecutor();
@@ -189,9 +187,7 @@ public class PubSubService {
         this.snapshotStore = snapshotStore;
         this.iamService = iamService;
         this.iamCredentialsService = iamCredentialsService;
-        this.httpClient = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(10))
-                .build();
+        this.httpClient = newPushHttpClient();
         this.pushDeliveryExecutor = Executors.newCachedThreadPool();
         this.pushRetryExecutor = Executors.newScheduledThreadPool(1);
         this.leaseExpiryExecutor = Executors.newSingleThreadScheduledExecutor();
@@ -727,6 +723,14 @@ public class PubSubService {
             }
         }
         return messageIds;
+    }
+
+    // HTTP/1.1 like GCP's push: the JDK default offers an h2c upgrade, and servers such as uvicorn drop that body.
+    private static HttpClient newPushHttpClient() {
+        return HttpClient.newBuilder()
+                .version(HttpClient.Version.HTTP_1_1)
+                .connectTimeout(Duration.ofSeconds(10))
+                .build();
     }
 
     private void deliverPushMessage(StoredSubscription subscription, StoredMessage message) {

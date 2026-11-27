@@ -25,6 +25,7 @@ import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.services.iam.IamServices;
 import io.floci.gcp.services.iam.authorization.IamGrpcDeliveryAuthorization;
 import io.floci.gcp.services.iamcredentials.IamCredentialsServices;
+import io.floci.gcp.services.pubsub.model.StoredSubscription;
 import io.grpc.Context;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
@@ -52,6 +53,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -1105,6 +1107,68 @@ class PubSubSubscriberControllerTest {
                 .build(), new RecordingObserver<>());
         assertNull(service.getSubscription("projects/p1/subscriptions/s1").getPushOidcServiceAccountEmail());
         assertNull(service.getSubscription("projects/p1/subscriptions/s1").getPushOidcAudience());
+    }
+
+    private static void assertInvalidArgument(RecordingObserver<?> observer) {
+        assertEquals(Status.Code.INVALID_ARGUMENT,
+                ((StatusRuntimeException) observer.error.get()).getStatus().getCode());
+    }
+
+    @Test
+    void createSubscriptionOverGrpcRejectsAnOidcTokenWithoutAServiceAccountEmail() {
+        PubSubSubscriberController oidc = controllerWithOidcPush();
+
+        for (String email : List.of("", "  ")) {
+            RecordingObserver<Subscription> created = new RecordingObserver<>();
+            oidc.createSubscription(oidcSubscription(PushConfig.OidcToken.newBuilder()
+                    .setServiceAccountEmail(email).setAudience("https://aud.test")), created);
+            assertInvalidArgument(created);
+        }
+        assertThrows(GcpException.class, () -> service.getSubscription("projects/p1/subscriptions/s1"));
+    }
+
+    @Test
+    void updateSubscriptionOverGrpcRejectsAnOidcTokenWithoutAServiceAccountEmailAndChangesNothing() {
+        PubSubSubscriberController oidc = controllerWithOidcPush();
+        oidc.createSubscription(oidcSubscription(PushConfig.OidcToken.newBuilder()
+                .setServiceAccountEmail("sa@p.iam.gserviceaccount.com")), new RecordingObserver<>());
+
+        RecordingObserver<Subscription> updated = new RecordingObserver<>();
+        oidc.updateSubscription(UpdateSubscriptionRequest.newBuilder()
+                .setSubscription(Subscription.newBuilder()
+                        .setName("projects/p1/subscriptions/s1")
+                        .setAckDeadlineSeconds(55)
+                        .setPushConfig(PushConfig.newBuilder()
+                                .setPushEndpoint("http://127.0.0.1:1/other")
+                                .setOidcToken(PushConfig.OidcToken.newBuilder().setAudience("https://aud.test"))))
+                .setUpdateMask(FieldMask.newBuilder().addPaths("ack_deadline_seconds").addPaths("push_config"))
+                .build(), updated);
+
+        assertInvalidArgument(updated);
+        StoredSubscription stored = service.getSubscription("projects/p1/subscriptions/s1");
+        assertEquals("http://127.0.0.1:1/hook", stored.getPushEndpoint());
+        assertEquals("sa@p.iam.gserviceaccount.com", stored.getPushOidcServiceAccountEmail());
+        assertEquals(10, stored.getAckDeadlineSeconds());
+    }
+
+    @Test
+    void modifyPushConfigOverGrpcRejectsAnOidcTokenWithoutAServiceAccountEmailAndChangesNothing() {
+        PubSubSubscriberController oidc = controllerWithOidcPush();
+        oidc.createSubscription(oidcSubscription(PushConfig.OidcToken.newBuilder()
+                .setServiceAccountEmail("sa@p.iam.gserviceaccount.com")), new RecordingObserver<>());
+
+        RecordingObserver<Empty> modified = new RecordingObserver<>();
+        oidc.modifyPushConfig(ModifyPushConfigRequest.newBuilder()
+                .setSubscription("projects/p1/subscriptions/s1")
+                .setPushConfig(PushConfig.newBuilder()
+                        .setPushEndpoint("http://127.0.0.1:1/other")
+                        .setOidcToken(PushConfig.OidcToken.newBuilder().setServiceAccountEmail(" ")))
+                .build(), modified);
+
+        assertInvalidArgument(modified);
+        StoredSubscription stored = service.getSubscription("projects/p1/subscriptions/s1");
+        assertEquals("http://127.0.0.1:1/hook", stored.getPushEndpoint());
+        assertEquals("sa@p.iam.gserviceaccount.com", stored.getPushOidcServiceAccountEmail());
     }
 
     private static final class RecordingObserver<T> implements StreamObserver<T> {

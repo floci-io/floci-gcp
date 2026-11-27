@@ -7,6 +7,7 @@ import com.google.protobuf.Timestamp;
 import com.google.protobuf.util.Timestamps;
 import com.google.pubsub.v1.DeadLetterPolicy;
 import com.google.pubsub.v1.PubsubMessage;
+import com.google.pubsub.v1.PushConfig;
 import com.google.pubsub.v1.ReceivedMessage;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
@@ -367,6 +368,7 @@ public class PubSubService {
             throw GcpException.notFound("Topic not found: " + topicName);
         }
         SubscriptionFilter.validate(filter);
+        requireServiceAccountEmail(pushOidcToken);
         int deadline = ackDeadlineSeconds > 0 ? ackDeadlineSeconds : 10;
         StoredSubscription sub = new StoredSubscription(name, topicName, deadline);
         sub.setLabels(emptyToNull(labels));
@@ -409,6 +411,9 @@ public class PubSubService {
         StoredSubscription stored = getSubscription(subProto.getName());
         if (updateMask.getPathsList().contains("filter")) {
             throw filterNotMutable(stored.getName());
+        }
+        if (updateMask.getPathsList().contains("push_config")) {
+            requireServiceAccountEmail(PushOidcToken.of(subProto.getPushConfig()));
         }
         for (String path : updateMask.getPathsList()) {
             switch (path) {
@@ -489,6 +494,8 @@ public class PubSubService {
         if (filterChangeRequested(stored.getFilter(), filter, updateMaskPaths)) {
             throw filterNotMutable(stored.getName());
         }
+        PushConfigChange pushConfigChange = PushConfigChange.of(updateMaskPaths, replaceAll, stored,
+                pushEndpoint, pushOidcToken);
 
         if (replaceAll || masked(updateMaskPaths, "ack_deadline_seconds")) {
             if (ackDeadlineSeconds > 0) {
@@ -506,9 +513,9 @@ public class PubSubService {
         if (replaceAll || masked(updateMaskPaths, "message_retention_duration")) {
             stored.setMessageRetentionDuration(blankToNull(messageRetentionDuration));
         }
-        if (replaceAll || masked(updateMaskPaths, "push_config")) {
-            stored.setPushEndpoint(blankToNull(pushEndpoint));
-            setPushOidcToken(stored, pushOidcToken);
+        if (pushConfigChange != null) {
+            stored.setPushEndpoint(pushConfigChange.endpoint());
+            setPushOidcToken(stored, pushConfigChange.token());
         }
         if (replaceAll || masked(updateMaskPaths, "bigquery_config")) {
             stored.setBigQueryConfig(emptyObjectMapToNull(bigQueryConfig));
@@ -539,9 +546,10 @@ public class PubSubService {
         return stored;
     }
 
-    public void modifyPushConfig(String subName, com.google.pubsub.v1.PushConfig pushConfig) {
+    public void modifyPushConfig(String subName, PushConfig pushConfig) {
         LOG.infof("modifyPushConfig subscription=%s", subName);
         StoredSubscription stored = getSubscription(subName);
+        requireServiceAccountEmail(PushOidcToken.of(pushConfig));
         stored.setPushEndpoint(pushConfig.getPushEndpoint().isEmpty() ? null : pushConfig.getPushEndpoint());
         setPushOidcToken(stored, PushOidcToken.of(pushConfig));
         subStore.put(subName, stored);
@@ -549,12 +557,72 @@ public class PubSubService {
 
     /** The {@code oidc_token} of a push config: GCP signs a token for the account and sends it as a bearer. */
     public record PushOidcToken(String serviceAccountEmail, String audience) {
-        static PushOidcToken of(com.google.pubsub.v1.PushConfig pushConfig) {
+        static PushOidcToken of(PushConfig pushConfig) {
             if (!pushConfig.hasOidcToken()) {
                 return null;
             }
             return new PushOidcToken(pushConfig.getOidcToken().getServiceAccountEmail(),
                     pushConfig.getOidcToken().getAudience());
+        }
+    }
+
+    private static void requireServiceAccountEmail(PushOidcToken token) {
+        if (token != null && blankToNull(token.serviceAccountEmail()) == null) {
+            throw GcpException.invalidArgument("push_config.oidc_token.service_account_email must be set");
+        }
+    }
+
+    /**
+     * The push endpoint and OIDC token a REST update leaves on the subscription. A child mask such as
+     * {@code push_config.oidc_token.audience} changes only that field and keeps the rest as stored.
+     */
+    private record PushConfigChange(String endpoint, PushOidcToken token) {
+        private static final String ROOT = "push_config";
+        private static final String ENDPOINT = ROOT + ".push_endpoint";
+        private static final String TOKEN = ROOT + ".oidc_token";
+        private static final String TOKEN_EMAIL = TOKEN + ".service_account_email";
+        private static final String TOKEN_AUDIENCE = TOKEN + ".audience";
+
+        /** Null when the mask leaves the push config alone. */
+        static PushConfigChange of(List<String> updateMaskPaths, boolean replaceAll, StoredSubscription stored,
+                String endpoint, PushOidcToken token) {
+            List<String> paths = replaceAll ? List.of(ROOT) : updateMaskPaths.stream()
+                    .map(PubSubService::jsonMaskToProtoMask)
+                    .filter(path -> path.equals(ROOT) || path.startsWith(ROOT + "."))
+                    .toList();
+            if (paths.isEmpty()) {
+                return null;
+            }
+            for (String path : paths) {
+                if (!Set.of(ROOT, ENDPOINT, TOKEN, TOKEN_EMAIL, TOKEN_AUDIENCE).contains(path)) {
+                    throw GcpException.invalidArgument("Unsupported update mask path: " + path);
+                }
+            }
+            if (paths.contains(ROOT)) {
+                requireServiceAccountEmail(token);
+                return new PushConfigChange(blankToNull(endpoint), token);
+            }
+            String newEndpoint = paths.contains(ENDPOINT) ? blankToNull(endpoint) : stored.getPushEndpoint();
+            String email = stored.getPushOidcServiceAccountEmail();
+            String audience = stored.getPushOidcAudience();
+            if (paths.contains(TOKEN)) {
+                email = token == null ? null : blankToNull(token.serviceAccountEmail());
+                audience = token == null ? null : blankToNull(token.audience());
+                requireServiceAccountEmail(token);
+            }
+            if (paths.contains(TOKEN_EMAIL)) {
+                email = token == null ? null : blankToNull(token.serviceAccountEmail());
+                if (email == null) {
+                    throw GcpException.invalidArgument("push_config.oidc_token.service_account_email must be set");
+                }
+            }
+            if (paths.contains(TOKEN_AUDIENCE)) {
+                audience = token == null ? null : blankToNull(token.audience());
+            }
+            if (email == null && audience != null) {
+                throw GcpException.invalidArgument("push_config.oidc_token.service_account_email must be set");
+            }
+            return new PushConfigChange(newEndpoint, email == null ? null : new PushOidcToken(email, audience));
         }
     }
 

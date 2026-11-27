@@ -988,4 +988,117 @@ class PubSubRestIntegrationTest {
                 .statusCode(200)
                 .body("pushConfig", not(hasKey("oidcToken")));
     }
+
+    private String oidcSub;
+
+    private void createOidcSubscription(String project) {
+        oidcSub = "/v1/projects/" + project + "/subscriptions/s";
+        given().contentType("application/json").body("{}")
+                .when().put("/v1/projects/" + project + "/topics/t").then().statusCode(200);
+        given().contentType("application/json")
+                .body("""
+                        {
+                          "topic": "projects/%s/topics/t",
+                          "pushConfig": {
+                            "pushEndpoint": "http://127.0.0.1:1/hook",
+                            "oidcToken": {"serviceAccountEmail": "sa@p.iam.gserviceaccount.com",
+                                          "audience": "https://aud.test"}
+                          }
+                        }
+                        """.formatted(project))
+                .when().put(oidcSub).then().statusCode(200);
+    }
+
+    private void patchOidcSubscription(String pushConfig, String updateMask, int status) {
+        given().contentType("application/json")
+                .body("{\"subscription\": {\"pushConfig\": " + pushConfig + "}, \"updateMask\": \""
+                        + updateMask + "\"}")
+                .when().patch(oidcSub).then().statusCode(status);
+    }
+
+    private void assertOidcSubscriptionIntact() {
+        given().when().get(oidcSub).then().statusCode(200)
+                .body("pushConfig.pushEndpoint", equalTo("http://127.0.0.1:1/hook"))
+                .body("pushConfig.oidcToken.serviceAccountEmail", equalTo("sa@p.iam.gserviceaccount.com"))
+                .body("pushConfig.oidcToken.audience", equalTo("https://aud.test"));
+    }
+
+    @Test
+    void audienceOnlyMaskKeepsEndpointAndServiceAccount() {
+        createOidcSubscription("pubsub-oidc-mask-aud");
+
+        patchOidcSubscription("{\"oidcToken\": {\"audience\": \"https://new.test\"}}",
+                "pushConfig.oidcToken.audience", 200);
+
+        given().when().get(oidcSub).then().statusCode(200)
+                .body("pushConfig.pushEndpoint", equalTo("http://127.0.0.1:1/hook"))
+                .body("pushConfig.oidcToken.serviceAccountEmail", equalTo("sa@p.iam.gserviceaccount.com"))
+                .body("pushConfig.oidcToken.audience", equalTo("https://new.test"));
+    }
+
+    @Test
+    void endpointOnlyMaskKeepsTheOidcToken() {
+        createOidcSubscription("pubsub-oidc-mask-ep");
+
+        patchOidcSubscription("{\"pushEndpoint\": \"http://127.0.0.1:1/other\"}",
+                "pushConfig.pushEndpoint", 200);
+
+        given().when().get(oidcSub).then().statusCode(200)
+                .body("pushConfig.pushEndpoint", equalTo("http://127.0.0.1:1/other"))
+                .body("pushConfig.oidcToken.serviceAccountEmail", equalTo("sa@p.iam.gserviceaccount.com"))
+                .body("pushConfig.oidcToken.audience", equalTo("https://aud.test"));
+    }
+
+    @Test
+    void oidcTokenMaskReplacesTheTokenAndKeepsTheEndpoint() {
+        createOidcSubscription("pubsub-oidc-mask-tok");
+
+        patchOidcSubscription("{\"oidcToken\": {\"serviceAccountEmail\": \"other@p.iam.gserviceaccount.com\"}}",
+                "pushConfig.oidcToken", 200);
+
+        given().when().get(oidcSub).then().statusCode(200)
+                .body("pushConfig.pushEndpoint", equalTo("http://127.0.0.1:1/hook"))
+                .body("pushConfig.oidcToken.serviceAccountEmail", equalTo("other@p.iam.gserviceaccount.com"))
+                .body("pushConfig.oidcToken", not(hasKey("audience")));
+    }
+
+    @Test
+    void unsupportedPushConfigChildMaskIsRejectedAndChangesNothing() {
+        createOidcSubscription("pubsub-oidc-mask-bad");
+
+        patchOidcSubscription("{\"pushEndpoint\": \"http://127.0.0.1:1/other\"}",
+                "labels,pushConfig.attributes", 400);
+
+        assertOidcSubscriptionIntact();
+    }
+
+    @Test
+    void oidcTokenWithoutServiceAccountEmailIsRejectedOnCreate() {
+        given().contentType("application/json").body("{}")
+                .when().put("/v1/projects/pubsub-rest-oidc-create/topics/t").then().statusCode(200);
+
+        for (String token : List.of("{\"audience\": \"https://aud.test\"}",
+                "{\"serviceAccountEmail\": \"\"}", "{\"serviceAccountEmail\": \"  \"}")) {
+            given().contentType("application/json")
+                    .body("{\"topic\": \"projects/pubsub-rest-oidc-create/topics/t\", \"pushConfig\": "
+                            + "{\"pushEndpoint\": \"http://127.0.0.1:1/hook\", \"oidcToken\": " + token + "}}")
+                    .when().put("/v1/projects/pubsub-rest-oidc-create/subscriptions/s")
+                    .then().statusCode(400);
+        }
+        given().when().get("/v1/projects/pubsub-rest-oidc-create/subscriptions/s").then().statusCode(404);
+    }
+
+    @Test
+    void oidcTokenWithoutServiceAccountEmailIsRejectedOnUpdateAndChangesNothing() {
+        createOidcSubscription("pubsub-oidc-mask-noemail");
+
+        patchOidcSubscription("{\"pushEndpoint\": \"http://127.0.0.1:1/other\", "
+                + "\"oidcToken\": {\"audience\": \"https://new.test\"}}", "pushConfig", 400);
+        patchOidcSubscription("{\"oidcToken\": {\"serviceAccountEmail\": \"\"}}",
+                "pushConfig.oidcToken", 400);
+        patchOidcSubscription("{\"oidcToken\": {\"serviceAccountEmail\": \"\"}}",
+                "pushConfig.oidcToken.serviceAccountEmail", 400);
+
+        assertOidcSubscriptionIntact();
+    }
 }

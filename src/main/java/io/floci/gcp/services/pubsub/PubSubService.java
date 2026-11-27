@@ -568,8 +568,12 @@ public class PubSubService {
 
     private static void requireServiceAccountEmail(PushOidcToken token) {
         if (token != null && blankToNull(token.serviceAccountEmail()) == null) {
-            throw GcpException.invalidArgument("push_config.oidc_token.service_account_email must be set");
+            throw missingServiceAccountEmail();
         }
+    }
+
+    private static GcpException missingServiceAccountEmail() {
+        return GcpException.invalidArgument("push_config.oidc_token.service_account_email must be set");
     }
 
     /**
@@ -608,19 +612,16 @@ public class PubSubService {
             if (paths.contains(TOKEN)) {
                 email = token == null ? null : blankToNull(token.serviceAccountEmail());
                 audience = token == null ? null : blankToNull(token.audience());
-                requireServiceAccountEmail(token);
             }
             if (paths.contains(TOKEN_EMAIL)) {
                 email = token == null ? null : blankToNull(token.serviceAccountEmail());
-                if (email == null) {
-                    throw GcpException.invalidArgument("push_config.oidc_token.service_account_email must be set");
-                }
             }
             if (paths.contains(TOKEN_AUDIENCE)) {
                 audience = token == null ? null : blankToNull(token.audience());
             }
-            if (email == null && audience != null) {
-                throw GcpException.invalidArgument("push_config.oidc_token.service_account_email must be set");
+            boolean tokenSupplied = paths.contains(TOKEN) && token != null;
+            if (email == null && (tokenSupplied || paths.contains(TOKEN_EMAIL) || audience != null)) {
+                throw missingServiceAccountEmail();
             }
             return new PushConfigChange(newEndpoint, email == null ? null : new PushOidcToken(email, audience));
         }

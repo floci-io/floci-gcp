@@ -1066,10 +1066,37 @@ class PubSubRestIntegrationTest {
     void unsupportedPushConfigChildMaskIsRejectedAndChangesNothing() {
         createOidcSubscription("pubsub-oidc-mask-bad");
 
-        patchOidcSubscription("{\"pushEndpoint\": \"http://127.0.0.1:1/other\"}",
-                "labels,pushConfig.attributes", 400);
+        given().contentType("application/json")
+                .body("""
+                        {
+                          "subscription": {"ackDeadlineSeconds": 55,
+                                           "pushConfig": {"pushEndpoint": "http://127.0.0.1:1/other"}},
+                          "updateMask": "ackDeadlineSeconds,pushConfig.attributes"
+                        }
+                        """)
+                .when().patch(oidcSub).then().statusCode(400);
 
         assertOidcSubscriptionIntact();
+        given().when().get(oidcSub).then().statusCode(200).body("ackDeadlineSeconds", equalTo(10));
+    }
+
+    @Test
+    void audienceOnlyMaskIsRejectedWhenTheSubscriptionHasNoOidcToken() {
+        String project = "pubsub-oidc-mask-notoken";
+        oidcSub = "/v1/projects/" + project + "/subscriptions/s";
+        given().contentType("application/json").body("{}")
+                .when().put("/v1/projects/" + project + "/topics/t").then().statusCode(200);
+        given().contentType("application/json")
+                .body("{\"topic\": \"projects/" + project + "/topics/t\", "
+                        + "\"pushConfig\": {\"pushEndpoint\": \"http://127.0.0.1:1/hook\"}}")
+                .when().put(oidcSub).then().statusCode(200);
+
+        patchOidcSubscription("{\"oidcToken\": {\"audience\": \"https://new.test\"}}",
+                "pushConfig.oidcToken.audience", 400);
+
+        given().when().get(oidcSub).then().statusCode(200)
+                .body("pushConfig.pushEndpoint", equalTo("http://127.0.0.1:1/hook"))
+                .body("pushConfig", not(hasKey("oidcToken")));
     }
 
     @Test

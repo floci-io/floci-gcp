@@ -338,7 +338,7 @@ public class PubSubService {
         sub.setFilter(blankToNull(filter));
         sub.setPushEndpoint(blankToNull(pushEndpoint));
         sub.setBigQueryConfig(emptyObjectMapToNull(bigQueryConfig));
-        sub.setExpirationPolicy(emptyObjectMapToNull(expirationPolicy));
+        sub.setExpirationPolicy(copyOrNull(expirationPolicy));
         sub.setRetryPolicy(emptyObjectMapToNull(retryPolicy));
         sub.setDeadLetterTopic(blankToNull(deadLetterTopic));
         sub.setMaxDeliveryAttempts(maxDeliveryAttempts(sub.getDeadLetterTopic(), maxDeliveryAttempts));
@@ -391,6 +391,8 @@ public class PubSubService {
                 case "push_config" -> stored.setPushEndpoint(
                         subProto.getPushConfig().getPushEndpoint().isEmpty() ? null
                                 : subProto.getPushConfig().getPushEndpoint());
+                case "expiration_policy" -> stored.setExpirationPolicy(subProto.hasExpirationPolicy()
+                        ? storedExpirationPolicy(subProto.getExpirationPolicy()) : null);
                 case "retry_policy" -> stored.setRetryPolicy(emptyObjectMapToNull(SubscriptionRetryPolicy.toStored(
                         subProto.hasRetryPolicy(), subProto.getRetryPolicy())));
                 case "dead_letter_policy" -> {
@@ -451,7 +453,7 @@ public class PubSubService {
             stored.setBigQueryConfig(emptyObjectMapToNull(bigQueryConfig));
         }
         if (replaceAll || masked(updateMaskPaths, "expiration_policy")) {
-            stored.setExpirationPolicy(emptyObjectMapToNull(expirationPolicy));
+            stored.setExpirationPolicy(copyOrNull(expirationPolicy));
         }
         if (replaceAll || masked(updateMaskPaths, "retry_policy")) {
             stored.setRetryPolicy(emptyObjectMapToNull(retryPolicy));
@@ -1360,6 +1362,19 @@ public class PubSubService {
             return null;
         }
         return new LinkedHashMap<>(value);
+    }
+
+    static Map<String, Object> storedExpirationPolicy(com.google.pubsub.v1.ExpirationPolicy policy) {
+        Map<String, Object> stored = new LinkedHashMap<>();
+        if (policy.hasTtl()) {
+            stored.put("ttl", com.google.protobuf.util.Durations.toString(policy.getTtl()));
+        }
+        return stored;
+    }
+
+    // An empty expiration policy means "never expires", which differs from an absent one.
+    private static Map<String, Object> copyOrNull(Map<String, Object> value) {
+        return value == null ? null : new LinkedHashMap<>(value);
     }
 
     private static boolean masked(List<String> updateMaskPaths, String path) {

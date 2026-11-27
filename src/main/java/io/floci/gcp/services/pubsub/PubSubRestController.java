@@ -147,7 +147,7 @@ public class PubSubRestController {
                 stringValue(body, "filter"),
                 pushEndpoint(body),
                 objectMap(body, "bigqueryConfig"),
-                objectMap(body, "expirationPolicy"),
+                expirationPolicy(body),
                 objectMap(body, "retryPolicy"),
                 deadLetterTopic(body),
                 maxDeliveryAttempts(body),
@@ -197,7 +197,7 @@ public class PubSubRestController {
                 stringValue(subscriptionBody, "filter"),
                 pushEndpoint(subscriptionBody),
                 objectMap(subscriptionBody, "bigqueryConfig"),
-                objectMap(subscriptionBody, "expirationPolicy"),
+                expirationPolicy(subscriptionBody),
                 objectMap(subscriptionBody, "retryPolicy"),
                 deadLetterTopic(subscriptionBody),
                 maxDeliveryAttempts(subscriptionBody) == 0 ? null : maxDeliveryAttempts(subscriptionBody),
@@ -625,6 +625,12 @@ public class PubSubRestController {
             }
         }
         return out;
+    }
+
+    // Unlike objectMap, keeps an empty policy: it means "never expires" and an absent one does not.
+    private static Map<String, Object> expirationPolicy(Map<String, Object> body) {
+        Map<String, Object> policy = objectMap(body, "expirationPolicy");
+        return policy == null && value(body, "expirationPolicy") instanceof Map<?, ?> ? Map.of() : policy;
     }
 
     private static List<String> stringList(Map<String, Object> body, String key) {

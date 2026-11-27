@@ -542,17 +542,17 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
             builder.setBigqueryConfig(bigQuery.build());
         }
         if (stored.getExpirationPolicy() != null) {
+            ExpirationPolicy.Builder policy = ExpirationPolicy.newBuilder();
             Object ttl = stored.getExpirationPolicy().get("ttl");
             if (ttl != null) {
                 try {
-                    builder.setExpirationPolicy(ExpirationPolicy.newBuilder()
-                            .setTtl(Durations.parse(ttl.toString()))
-                            .build());
+                    policy.setTtl(Durations.parse(ttl.toString()));
                 } catch (ParseException e) {
                     LOG.debugf(e, "Ignoring invalid expiration TTL for subscription %s: %s",
                             stored.getName(), ttl);
                 }
             }
+            builder.setExpirationPolicy(policy.build());
         }
         if (stored.getDeadLetterTopic() != null) {
             builder.setDeadLetterPolicy(DeadLetterPolicy.newBuilder()
@@ -595,10 +595,8 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
     }
 
     private static Map<String, Object> storedExpirationPolicy(Subscription request) {
-        if (!request.hasExpirationPolicy() || !request.getExpirationPolicy().hasTtl()) {
-            return null;
-        }
-        return Map.of("ttl", Durations.toString(request.getExpirationPolicy().getTtl()));
+        return request.hasExpirationPolicy()
+                ? PubSubService.storedExpirationPolicy(request.getExpirationPolicy()) : null;
     }
 
     private static String stringValue(Map<String, Object> values, String key) {

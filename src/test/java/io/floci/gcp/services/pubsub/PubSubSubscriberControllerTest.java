@@ -915,6 +915,43 @@ class PubSubSubscriberControllerTest {
     }
 
     @Test
+    void createSubscriptionOverGrpcKeepsAnEmptyExpirationPolicy() {
+        service.createTopic("projects/p1/topics/t1");
+
+        RecordingObserver<Subscription> responseObserver = new RecordingObserver<>();
+        controller.createSubscription(Subscription.newBuilder()
+                .setName("projects/p1/subscriptions/s1")
+                .setTopic("projects/p1/topics/t1")
+                .setExpirationPolicy(ExpirationPolicy.getDefaultInstance())
+                .build(), responseObserver);
+
+        assertNull(responseObserver.error.get());
+        assertTrue(responseObserver.values.get(0).hasExpirationPolicy());
+        assertFalse(responseObserver.values.get(0).getExpirationPolicy().hasTtl());
+        assertEquals(Map.of(), service.getSubscription("projects/p1/subscriptions/s1").getExpirationPolicy());
+    }
+
+    @Test
+    void updateSubscriptionOverGrpcReplacesTheExpirationPolicy() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10, null, false,
+                null, null, null, null, Map.of("ttl", "86400s"), null, null, 0, false, false);
+
+        RecordingObserver<Subscription> responseObserver = new RecordingObserver<>();
+        controller.updateSubscription(UpdateSubscriptionRequest.newBuilder()
+                .setSubscription(Subscription.newBuilder()
+                        .setName("projects/p1/subscriptions/s1")
+                        .setExpirationPolicy(ExpirationPolicy.getDefaultInstance()))
+                .setUpdateMask(FieldMask.newBuilder().addPaths("expiration_policy"))
+                .build(), responseObserver);
+
+        assertNull(responseObserver.error.get());
+        assertTrue(responseObserver.values.get(0).hasExpirationPolicy());
+        assertFalse(responseObserver.values.get(0).getExpirationPolicy().hasTtl());
+        assertEquals(Map.of(), service.getSubscription("projects/p1/subscriptions/s1").getExpirationPolicy());
+    }
+
+    @Test
     void updateSubscriptionOverGrpcReplacesTheRetryPolicy() {
         service.createTopic("projects/p1/topics/t1");
         service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10);

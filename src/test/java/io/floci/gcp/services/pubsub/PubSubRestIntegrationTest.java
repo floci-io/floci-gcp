@@ -190,6 +190,42 @@ class PubSubRestIntegrationTest {
     }
 
     @Test
+    void expirationPolicyDistinguishesAbsentEmptyAndTtl() {
+        String base = "/v1/projects/pubsub-rest-expiry";
+        given().contentType("application/json").body("{}").when().put(base + "/topics/t").then().statusCode(200);
+        String topic = "projects/pubsub-rest-expiry/topics/t";
+
+        given().contentType("application/json").body("{\"topic\": \"" + topic + "\"}")
+                .when().put(base + "/subscriptions/absent")
+                .then().statusCode(200).body("$", not(hasKey("expirationPolicy")));
+
+        given().contentType("application/json")
+                .body("{\"topic\": \"" + topic + "\", \"expirationPolicy\": {}}")
+                .when().put(base + "/subscriptions/never")
+                .then().statusCode(200).body("expirationPolicy", anEmptyMap());
+        given().when().get(base + "/subscriptions/never")
+                .then().statusCode(200).body("expirationPolicy", anEmptyMap());
+
+        given().contentType("application/json")
+                .body("{\"topic\": \"" + topic + "\", \"expirationPolicy\": {\"ttl\": \"86400s\"}}")
+                .when().put(base + "/subscriptions/ttl")
+                .then().statusCode(200).body("expirationPolicy.ttl", equalTo("86400s"));
+
+        given().contentType("application/json")
+                .body("{\"subscription\": {\"expirationPolicy\": {}}, \"updateMask\": \"expirationPolicy\"}")
+                .when().patch(base + "/subscriptions/ttl")
+                .then().statusCode(200).body("expirationPolicy", anEmptyMap());
+        given().when().get(base + "/subscriptions/ttl")
+                .then().statusCode(200).body("expirationPolicy", anEmptyMap());
+
+        given().contentType("application/json")
+                .queryParam("updateMask", "ackDeadlineSeconds")
+                .body("{\"ackDeadlineSeconds\": 20}")
+                .when().patch(base + "/subscriptions/never")
+                .then().statusCode(200).body("expirationPolicy", anEmptyMap());
+    }
+
+    @Test
     void modifyAckDeadlineWithZeroMakesTheMessagePullableAgain() {
         String project = "pubsub-rest-nack-it";
         String base = "/v1/projects/" + project;

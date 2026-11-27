@@ -53,22 +53,45 @@ class PubSubServiceTest {
     private IamService iamService;
     private InMemoryStorage<String, StoredSubscription> subStore;
     private MutableClock clock;
-    /** Short so retry tests run fast; the "no retry" tests wait five of these for a retry that must not come. */
+    /** Push retries really fire after this, whatever delay the service asked for, so retry tests run fast. */
     private static final Duration PUSH_RETRY_DELAY = Duration.ofMillis(50);
     private static final long NO_RETRY_WAIT_MS = 5 * PUSH_RETRY_DELAY.toMillis();
+    private static final Duration PUSH_TIMEOUT = Duration.ofSeconds(10);
+    private RecordingRetryExecutor retryExecutor;
+
+    /** Records the delay each push retry was scheduled with, then fires it after {@link #PUSH_RETRY_DELAY}. */
+    private static final class RecordingRetryExecutor extends java.util.concurrent.ScheduledThreadPoolExecutor {
+        final List<Duration> delays = Collections.synchronizedList(new ArrayList<>());
+
+        RecordingRetryExecutor() {
+            super(1);
+        }
+
+        @Override
+        public java.util.concurrent.ScheduledFuture<?> schedule(Runnable command, long delay, TimeUnit unit) {
+            delays.add(Duration.of(delay, unit.toChronoUnit()));
+            return super.schedule(command, PUSH_RETRY_DELAY.toMillis(), TimeUnit.MILLISECONDS);
+        }
+    }
 
     @BeforeEach
     void setUp() {
         subStore = new InMemoryStorage<>();
         iamService = IamServices.inMemory();
         clock = new MutableClock(Instant.parse("2026-01-01T00:00:00Z"));
-        service = new PubSubService(
+        service = newService(PUSH_TIMEOUT);
+    }
+
+    private PubSubService newService(Duration pushTimeout) {
+        retryExecutor = new RecordingRetryExecutor();
+        return new PubSubService(
                 new InMemoryStorage<>(),
                 subStore,
                 new InMemoryStorage<>(),
                 iamService,
                 clock,
-                PUSH_RETRY_DELAY);
+                retryExecutor,
+                pushTimeout);
     }
 
     @AfterEach
@@ -1663,6 +1686,172 @@ class PubSubServiceTest {
         } finally {
             oldServer.stop(0);
             replacementServer.stop(0);
+        }
+    }
+
+    private HttpServer failingPushServer(AtomicInteger hits, long holdMs) throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/hook", exchange -> {
+            hits.incrementAndGet();
+            exchange.getRequestBody().readAllBytes();
+            try {
+                Thread.sleep(holdMs);
+                exchange.sendResponseHeaders(503, -1);
+            } catch (InterruptedException | java.io.IOException ignored) {
+                // The client gave up on this request.
+            }
+            exchange.close();
+        });
+        server.start();
+        return server;
+    }
+
+    private void createPushSubscription(HttpServer server, Map<String, Object> retryPolicy,
+            String deadLetterTopic, int maxDeliveryAttempts) {
+        service.createSubscription("projects/p1/subscriptions/push", "projects/p1/topics/t1", 10, null, false,
+                null, null, "http://localhost:" + server.getAddress().getPort() + "/hook", null, null, retryPolicy,
+                deadLetterTopic, maxDeliveryAttempts, false, false);
+    }
+
+    private void awaitRetries(int count) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (retryExecutor.delays.size() < count && System.nanoTime() < deadline) {
+            Thread.sleep(10);
+        }
+        assertTrue(retryExecutor.delays.size() >= count, "retries scheduled: " + retryExecutor.delays);
+    }
+
+    private void awaitPushSettled(String messageId) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (service.pendingPushDeliveries("projects/p1/subscriptions/push", messageId) != 0
+                && System.nanoTime() < deadline) {
+            Thread.sleep(10);
+        }
+        assertEquals(0, service.pendingPushDeliveries("projects/p1/subscriptions/push", messageId));
+    }
+
+    private String publishAndGetId(String data) {
+        return service.publish("projects/p1/topics/t1",
+                List.of(PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8(data)).build())).get(0);
+    }
+
+    @Test
+    void pushRetryUsesRetryPolicyBackoff() throws Exception {
+        // arrange
+        service.createTopic("projects/p1/topics/t1");
+        AtomicInteger hits = new AtomicInteger();
+        HttpServer server = failingPushServer(hits, 0);
+        try {
+            createPushSubscription(server, Map.of("minimumBackoff", "10s", "maximumBackoff", "600s"), null, 0);
+
+            // act
+            publish("m");
+            awaitRetries(3);
+
+            // assert
+            assertEquals(List.of(Duration.ofSeconds(10), Duration.ofSeconds(20), Duration.ofSeconds(40)),
+                    List.copyOf(retryExecutor.delays).subList(0, 3));
+            assertEquals(Duration.ofSeconds(600), SubscriptionRetryPolicy.pushBackoff(
+                    Map.of("minimumBackoff", "10s", "maximumBackoff", "600s"), 200));
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void pushRetryDefaultsToTenSecondsWithoutRetryPolicy() throws Exception {
+        // arrange
+        service.createTopic("projects/p1/topics/t1");
+        AtomicInteger hits = new AtomicInteger();
+        HttpServer server = failingPushServer(hits, 0);
+        try {
+            createPushSubscription(server, null, null, 0);
+
+            // act
+            publish("m");
+            awaitRetries(1);
+
+            // assert
+            assertEquals(Duration.ofSeconds(10), retryExecutor.delays.get(0));
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void pushFailureDeadLettersAfterMaxDeliveryAttempts() throws Exception {
+        // arrange
+        service.createTopic("projects/p1/topics/t1");
+        service.createTopic("projects/p1/topics/dlq");
+        service.createSubscription("projects/p1/subscriptions/dlq-sub", "projects/p1/topics/dlq", 60);
+        AtomicInteger hits = new AtomicInteger();
+        HttpServer server = failingPushServer(hits, 0);
+        try {
+            createPushSubscription(server, null, "projects/p1/topics/dlq", 5);
+
+            // act
+            String messageId = publishAndGetId("m");
+            awaitPushSettled(messageId);
+
+            // assert
+            assertEquals(5, hits.get());
+            ReceivedMessage dead = pullOne("projects/p1/subscriptions/dlq-sub");
+            Map<String, String> attributes = dead.getMessage().getAttributesMap();
+            assertEquals("push", attributes.get("CloudPubSubDeadLetterSourceSubscription"));
+            assertEquals("5", attributes.get("CloudPubSubDeadLetterSourceDeliveryCount"));
+            Thread.sleep(NO_RETRY_WAIT_MS);
+            assertEquals(5, hits.get(), "no further push after dead-lettering");
+            assertEquals(0, service.pendingPushDeliveries("projects/p1/subscriptions/push", messageId));
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void pushTimeoutCountsAsFailedAttempt() throws Exception {
+        // arrange
+        service.shutdownExecutors();
+        service = newService(Duration.ofMillis(200));
+        service.createTopic("projects/p1/topics/t1");
+        service.createTopic("projects/p1/topics/dlq");
+        service.createSubscription("projects/p1/subscriptions/dlq-sub", "projects/p1/topics/dlq", 60);
+        AtomicInteger hits = new AtomicInteger();
+        HttpServer server = failingPushServer(hits, 3000);
+        try {
+            createPushSubscription(server, null, "projects/p1/topics/dlq", 2);
+
+            // act
+            String messageId = publishAndGetId("m");
+            awaitPushSettled(messageId);
+
+            // assert
+            assertEquals(1, retryExecutor.delays.size(), "the first timeout was retried");
+            ReceivedMessage dead = pullOne("projects/p1/subscriptions/dlq-sub");
+            assertEquals("2", dead.getMessage().getAttributesMap().get("CloudPubSubDeadLetterSourceDeliveryCount"));
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void pushDeadLetterToTopicWithoutSubscriptionDropsMessage() throws Exception {
+        // arrange
+        service.createTopic("projects/p1/topics/t1");
+        service.createTopic("projects/p1/topics/dlq");
+        AtomicInteger hits = new AtomicInteger();
+        HttpServer server = failingPushServer(hits, 0);
+        try {
+            createPushSubscription(server, null, "projects/p1/topics/dlq", 2);
+
+            // act
+            String messageId = publishAndGetId("m");
+            awaitPushSettled(messageId);
+            Thread.sleep(NO_RETRY_WAIT_MS);
+
+            // assert
+            assertEquals(2, hits.get());
+        } finally {
+            server.stop(0);
         }
     }
 

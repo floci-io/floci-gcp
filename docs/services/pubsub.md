@@ -313,7 +313,13 @@ subscriptionAdminClient.createSubscription(
     0);
 ```
 
-Messages are delivered as HTTP POST requests to the configured endpoint.
+Messages are delivered as HTTP POST requests to the configured endpoint. Any response other than
+102, 200, 201, 202 or 204, and a request that takes longer than 10 seconds, is a failed attempt.
+
+A failed push is retried with exponential backoff from the subscription's `retryPolicy`: the minimum
+backoff (10 seconds by default) doubles on each attempt up to the maximum (600 seconds by default). With a
+dead-letter policy, the message is forwarded to the dead-letter topic once it has failed
+`maxDeliveryAttempts` times, exactly as for pull subscriptions.
 
 ## Snapshots
 

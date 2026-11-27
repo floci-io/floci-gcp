@@ -26,6 +26,24 @@ final class SubscriptionRetryPolicy {
 
     private SubscriptionRetryPolicy() {}
 
+    /**
+     * Returns how long to wait before the push delivery that follows failed attempt {@code attempt}
+     * (1-based): the minimum backoff doubled per attempt, capped at the maximum. A subscription
+     * without a policy gets the documented defaults.
+     */
+    static java.time.Duration pushBackoff(Map<String, Object> stored, int attempt) {
+        RetryPolicy policy = toProto(stored);
+        java.time.Duration min = java.time.Duration.ofNanos(Durations.toNanos(
+                policy != null && policy.hasMinimumBackoff() ? policy.getMinimumBackoff() : DEFAULT_MINIMUM_BACKOFF));
+        java.time.Duration max = java.time.Duration.ofNanos(Durations.toNanos(
+                policy != null && policy.hasMaximumBackoff() ? policy.getMaximumBackoff() : DEFAULT_MAXIMUM_BACKOFF));
+        java.time.Duration delay = min;
+        for (int i = 1; i < attempt && delay.compareTo(max) < 0; i++) {
+            delay = delay.multipliedBy(2);
+        }
+        return delay.compareTo(max) > 0 ? max : delay;
+    }
+
     /** Returns the stored form of a gRPC retry policy, or null when the request has none. */
     static Map<String, Object> toStored(boolean present, RetryPolicy policy) {
         if (!present) {

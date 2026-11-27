@@ -26,18 +26,27 @@ final class SubscriptionRetryPolicy {
 
     private SubscriptionRetryPolicy() {}
 
-    // Milliseconds, as the scheduler takes them. A subscription without a policy gets the proto defaults.
-    static long pushBackoffMillis(Map<String, Object> stored, int attempt) {
+    // Nanoseconds, so a sub-millisecond minimum still grows. A subscription without a policy gets the proto defaults.
+    static long pushBackoffNanos(Map<String, Object> stored, int attempt) {
         RetryPolicy policy = toProto(stored);
-        long min = Durations.toMillis(
+        long min = saturatedNanos(
                 policy != null && policy.hasMinimumBackoff() ? policy.getMinimumBackoff() : DEFAULT_MINIMUM_BACKOFF);
-        long max = Durations.toMillis(
+        long max = saturatedNanos(
                 policy != null && policy.hasMaximumBackoff() ? policy.getMaximumBackoff() : DEFAULT_MAXIMUM_BACKOFF);
         long delay = min;
         for (int i = 1; i < attempt && delay < max; i++) {
-            delay *= 2;
+            delay = delay > Long.MAX_VALUE / 2 ? Long.MAX_VALUE : delay * 2;
         }
         return Math.min(delay, max);
+    }
+
+    // The proto allows durations of centuries, which overflow a long of nanoseconds.
+    private static long saturatedNanos(Duration duration) {
+        try {
+            return Durations.toNanos(duration);
+        } catch (ArithmeticException e) {
+            return Long.MAX_VALUE;
+        }
     }
 
     /** Returns the stored form of a gRPC retry policy, or null when the request has none. */

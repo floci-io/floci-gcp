@@ -189,6 +189,12 @@ public class PubSubService {
         registerPolicyResolvers();
     }
 
+    /** Stops accepting push deliveries and waits for the running ones to end, for tests. */
+    boolean drainPushDeliveries(Duration timeout) throws InterruptedException {
+        pushDeliveryExecutor.shutdown();
+        return pushDeliveryExecutor.awaitTermination(timeout.toMillis(), TimeUnit.MILLISECONDS);
+    }
+
     @PreDestroy
     void shutdownExecutors() {
         leaseExpiryExecutor.shutdownNow();
@@ -651,7 +657,21 @@ public class PubSubService {
         }
     }
 
-    private void retryOrDeadLetterPush(StoredSubscription subscription, StoredMessage message, int attempt) {
+    // The subscription as it is now, or empty once it was deleted, replaced, detached or stopped being push.
+    private Optional<StoredSubscription> livePushSubscription(StoredSubscription original) {
+        return subStore.get(original.getName())
+                .filter(current -> Objects.equals(current.getCreationId(), original.getCreationId())
+                        && !current.isDetached()
+                        && current.getPushEndpoint() != null);
+    }
+
+    private void retryOrDeadLetterPush(StoredSubscription started, StoredMessage message, int attempt) {
+        Optional<StoredSubscription> live = livePushSubscription(started);
+        if (live.isEmpty()) {
+            pushSettled(started.getName(), message);
+            return;
+        }
+        StoredSubscription subscription = live.get();
         if (attempt >= deadLetterThreshold(subscription) && forwardPushToDeadLetterTopic(subscription, message, attempt)) {
             pushSettled(subscription.getName(), message);
             return;
@@ -674,21 +694,16 @@ public class PubSubService {
     }
 
     private void schedulePushRetry(StoredSubscription subscription, StoredMessage message, int attempt) {
-        long delayMillis = SubscriptionRetryPolicy.pushBackoffMillis(subscription.getRetryPolicy(), attempt);
+        long delayNanos = SubscriptionRetryPolicy.pushBackoffNanos(subscription.getRetryPolicy(), attempt);
         pushRetryExecutor.schedule(() -> {
-            Optional<StoredSubscription> current = subStore.get(subscription.getName());
-
-            if (current.isEmpty()
-                    || !Objects.equals(current.get().getCreationId(), subscription.getCreationId())
-                    || current.get().isDetached()
-                    || current.get().getPushEndpoint() == null) {
+            Optional<StoredSubscription> current = livePushSubscription(subscription);
+            if (current.isEmpty()) {
                 pushSettled(subscription.getName(), message);
                 return;
             }
-
             pushDeliveryExecutor.submit(
                     () -> deliverPushMessage(current.get(), message, attempt + 1));
-        }, delayMillis, TimeUnit.MILLISECONDS);
+        }, delayNanos, TimeUnit.NANOSECONDS);
     }
 
     // A mask makes "filter" itself the trigger, as in GCP. Without a mask GCP rejects the request

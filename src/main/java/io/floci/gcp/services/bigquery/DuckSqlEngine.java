@@ -1235,6 +1235,8 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
             "Column \"?(?<column>[^\"]+)\"? cannot occur in both EXCLUDE and REPLACE list");
     private static final Pattern EMPTY_STAR_PROJECTION = Pattern.compile(
             "SELECT list is empty after resolving \\* expressions");
+    private static final Pattern UNKNOWN_NAME = Pattern.compile(
+            "Binder Error: Referenced (?:column|table) \"(?<name>[^\"]+)\" (?:was )?not found");
 
     /** The sidecar shims, and the GoogleSQL function each one stands in for. */
     private static final Map<String, String> SHIMMED_FUNCTION_NAMES = Map.ofEntries(
@@ -1264,6 +1266,11 @@ public class DuckSqlEngine implements BigQuerySqlEngine {
         }
         if (EMPTY_STAR_PROJECTION.matcher(message).find()) {
             return "SELECT .* expands to zero columns after applying EXCEPT";
+        }
+        Matcher unknown = UNKNOWN_NAME.matcher(message);
+        if (unknown.find() && !unknown.group("name").startsWith("_floci_")) {
+            // BigQuery adds " at [line:col]", which floci leaves out of every message.
+            return "Unrecognized name: " + unknown.group("name");
         }
         Matcher both = COLUMN_IN_BOTH_LISTS.matcher(message);
         if (both.find()) {

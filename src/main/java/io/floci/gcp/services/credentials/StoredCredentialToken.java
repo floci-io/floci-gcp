@@ -11,7 +11,8 @@ public class StoredCredentialToken {
 
 	public enum TokenKind {
 		IMPERSONATED,
-		DOWNSCOPED
+		DOWNSCOPED,
+		FEDERATED
 	}
 
 	private String tokenValue;
@@ -19,6 +20,7 @@ public class StoredCredentialToken {
 	private Instant expireTime;
 	private String sourceToken;
 	private String principal;
+	private List<String> principalSets = new ArrayList<>();
 	private List<CredentialAccessBoundaryRule> gcsRules = new ArrayList<>();
 	private boolean revoked;
 
@@ -27,12 +29,19 @@ public class StoredCredentialToken {
 
 	public StoredCredentialToken(String tokenValue, TokenKind tokenKind, Instant expireTime,
 			String sourceToken, String principal, List<CredentialAccessBoundaryRule> gcsRules) {
+		this(tokenValue, tokenKind, expireTime, sourceToken, principal, List.of(), gcsRules);
+	}
+
+	public StoredCredentialToken(String tokenValue, TokenKind tokenKind, Instant expireTime,
+			String sourceToken, String principal, List<String> principalSets,
+			List<CredentialAccessBoundaryRule> gcsRules) {
 		this.tokenValue = tokenValue;
 		this.tokenKind = tokenKind;
 		this.expireTime = expireTime;
 		this.sourceToken = sourceToken;
 		this.principal = principal;
-		this.gcsRules = new ArrayList<>(gcsRules);
+		this.principalSets = principalSets == null ? new ArrayList<>() : new ArrayList<>(principalSets);
+		this.gcsRules = gcsRules == null ? new ArrayList<>() : new ArrayList<>(gcsRules);
 	}
 
 	public String getTokenValue() {
@@ -73,6 +82,14 @@ public class StoredCredentialToken {
 
 	public void setPrincipal(String principal) {
 		this.principal = principal;
+	}
+
+	public List<String> getPrincipalSets() {
+		return principalSets;
+	}
+
+	public void setPrincipalSets(List<String> principalSets) {
+		this.principalSets = principalSets == null ? new ArrayList<>() : new ArrayList<>(principalSets);
 	}
 
 	public List<CredentialAccessBoundaryRule> getGcsRules() {

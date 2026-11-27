@@ -21,6 +21,7 @@ public class CredentialTokenService {
     public static final String FLOCI_TOKEN_PREFIX = "floci-gcp-";
     public static final String IMPERSONATED_TOKEN_PREFIX = "floci-gcp-impersonated-";
     public static final String DOWNSCOPED_TOKEN_PREFIX = "floci-gcp-downscoped-";
+    public static final String FEDERATED_TOKEN_PREFIX = "floci-gcp-federated-";
     public static final String EXPIRED_TOKEN_MESSAGE = "Expired Floci credential token";
     public static final long DEFAULT_LIFETIME_SECONDS = 3600;
 
@@ -78,6 +79,34 @@ public class CredentialTokenService {
     }
 
     /**
+     * Mints a federated access token produced by STS Workload Identity Federation exchange.
+     */
+    public MintedFederatedToken mintFederatedToken(String principal, List<String> principalSets,
+            long lifetimeSeconds) {
+        if (principal == null || principal.isBlank()) {
+            throw GcpException.invalidArgument("federated principal is required");
+        }
+        if (lifetimeSeconds <= 0) {
+            throw GcpException.invalidArgument("lifetimeSeconds must be positive");
+        }
+        Instant now = clock.instant();
+        Instant expireTime = now.plusSeconds(lifetimeSeconds);
+        String tokenValue = FEDERATED_TOKEN_PREFIX + UUID.randomUUID();
+        StoredCredentialToken token = new StoredCredentialToken(
+                tokenValue,
+                StoredCredentialToken.TokenKind.FEDERATED,
+                expireTime,
+                null,
+                principal,
+                principalSets == null ? List.of() : principalSets,
+                List.of());
+        synchronized (issuanceLock) {
+            tokenStore.put(tokenValue, token);
+        }
+        return new MintedFederatedToken(token, lifetimeSeconds);
+    }
+
+    /**
      * Mints a token constrained by the requested Credential Access Boundary.
      *
      * <p>Floci-issued downscoped tokens cannot be exchanged again because this
@@ -110,6 +139,9 @@ public class CredentialTokenService {
             String principal = storedSource
                     .map(StoredCredentialToken::getPrincipal)
                     .orElse(null);
+            List<String> principalSets = storedSource
+                    .map(StoredCredentialToken::getPrincipalSets)
+                    .orElse(List.of());
             if (storedSource.isPresent() && (principal == null || principal.isBlank())) {
                 throw GcpException.invalidArgument("Floci impersonated subject token has no principal");
             }
@@ -121,6 +153,7 @@ public class CredentialTokenService {
                     expireTime,
                     null,
                     principal,
+                    principalSets,
                     gcsRules);
             tokenStore.put(tokenValue, token);
         }
@@ -134,7 +167,8 @@ public class CredentialTokenService {
     private Optional<StoredCredentialToken> lookupBearerToken(String bearerToken, Instant now) {
         if (bearerToken == null || bearerToken.isBlank()
                 || (!bearerToken.startsWith(IMPERSONATED_TOKEN_PREFIX)
-                        && !bearerToken.startsWith(DOWNSCOPED_TOKEN_PREFIX))) {
+                        && !bearerToken.startsWith(DOWNSCOPED_TOKEN_PREFIX)
+                        && !bearerToken.startsWith(FEDERATED_TOKEN_PREFIX))) {
             return Optional.empty();
         }
 
@@ -176,5 +210,8 @@ public class CredentialTokenService {
     }
 
     public record MintedDownscopedToken(StoredCredentialToken token, long expiresInSeconds) {
+    }
+
+    public record MintedFederatedToken(StoredCredentialToken token, long expiresInSeconds) {
     }
 }

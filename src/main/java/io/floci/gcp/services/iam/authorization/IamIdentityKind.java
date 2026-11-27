@@ -5,5 +5,6 @@ public enum IamIdentityKind {
     ANONYMOUS,
     EXTERNAL,
     FLOCI_SERVICE_ACCOUNT,
+    FLOCI_FEDERATED,
     FLOCI_DOWNSCOPED
 }

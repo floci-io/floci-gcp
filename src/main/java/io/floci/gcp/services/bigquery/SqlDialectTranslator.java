@@ -61,12 +61,9 @@ final class SqlDialectTranslator {
     }
 
     /**
-     * An {@code alias.field} in ORDER BY naming a field the STRUCT select alias does not have, as written, and
-     * whether it belongs to the outermost query, whose aliases are the result's columns.
-     */
-    /**
-     * A field missing from a STRUCT select alias in ORDER BY; {@code parents} names the fields from the alias down to
-     * the struct that lacks it, empty when the alias itself does.
+     * A field missing from a STRUCT select alias in ORDER BY, as written: {@code parents} names the fields from the
+     * alias down to the struct that lacks it, empty when the alias itself does, and {@code outermost} whether it
+     * belongs to the outermost query, whose aliases are the result's columns.
      */
     record MissingStructField(String alias, String field, boolean outermost, Set<List<String>> anonymousFields,
                               List<String> parents) {
@@ -241,6 +238,8 @@ final class SqlDialectTranslator {
      * BigQuery, and the missing-field message writes it by type alone.
      */
     private final Map<Map<String, List<Token>>, Set<List<String>>> anonymousStructFields = new IdentityHashMap<>();
+    /** The anonymous field paths of a typed constructor's declared type, keyed by the {@code {} of its literal. */
+    private final Map<Token, Set<List<String>>> typedConstructorAnonymousFields = new IdentityHashMap<>();
 
     /** Decimal literals BigQuery types FLOAT64 here, rendered as DOUBLE; see {@link #typeDecimalLiterals}. */
     private final Set<Token> floatLiterals = Collections.newSetFromMap(new IdentityHashMap<>());
@@ -12480,6 +12479,7 @@ final class SqlDialectTranslator {
             }
             Set<String> names = new HashSet<>();
             List<Token> literal = new ArrayList<>(new Lexer("{").tokenize());
+            Set<List<String>> anonymous = new HashSet<>();
             for (int k = 0; k < types.size(); k++) {
                 List<Token> type = types.get(k);
                 boolean named = type.size() >= 2 && (type.get(0).kind == Kind.IDENT || type.get(0).kind == Kind.QIDENT)
@@ -12487,6 +12487,11 @@ final class SqlDialectTranslator {
                 // A repeated declared name, STRUCT<n INT64, n STRING>, gives the later field BigQuery's _field_N.
                 String name = named && names.add(type.get(0).identifierText().toLowerCase(Locale.ROOT))
                         ? type.get(0).identifierText() : "_field_" + (k + 1);
+                if (!named) {
+                    anonymous.add(List.of(name.toLowerCase(Locale.ROOT)));
+                }
+                addTypeAnonymousFields(named ? type.subList(1, type.size()) : type,
+                        List.of(name.toLowerCase(Locale.ROOT)), anonymous);
                 if (k > 0) {
                     literal.addAll(new Lexer(", ").tokenize());
                 }
@@ -12507,8 +12512,52 @@ final class SqlDialectTranslator {
                 literal.addAll(new Lexer(")").tokenize());
             }
             literal.addAll(new Lexer("}").tokenize());
+            if (!anonymous.isEmpty()) {
+                literal.stream().filter(token -> token.isPunct("{")).findFirst()
+                        .ifPresent(brace -> typedConstructorAnonymousFields.put(brace, Set.copyOf(anonymous)));
+            }
             tokens.subList(i, close + 1).clear();
             tokens.addAll(i, literal);
+        }
+    }
+
+    /**
+     * Adds the paths, below {@code prefix}, of the unnamed fields of a declared {@code STRUCT<...>} type at any depth,
+     * as {@link #addNestedAnonymousFields} does for an untyped constructor: {@code STRUCT<m STRUCT<INT64>>} gives
+     * [m, _field_1]. An ARRAY's element is not followed, since a path cannot reach it.
+     */
+    private static void addTypeAnonymousFields(List<Token> type, List<String> prefix, Set<List<String>> anonymous) {
+        List<Token> tokens = splitClosingAngles(type);
+        if (tokens.size() < 3 || !tokens.get(0).isKeyword("STRUCT") || !tokens.get(1).isPunct("<")
+                || !tokens.getLast().isPunct(">")) {
+            return;
+        }
+        List<List<Token>> items = new ArrayList<>(List.of(new ArrayList<>()));
+        int nesting = 0;
+        for (Token token : tokens.subList(2, tokens.size() - 1)) {
+            if (token.isPunct("<") || token.isPunct("(")) {
+                nesting++;
+            } else if (token.isPunct(">") || token.isPunct(")")) {
+                nesting--;
+            } else if (nesting == 0 && token.isPunct(",")) {
+                items.add(new ArrayList<>());
+                continue;
+            }
+            if (token.kind != Kind.SPACE) {
+                items.getLast().add(token);
+            }
+        }
+        for (int k = 0; k < items.size(); k++) {
+            List<Token> item = items.get(k);
+            boolean named = item.size() >= 2 && (item.get(0).kind == Kind.IDENT || item.get(0).kind == Kind.QIDENT)
+                    && !item.get(1).isPunct("<") && !item.get(1).isPunct("(");
+            String name = named ? item.get(0).identifierText().toLowerCase(Locale.ROOT) : "_field_" + (k + 1);
+            List<String> path = new ArrayList<>(prefix);
+            path.add(name);
+            if (!named) {
+                anonymous.add(List.copyOf(path));
+            }
+            addTypeAnonymousFields(named ? item.subList(1, item.size()) : item, path, anonymous);
         }
     }
 
@@ -13940,6 +13989,11 @@ final class SqlDialectTranslator {
         if (tokens.get(open).isPunct("{")) {
             close = matchingBrace(open);
             fields = structFields(open, close);
+            Set<List<String>> typedAnonymous = typedConstructorAnonymousFields.get(tokens.get(open));
+            if (typedAnonymous != null && !fields.isEmpty()) {
+                // A typed constructor's unnamed fields became _field_N keys of its literal; they stay anonymous.
+                anonymousStructFields.put(fields, typedAnonymous);
+            }
         } else if (tokens.get(open).isKeyword("STRUCT")) {
             int parenthesis = nextSignificant(open + 1, as);
             if (parenthesis < 0 || !tokens.get(parenthesis).isPunct("(")) {

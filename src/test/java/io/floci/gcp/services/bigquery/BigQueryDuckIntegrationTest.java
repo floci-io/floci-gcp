@@ -3750,6 +3750,10 @@ class BigQueryDuckIntegrationTest {
                         "_field_1", "STRUCT<INT64, k INT64>"},
                 {"SELECT STRUCT(STRUCT(STRUCT(x + 1) AS d) AS m) AS s FROM UNNEST([2, 1]) x ORDER BY s.m.d._field_1",
                         "_field_1", "STRUCT<INT64>"},
+                {"SELECT STRUCT<INT64>(x + 1) AS s FROM UNNEST([2, 1]) x ORDER BY s._field_1", "_field_1",
+                        "STRUCT<INT64>"},
+                {"SELECT STRUCT<m STRUCT<INT64>>(STRUCT(x + 1)) AS s FROM UNNEST([2, 1]) x ORDER BY s.m._field_1",
+                        "_field_1", "STRUCT<INT64>"},
         }) {
             query(Map.of("query", c[0], "useLegacySql", false))
                     .then().statusCode(400)

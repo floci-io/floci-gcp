@@ -10797,6 +10797,7 @@ final class SqlDialectTranslator {
         int parens = 0;
         int brackets = 0;
         int braces = 0;
+        int angles = 0;
         int entryStart = start;
         for (int i = start; i <= close; i++) {
             boolean boundary = i == close;
@@ -10826,7 +10827,21 @@ final class SqlDialectTranslator {
                     braces--;
                     continue;
                 }
-                boundary = parens == 0 && brackets == 0 && braces == 0 && token.isPunct(",");
+                if (parens == 0 && brackets == 0 && braces == 0) {
+                    if (token.isPunct("<") && opensTypeArguments(i, angles)) {
+                        angles++;
+                        continue;
+                    }
+                    if (angles > 0 && token.isPunct(">")) {
+                        angles--;
+                        continue;
+                    }
+                    if (angles > 0 && token.isPunct(">>")) {
+                        angles = Math.max(0, angles - 2);
+                        continue;
+                    }
+                }
+                boundary = parens == 0 && brackets == 0 && braces == 0 && angles == 0 && token.isPunct(",");
             }
             if (!boundary) {
                 continue;
@@ -13068,7 +13083,15 @@ final class SqlDialectTranslator {
         if (previous < 0) {
             return false;
         }
-        String name = tokens.get(previous).upper();
+        Token previousToken = tokens.get(previous);
+        if (previousToken.kind != Kind.IDENT) {
+            return false;
+        }
+        int beforePrevious = previousSignificant(previous - 1);
+        if (beforePrevious >= 0 && tokens.get(beforePrevious).isPunct(".")) {
+            return false;
+        }
+        String name = previousToken.upper();
         return name.equals("ARRAY") || name.equals("STRUCT") || name.equals("RANGE");
     }
 
@@ -14259,11 +14282,12 @@ final class SqlDialectTranslator {
             return; // SELECT AS STRUCT / AS VALUE
         }
         int depth = 0;
+        int angles = 0;
         int itemStart = first;
         for (int i = first; i <= tokens.size(); i++) {
             Token t = i < tokens.size() ? tokens.get(i) : null;
             boolean itemEnds = t == null
-                    || (depth == 0 && (t.isPunct(",") || t.isPunct(")")
+                    || (depth == 0 && angles == 0 && (t.isPunct(",") || t.isPunct(")")
                     || (t.kind == Kind.IDENT && (isFromClause(i)
                             || CLAUSE_END_KEYWORDS.contains(t.upper()))
                             && !followsStar(i))));
@@ -14273,10 +14297,16 @@ final class SqlDialectTranslator {
                     return;
                 }
                 itemStart = i + 1;
-            } else if (t.isPunct("(") || t.isPunct("[")) {
+            } else if (t.isPunct("(") || t.isPunct("[") || t.isPunct("{")) {
                 depth++;
-            } else if (t.isPunct(")") || t.isPunct("]")) {
+            } else if (t.isPunct(")") || t.isPunct("]") || t.isPunct("}")) {
                 depth--;
+            } else if (depth == 0 && t.isPunct("<") && opensTypeArguments(i, angles)) {
+                angles++;
+            } else if (depth == 0 && angles > 0 && t.isPunct(">")) {
+                angles--;
+            } else if (depth == 0 && angles > 0 && t.isPunct(">>")) {
+                angles = Math.max(0, angles - 2);
             }
         }
     }
@@ -14454,6 +14484,7 @@ final class SqlDialectTranslator {
         }
         int end = start;
         int depth = 0;
+        int angles = 0;
         List<int[]> items = new ArrayList<>();
         int itemStart = start;
         for (; end < tokens.size(); end++) {
@@ -14465,10 +14496,16 @@ final class SqlDialectTranslator {
                     break; // closes a parenthesized query: (SELECT ...)
                 }
                 depth--;
-            } else if (depth == 0 && t.isPunct(",")) {
+            } else if (depth == 0 && t.isPunct("<") && opensTypeArguments(end, angles)) {
+                angles++;
+            } else if (depth == 0 && angles > 0 && t.isPunct(">")) {
+                angles--;
+            } else if (depth == 0 && angles > 0 && t.isPunct(">>")) {
+                angles = Math.max(0, angles - 2);
+            } else if (depth == 0 && angles == 0 && t.isPunct(",")) {
                 items.add(new int[] {itemStart, end});
                 itemStart = end + 1;
-            } else if (depth == 0 && t.kind == Kind.IDENT
+            } else if (depth == 0 && angles == 0 && t.kind == Kind.IDENT
                     && (isFromClause(end)
                             || CLAUSE_END_KEYWORDS.contains(t.upper())) && !followsStar(end)) {
                 break;
@@ -14685,8 +14722,9 @@ final class SqlDialectTranslator {
 
     private static boolean isAliasable(Token beforeLast) {
         return beforeLast.kind == Kind.IDENT || beforeLast.kind == Kind.QIDENT || beforeLast.isPunct(")")
-                || beforeLast.isPunct("]") || beforeLast.kind == Kind.STRING || beforeLast.kind == Kind.NUMBER
-                || beforeLast.kind == Kind.NAMED_PARAM || beforeLast.kind == Kind.POSITIONAL_PARAM;
+                || beforeLast.isPunct("]") || beforeLast.isPunct("}") || beforeLast.kind == Kind.STRING
+                || beforeLast.kind == Kind.NUMBER || beforeLast.kind == Kind.NAMED_PARAM
+                || beforeLast.kind == Kind.POSITIONAL_PARAM;
     }
 
     private static boolean isPath(List<Token> item) {

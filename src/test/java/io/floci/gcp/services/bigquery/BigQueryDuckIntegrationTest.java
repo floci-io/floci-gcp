@@ -7636,6 +7636,63 @@ class BigQueryDuckIntegrationTest {
     }
 
     @Test
+    @Order(7)
+    void starExceptAcrossJoinPreservesSchemaWithTypedStructArrayLiterals() {
+        query(Map.of("query", """
+                SELECT * EXCEPT(k)
+                FROM (
+                  SELECT
+                    'a' AS k,
+                    'first' AS label,
+                    ARRAY<STRUCT<name STRING, value STRING>>[] AS tags,
+                    '2024-01-01' AS day
+                ) l
+                JOIN (SELECT 'a' AS k) r
+                ON r.k = l.k
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("label", "tags", "day")))
+                .body("rows[0].f[0].v", equalTo("first"))
+                .body("rows[0].f[1].v", hasSize(0))
+                .body("rows[0].f[2].v", equalTo("2024-01-01"));
+
+        query(Map.of("query", """
+                SELECT * EXCEPT(k)
+                FROM (SELECT 1 AS k, STRUCT<a STRING, b INT64>('x', 1) s, 2 AS n) l
+                JOIN (SELECT 1 AS k) r
+                ON l.k = r.k
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("s", "n")))
+                .body("rows[0].f[0].v.f[0].v", equalTo("x"))
+                .body("rows[0].f[0].v.f[1].v", equalTo("1"))
+                .body("rows[0].f[1].v", equalTo("2"));
+
+        query(Map.of("query", """
+                SELECT * EXCEPT(k) REPLACE(ARRAY<STRUCT<a STRING, b INT64>>[] AS arr)
+                FROM (SELECT 1 AS k, ARRAY<STRUCT<a STRING, b INT64>>[('x', 1)] AS arr, 2 AS n) l
+                JOIN (SELECT 1 AS k) r
+                ON l.k = r.k
+                """, "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("arr", "n")))
+                .body("rows[0].f[0].v", hasSize(0))
+                .body("rows[0].f[1].v", equalTo("2"));
+
+        query(Map.of("query", "SELECT t.range < 2, 3 FROM (SELECT 1 AS `range`) t", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("f0_", "f1_")))
+                .body("rows[0].f[0].v", equalTo("true"))
+                .body("rows[0].f[1].v", equalTo("3"));
+
+        query(Map.of("query", "SELECT `range` < 2, 3 FROM (SELECT 1 AS `range`) t", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.name", equalTo(List.of("f0_", "f1_")))
+                .body("rows[0].f[0].v", equalTo("true"))
+                .body("rows[0].f[1].v", equalTo("3"));
+    }
+
+    @Test
     @Order(8)
     void sqlErrorsSurfaceAsInvalidQuery() {
         query("""

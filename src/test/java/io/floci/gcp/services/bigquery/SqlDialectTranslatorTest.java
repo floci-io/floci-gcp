@@ -5092,4 +5092,56 @@ class SqlDialectTranslatorTest {
         assertTrue(nested.contains("\"k\" := CAST(struct_extract_at(\"_floci_struct_cast_0\", 2) AS BIGINT)"), nested);
         assertFalse(nested.contains("AS STRUCT(\"a\" BIGINT, \"k\" BIGINT)"), nested);
     }
+
+    @Test
+    void selectListAndReplaceKeepCommasInsideTypeArgumentsTogether() {
+        String joinedEmptyArray = sql("""
+                SELECT * EXCEPT(k)
+                FROM (
+                  SELECT
+                    'a' AS k,
+                    'first' AS label,
+                    ARRAY<STRUCT<name STRING, value STRING>>[] AS tags,
+                    '2024-01-01' AS day
+                ) l
+                JOIN (SELECT 'a' AS k) r
+                ON r.k = l.k
+                """);
+        assertFalse(joinedEmptyArray.contains("AS \"STRING\""), joinedEmptyArray);
+        assertTrue(joinedEmptyArray.contains("#2 AS \"label\", #3 AS \"tags\", #4 AS \"day\""),
+                joinedEmptyArray);
+
+        String joinedTypedStruct = sql("""
+                SELECT * EXCEPT(k)
+                FROM (SELECT 1 AS k, STRUCT<a STRING, b INT64>('x', 1) s, 2 AS n) l
+                JOIN (SELECT 1 AS k) r
+                ON l.k = r.k
+                """);
+        assertFalse(joinedTypedStruct.contains("AS \"STRING\""), joinedTypedStruct);
+        assertFalse(joinedTypedStruct.contains("AS \"$col"), joinedTypedStruct);
+        assertTrue(joinedTypedStruct.contains("#2 AS \"s\", #3 AS \"n\""), joinedTypedStruct);
+
+        String replaced = sql("""
+                SELECT * EXCEPT(k) REPLACE(ARRAY<STRUCT<a STRING, b INT64>>[] AS arr)
+                FROM (SELECT 1 AS k, ARRAY<STRUCT<a STRING, b INT64>>[('x', 1)] AS arr, 2 AS n) l
+                JOIN (SELECT 1 AS k) r
+                ON l.k = r.k
+                """);
+        assertFalse(replaced.contains("AS \"STRING\""), replaced);
+        assertTrue(replaced.contains("CAST([] AS STRUCT(\"a\" VARCHAR, \"b\" BIGINT)[]) AS \"arr\", #3 AS \"n\""),
+                replaced);
+
+        String dottedComparison = sql("SELECT t.range < 2, 3 FROM (SELECT 1 AS `range`) t");
+        assertTrue(dottedComparison.contains("AS f0_"), dottedComparison);
+        assertTrue(dottedComparison.contains("AS f1_"), dottedComparison);
+
+        String quotedComparison = sql("SELECT `range` < 2, 3 FROM (SELECT 1 AS `range`) t");
+        assertTrue(quotedComparison.contains("AS f0_"), quotedComparison);
+        assertTrue(quotedComparison.contains("AS f1_"), quotedComparison);
+
+        String replacedComparison = sql(
+                "SELECT * REPLACE(t.range < 2 AS flag, 3 AS n) FROM (SELECT 1 AS `range`, FALSE AS flag, 0 AS n) t");
+        assertTrue(replacedComparison.contains("AS flag"), replacedComparison);
+        assertTrue(replacedComparison.contains("3 AS n"), replacedComparison);
+    }
 }

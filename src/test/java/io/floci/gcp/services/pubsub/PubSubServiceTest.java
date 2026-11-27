@@ -1754,18 +1754,15 @@ class PubSubServiceTest {
 
     @Test
     void pushRetryUsesRetryPolicyBackoff() throws Exception {
-        // arrange
         service.createTopic("projects/p1/topics/t1");
         AtomicInteger hits = new AtomicInteger();
         HttpServer server = failingPushServer(hits, 0);
         try {
             createPushSubscription(server, Map.of("minimumBackoff", "10s", "maximumBackoff", "600s"), null, 0);
 
-            // act
             publish("m");
             awaitRetries(3);
 
-            // assert
             assertEquals(List.of(Duration.ofSeconds(10), Duration.ofSeconds(20), Duration.ofSeconds(40)),
                     List.copyOf(retryExecutor.delays).subList(0, 3));
             assertEquals(600_000L, SubscriptionRetryPolicy.pushBackoffMillis(
@@ -1777,18 +1774,15 @@ class PubSubServiceTest {
 
     @Test
     void pushRetryDefaultsToTenSecondsWithoutRetryPolicy() throws Exception {
-        // arrange
         service.createTopic("projects/p1/topics/t1");
         AtomicInteger hits = new AtomicInteger();
         HttpServer server = failingPushServer(hits, 0);
         try {
             createPushSubscription(server, null, null, 0);
 
-            // act
             publish("m");
             awaitRetries(1);
 
-            // assert
             assertEquals(Duration.ofSeconds(10), retryExecutor.delays.get(0));
         } finally {
             stopPushServer(server);
@@ -1797,7 +1791,6 @@ class PubSubServiceTest {
 
     @Test
     void pushFailureDeadLettersAfterMaxDeliveryAttempts() throws Exception {
-        // arrange
         service.createTopic("projects/p1/topics/t1");
         service.createTopic("projects/p1/topics/dlq");
         service.createSubscription("projects/p1/subscriptions/dlq-sub", "projects/p1/topics/dlq", 60);
@@ -1806,11 +1799,9 @@ class PubSubServiceTest {
         try {
             createPushSubscription(server, null, "projects/p1/topics/dlq", 5);
 
-            // act
             String messageId = publishAndGetId("m");
             awaitPushSettled(messageId);
 
-            // assert
             assertEquals(5, hits.get());
             ReceivedMessage dead = pullOne("projects/p1/subscriptions/dlq-sub");
             Map<String, String> attributes = dead.getMessage().getAttributesMap();
@@ -1826,7 +1817,6 @@ class PubSubServiceTest {
 
     @Test
     void pushTimeoutCountsAsFailedAttempt() throws Exception {
-        // arrange
         service.shutdownExecutors();
         service = newService(Duration.ofMillis(200));
         service.createTopic("projects/p1/topics/t1");
@@ -1837,11 +1827,9 @@ class PubSubServiceTest {
         try {
             createPushSubscription(server, null, "projects/p1/topics/dlq", 2);
 
-            // act
             String messageId = publishAndGetId("m");
             awaitPushSettled(messageId);
 
-            // assert
             // The handler holds far longer than the timeout, so a retry sent before the timeout would arrive sooner.
             assertEquals(2, pushArrivalsNanos.size());
             assertTrue(pushArrivalsNanos.get(1) - pushArrivalsNanos.get(0) >= Duration.ofMillis(200).toNanos(),
@@ -1856,7 +1844,6 @@ class PubSubServiceTest {
 
     @Test
     void pushDeadLetterToTopicWithoutSubscriptionDropsMessage() throws Exception {
-        // arrange
         service.createTopic("projects/p1/topics/t1");
         service.createTopic("projects/p1/topics/dlq");
         AtomicInteger hits = new AtomicInteger();
@@ -1864,12 +1851,10 @@ class PubSubServiceTest {
         try {
             createPushSubscription(server, null, "projects/p1/topics/dlq", 2);
 
-            // act
             String messageId = publishAndGetId("m");
             awaitPushSettled(messageId);
             Thread.sleep(NO_RETRY_WAIT_MS);
 
-            // assert
             assertEquals(2, hits.get());
         } finally {
             stopPushServer(server);

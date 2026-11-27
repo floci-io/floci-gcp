@@ -19,6 +19,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.Base64;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 
@@ -161,6 +162,19 @@ class IamCredentialsServiceTest {
 
         assertEquals(first, mintedClaims("a@p.iam.gserviceaccount.com").get("sub").asText());
         assertNotEquals(first, mintedClaims("b@p.iam.gserviceaccount.com").get("sub").asText());
+    }
+
+    @Test
+    void mintIdTokenDerivesTheSameAsciiIdUnderAnyDefaultLocale() throws Exception {
+        String underRoot = mintedClaims("a@p.iam.gserviceaccount.com").get("sub").asText();
+        Locale original = Locale.getDefault();
+        Locale.setDefault(Locale.forLanguageTag("ar-EG"));
+        try {
+            assertEquals(underRoot, mintedClaims("a@p.iam.gserviceaccount.com").get("sub").asText());
+        } finally {
+            Locale.setDefault(original);
+        }
+        assertTrue(underRoot.matches("1[0-9]{20}"), underRoot);
     }
 
     @Test

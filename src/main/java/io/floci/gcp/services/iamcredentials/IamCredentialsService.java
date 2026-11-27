@@ -211,7 +211,8 @@ public class IamCredentialsService {
     private static String derivedUniqueId(String email) {
         try {
             byte[] digest = MessageDigest.getInstance("SHA-256").digest(email.getBytes(StandardCharsets.UTF_8));
-            return String.format("1%020d", new BigInteger(1, digest).mod(BigInteger.TEN.pow(20)));
+            String digits = new BigInteger(1, digest).mod(BigInteger.TEN.pow(20)).toString();
+            return "1" + "0".repeat(20 - digits.length()) + digits;
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException("SHA-256 is unavailable", e);
         }

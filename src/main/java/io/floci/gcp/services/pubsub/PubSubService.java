@@ -4,8 +4,10 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.Timestamp;
+import com.google.protobuf.util.Durations;
 import com.google.protobuf.util.Timestamps;
 import com.google.pubsub.v1.DeadLetterPolicy;
+import com.google.pubsub.v1.ExpirationPolicy;
 import com.google.pubsub.v1.PubsubMessage;
 import com.google.pubsub.v1.ReceivedMessage;
 import io.floci.gcp.config.EmulatorConfig;
@@ -1364,10 +1366,10 @@ public class PubSubService {
         return new LinkedHashMap<>(value);
     }
 
-    static Map<String, Object> storedExpirationPolicy(com.google.pubsub.v1.ExpirationPolicy policy) {
+    static Map<String, Object> storedExpirationPolicy(ExpirationPolicy policy) {
         Map<String, Object> stored = new LinkedHashMap<>();
         if (policy.hasTtl()) {
-            stored.put("ttl", com.google.protobuf.util.Durations.toString(policy.getTtl()));
+            stored.put("ttl", Durations.toString(policy.getTtl()));
         }
         return stored;
     }

@@ -151,8 +151,25 @@ class OidcSubjectTokenVerifierTest {
         });
         server.start();
         try {
+            AtomicReference<Instant> currentTime = new AtomicReference<>(NOW);
+            Clock mutableClock = new Clock() {
+                @Override
+                public ZoneOffset getZone() {
+                    return ZoneOffset.UTC;
+                }
+
+                @Override
+                public Clock withZone(java.time.ZoneId zone) {
+                    return this;
+                }
+
+                @Override
+                public Instant instant() {
+                    return currentTime.get();
+                }
+            };
             OidcSubjectTokenVerifier discoveryVerifier =
-                    new OidcSubjectTokenVerifier(mapper, Clock.fixed(NOW, ZoneOffset.UTC));
+                    new OidcSubjectTokenVerifier(mapper, mutableClock);
             ObjectNode provider = oidcProvider(issuer, List.of("https://expected.aud"), "");
 
             String jwt1 = StsFederationTestFixtures.signJwt("RS256", "key-1",
@@ -162,13 +179,21 @@ class OidcSubjectTokenVerifierTest {
             assertEquals("alice", discoveryVerifier.verify(jwt1, provider, PROVIDER_NAME).get("sub"));
             assertEquals(1, jwksFetches.get(), "second verification should use cached JWKS");
 
-            // Rotate JWKS to key-2; verifier should refresh once and accept key-2
+            // Bad signature within refresh cooldown must not trigger another outbound JWKS fetch
+            String badJwt = StsFederationTestFixtures.signJwt("RS256", "key-1",
+                    StsFederationTestFixtures.oidcClaims(issuer, "https://expected.aud",
+                            "mallory", NOW, 600, Map.of()), rotatedKey.getPrivate());
+            assertInvalidGrant(() -> discoveryVerifier.verify(badJwt, provider, PROVIDER_NAME));
+            assertEquals(1, jwksFetches.get(), "bad token within cooldown should not refetch JWKS");
+
+            // After cooldown elapses, rotate JWKS to key-2; verifier should refresh once and accept key-2
+            currentTime.set(NOW.plus(OidcSubjectTokenVerifier.JWKS_REFRESH_COOLDOWN).plusSeconds(1));
             currentJwks.set(StsFederationTestFixtures.rsaJwksJson("key-2", (RSAPublicKey) rotatedKey.getPublic()));
             String jwt2 = StsFederationTestFixtures.signJwt("RS256", "key-2",
                     StsFederationTestFixtures.oidcClaims(issuer, "https://expected.aud",
                             "bob", NOW, 600, Map.of()), rotatedKey.getPrivate());
             assertEquals("bob", discoveryVerifier.verify(jwt2, provider, PROVIDER_NAME).get("sub"));
-            assertEquals(2, jwksFetches.get(), "key rotation should trigger one JWKS refresh");
+            assertEquals(2, jwksFetches.get(), "key rotation after cooldown should trigger one JWKS refresh");
 
             // Discovery issuer mismatch must be rejected
             String mismatchedIssuer = issuer + "/other";
@@ -177,6 +202,14 @@ class OidcSubjectTokenVerifierTest {
                     StsFederationTestFixtures.oidcClaims(mismatchedIssuer, "https://expected.aud",
                             "bob", NOW, 600, Map.of()), rotatedKey.getPrivate());
             assertInvalidGrant(() -> discoveryVerifier.verify(mismatchedJwt, mismatchedProvider, PROVIDER_NAME));
+
+            // Link-local metadata issuer must be rejected before connecting
+            String linkLocalIssuer = "http://169.254.169.254";
+            ObjectNode linkLocalProvider = oidcProvider(linkLocalIssuer, List.of("https://expected.aud"), "");
+            String linkLocalJwt = StsFederationTestFixtures.signJwt("RS256", "key-2",
+                    StsFederationTestFixtures.oidcClaims(linkLocalIssuer, "https://expected.aud",
+                            "bob", NOW, 600, Map.of()), rotatedKey.getPrivate());
+            assertInvalidGrant(() -> discoveryVerifier.verify(linkLocalJwt, linkLocalProvider, PROVIDER_NAME));
         } finally {
             server.stop(0);
         }

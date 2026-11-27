@@ -7,7 +7,9 @@ import jakarta.inject.Inject;
 
 import java.io.IOException;
 import java.math.BigInteger;
+import java.net.InetAddress;
 import java.net.URI;
+import java.net.UnknownHostException;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -47,11 +49,13 @@ public class OidcSubjectTokenVerifier {
     static final long MAX_CLOCK_SKEW_SECONDS = 300;
     private static final Duration HTTP_TIMEOUT = Duration.ofSeconds(5);
     private static final Duration JWKS_CACHE_TTL = Duration.ofMinutes(5);
+    static final Duration JWKS_REFRESH_COOLDOWN = Duration.ofSeconds(30);
 
     private final ObjectMapper mapper;
     private final Clock clock;
     private final HttpClient httpClient;
     private final ConcurrentHashMap<String, CachedJwks> discoveredJwksCache = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Object> refreshLocks = new ConcurrentHashMap<>();
 
     @Inject
     public OidcSubjectTokenVerifier(ObjectMapper mapper) {
@@ -71,7 +75,7 @@ public class OidcSubjectTokenVerifier {
     private static HttpClient defaultHttpClient() {
         return HttpClient.newBuilder()
                 .connectTimeout(HTTP_TIMEOUT)
-                .followRedirects(HttpClient.Redirect.NORMAL)
+                .followRedirects(HttpClient.Redirect.NEVER)
                 .build();
     }
 
@@ -206,15 +210,15 @@ public class OidcSubjectTokenVerifier {
             throw new StsException("invalid_grant", "Invalid JWT signature.");
         }
 
-        boolean fromCache = isCachedAndFresh(issuerUri);
-        List<JwkKey> keys = resolveDiscoveredJwks(issuerUri, false);
-        if (verifyWithKeys(keys, alg, jcaAlg, kid, signedInput, signature)) {
+        CachedJwks initial = resolveDiscoveredJwks(issuerUri, false);
+        if (verifyWithKeys(initial.keys(), alg, jcaAlg, kid, signedInput, signature)) {
             return;
         }
-        // Retry once with a fresh discovery fetch if the cached JWKS may have rotated keys.
-        if (fromCache) {
-            List<JwkKey> refreshed = resolveDiscoveredJwks(issuerUri, true);
-            if (verifyWithKeys(refreshed, alg, jcaAlg, kid, signedInput, signature)) {
+        // Retry once with a fresh discovery fetch if the cached JWKS is past cooldown and may have rotated.
+        if (canRefresh(initial)) {
+            CachedJwks refreshed = resolveDiscoveredJwks(issuerUri, true);
+            if (refreshed != initial
+                    && verifyWithKeys(refreshed.keys(), alg, jcaAlg, kid, signedInput, signature)) {
                 return;
             }
         }
@@ -262,45 +266,54 @@ public class OidcSubjectTokenVerifier {
         return false;
     }
 
-    private boolean isCachedAndFresh(String issuerUri) {
-        CachedJwks cached = discoveredJwksCache.get(issuerUri);
-        return cached != null && cached.expiresAt().isAfter(clock.instant());
+    private boolean canRefresh(CachedJwks cached) {
+        return !clock.instant().isBefore(cached.fetchedAt().plus(JWKS_REFRESH_COOLDOWN));
     }
 
-    private List<JwkKey> resolveDiscoveredJwks(String issuerUri, boolean forceRefresh) {
+    private CachedJwks resolveDiscoveredJwks(String issuerUri, boolean forceRefresh) {
         Instant now = clock.instant();
-        if (!forceRefresh) {
-            CachedJwks cached = discoveredJwksCache.get(issuerUri);
-            if (cached != null && cached.expiresAt().isAfter(now)) {
-                return cached.keys();
+        CachedJwks cached = discoveredJwksCache.get(issuerUri);
+        if (cached != null && cached.expiresAt().isAfter(now)
+                && (!forceRefresh || !canRefresh(cached))) {
+            return cached;
+        }
+        Object lock = refreshLocks.computeIfAbsent(issuerUri, key -> new Object());
+        synchronized (lock) {
+            now = clock.instant();
+            cached = discoveredJwksCache.get(issuerUri);
+            if (cached != null && cached.expiresAt().isAfter(now)
+                    && (!forceRefresh || !canRefresh(cached))) {
+                return cached;
             }
+            URI discoveryUri = buildDiscoveryUri(issuerUri);
+            String discoveryBody = fetchHttpGet(discoveryUri, "OIDC discovery document");
+            JsonNode discovery;
+            try {
+                discovery = mapper.readTree(discoveryBody);
+            } catch (IOException e) {
+                throw new StsException("invalid_grant", "Invalid OIDC discovery document JSON.");
+            }
+            if (discovery == null || !discovery.isObject()) {
+                throw new StsException("invalid_grant", "Invalid OIDC discovery document JSON.");
+            }
+            String discoveredIssuer = discovery.path("issuer").asText("");
+            if (!discoveredIssuer.isBlank() && !discoveredIssuer.equals(issuerUri)) {
+                throw new StsException("invalid_grant",
+                        "OIDC discovery issuer does not match provider issuerUri.");
+            }
+            String jwksUriText = discovery.path("jwks_uri").asText("");
+            if (jwksUriText.isBlank()) {
+                throw new StsException("invalid_grant",
+                        "OIDC discovery document is missing jwks_uri.");
+            }
+            boolean requireHttps = "https".equalsIgnoreCase(discoveryUri.getScheme());
+            URI jwksUri = parseDiscoveryUri(jwksUriText, "OIDC jwks_uri", requireHttps);
+            String jwksBody = fetchHttpGet(jwksUri, "OIDC JWKS");
+            List<JwkKey> keys = parseJwks(jwksBody);
+            CachedJwks updated = new CachedJwks(List.copyOf(keys), now, now.plus(JWKS_CACHE_TTL));
+            discoveredJwksCache.put(issuerUri, updated);
+            return updated;
         }
-        URI discoveryUri = buildDiscoveryUri(issuerUri);
-        String discoveryBody = fetchHttpGet(discoveryUri, "OIDC discovery document");
-        JsonNode discovery;
-        try {
-            discovery = mapper.readTree(discoveryBody);
-        } catch (IOException e) {
-            throw new StsException("invalid_grant", "Invalid OIDC discovery document JSON.");
-        }
-        if (discovery == null || !discovery.isObject()) {
-            throw new StsException("invalid_grant", "Invalid OIDC discovery document JSON.");
-        }
-        String discoveredIssuer = discovery.path("issuer").asText("");
-        if (!discoveredIssuer.isBlank() && !discoveredIssuer.equals(issuerUri)) {
-            throw new StsException("invalid_grant",
-                    "OIDC discovery issuer does not match provider issuerUri.");
-        }
-        String jwksUriText = discovery.path("jwks_uri").asText("");
-        if (jwksUriText.isBlank()) {
-            throw new StsException("invalid_grant",
-                    "OIDC discovery document is missing jwks_uri.");
-        }
-        URI jwksUri = parseHttpUri(jwksUriText, "OIDC jwks_uri");
-        String jwksBody = fetchHttpGet(jwksUri, "OIDC JWKS");
-        List<JwkKey> keys = parseJwks(jwksBody);
-        discoveredJwksCache.put(issuerUri, new CachedJwks(List.copyOf(keys), now.plus(JWKS_CACHE_TTL)));
-        return keys;
     }
 
     private static URI buildDiscoveryUri(String issuerUri) {
@@ -309,10 +322,10 @@ public class OidcSubjectTokenVerifier {
                     "OIDC provider has no jwksJson or discoverable issuerUri configured.");
         }
         String base = issuerUri.endsWith("/") ? issuerUri.substring(0, issuerUri.length() - 1) : issuerUri;
-        return parseHttpUri(base + "/.well-known/openid-configuration", "OIDC discovery URI");
+        return parseDiscoveryUri(base + "/.well-known/openid-configuration", "OIDC discovery URI", false);
     }
 
-    private static URI parseHttpUri(String rawUri, String label) {
+    private static URI parseDiscoveryUri(String rawUri, String label, boolean requireHttps) {
         URI uri;
         try {
             uri = URI.create(rawUri);
@@ -320,11 +333,28 @@ public class OidcSubjectTokenVerifier {
             throw new StsException("invalid_grant", "Invalid " + label + ".");
         }
         String scheme = uri.getScheme();
-        if ((!"http".equalsIgnoreCase(scheme) && !"https".equalsIgnoreCase(scheme))
-                || uri.getHost() == null || uri.getHost().isBlank()) {
+        boolean allowedScheme = requireHttps
+                ? "https".equalsIgnoreCase(scheme)
+                : ("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme));
+        if (!allowedScheme || uri.getHost() == null || uri.getHost().isBlank()) {
             throw new StsException("invalid_grant", "Invalid " + label + ".");
         }
+        validateHostAddress(uri.getHost(), label);
         return uri;
+    }
+
+    private static void validateHostAddress(String host, String label) {
+        try {
+            for (InetAddress address : InetAddress.getAllByName(host)) {
+                if (address.isLinkLocalAddress()
+                        || address.isAnyLocalAddress()
+                        || address.isMulticastAddress()) {
+                    throw new StsException("invalid_grant", "Disallowed host for " + label + ".");
+                }
+            }
+        } catch (UnknownHostException e) {
+            throw new StsException("invalid_grant", "Failed to resolve host for " + label + ".");
+        }
     }
 
     private String fetchHttpGet(URI uri, String label) {
@@ -488,6 +518,6 @@ public class OidcSubjectTokenVerifier {
     private record JwkKey(String kty, String kid, String alg, String crv, PublicKey publicKey) {
     }
 
-    private record CachedJwks(List<JwkKey> keys, Instant expiresAt) {
+    private record CachedJwks(List<JwkKey> keys, Instant fetchedAt, Instant expiresAt) {
     }
 }

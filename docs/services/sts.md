@@ -77,7 +77,9 @@ OIDC provider:
   verified against keys configured in the provider's inline `oidc.jwksJson`, or
   when `oidc.jwksJson` is omitted, fetched via OIDC discovery from
   `{issuerUri}/.well-known/openid-configuration` (`jwks_uri`) with a 5-minute
-  cache and automatic refresh on key rotation. `alg: none` is rejected.
+  cache, a 30-second per-issuer refresh cooldown on key rotation, no HTTP
+  redirects, no HTTPS-to-HTTP downgrade on `jwks_uri`, and link-local hosts
+  blocked. `alg: none` is rejected.
 
 #### AWS `aws4_request` verification
 
@@ -145,11 +147,11 @@ expired Floci-issued source tokens are rejected with `invalid_grant`.
 
 ## Scope and deviations
 
-- **Intentionally simulated OIDC key discovery**: floci-gcp does not perform
-  outbound HTTP requests to fetch `/.well-known/openid-configuration` or remote
-  JWKS URLs. OIDC providers must supply their verification keys inline in
-  `oidc.jwksJson`; tokens targeting an OIDC provider without `jwksJson` are
-  rejected.
+- **Local HTTP OIDC discovery**: Unlike Google Cloud STS (which requires HTTPS
+  issuers), floci-gcp allows `http://` OIDC `issuerUri` values so local test
+  identity providers work without TLS setup. When `issuerUri` uses `https://`,
+  the discovered `jwks_uri` must also use `https://`. HTTP redirects are
+  disabled and link-local addresses are rejected.
 - **Intentionally simulated AWS SigV4 verification**: floci-gcp does not call
   live AWS STS (`sts.amazonaws.com`) to verify the HMAC signature against AWS
   IAM credentials. It validates the signed `GetCallerIdentity` request

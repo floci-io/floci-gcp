@@ -1689,6 +1689,7 @@ class PubSubServiceTest {
         }
     }
 
+    private final List<Long> pushArrivalsNanos = Collections.synchronizedList(new ArrayList<>());
     private final CountDownLatch releasePushHandlers = new CountDownLatch(1);
     private ExecutorService pushServerExecutor;
 
@@ -1699,6 +1700,7 @@ class PubSubServiceTest {
         server.setExecutor(pushServerExecutor);
         server.createContext("/hook", exchange -> {
             hits.incrementAndGet();
+            pushArrivalsNanos.add(System.nanoTime());
             try {
                 exchange.getRequestBody().readAllBytes();
                 if (holdMs > 0) {
@@ -1736,18 +1738,13 @@ class PubSubServiceTest {
         assertTrue(retryExecutor.delays.size() >= count, "retries scheduled: " + retryExecutor.delays);
     }
 
-    /** Waits until the message's push ends, returning the most deliveries of it ever pending at once. */
-    private int awaitPushSettled(String messageId) throws InterruptedException {
+    private void awaitPushSettled(String messageId) throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-        int maxPending = 0;
-        int pending = service.pendingPushDeliveries("projects/p1/subscriptions/push", messageId);
-        while (pending != 0 && System.nanoTime() < deadline) {
-            maxPending = Math.max(maxPending, pending);
+        while (service.pendingPushDeliveries("projects/p1/subscriptions/push", messageId) != 0
+                && System.nanoTime() < deadline) {
             Thread.sleep(5);
-            pending = service.pendingPushDeliveries("projects/p1/subscriptions/push", messageId);
         }
-        assertEquals(0, pending);
-        return maxPending;
+        assertEquals(0, service.pendingPushDeliveries("projects/p1/subscriptions/push", messageId));
     }
 
     private String publishAndGetId(String data) {
@@ -1842,10 +1839,13 @@ class PubSubServiceTest {
 
             // act
             String messageId = publishAndGetId("m");
-            int maxPending = awaitPushSettled(messageId);
+            awaitPushSettled(messageId);
 
             // assert
-            assertEquals(1, maxPending, "never delivered twice at once");
+            // The handler holds far longer than the timeout, so a retry sent before the timeout would arrive sooner.
+            assertEquals(2, pushArrivalsNanos.size());
+            assertTrue(pushArrivalsNanos.get(1) - pushArrivalsNanos.get(0) >= Duration.ofMillis(200).toNanos(),
+                    "the retry waited for the previous attempt to time out");
             assertEquals(1, retryExecutor.delays.size(), "the first timeout was retried");
             ReceivedMessage dead = pullOne("projects/p1/subscriptions/dlq-sub");
             assertEquals("2", dead.getMessage().getAttributesMap().get("CloudPubSubDeadLetterSourceDeliveryCount"));

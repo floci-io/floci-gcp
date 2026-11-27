@@ -326,7 +326,8 @@ dead-letter policy, the message is forwarded to the dead-letter topic once it ha
 A snapshot keeps what its subscription had not acknowledged when it was created, plus every message
 published to the topic afterwards. Seeking a subscription on the same topic to it makes exactly those
 messages unacknowledged again, through the seeking subscription's filter; a push subscription gets them
-pushed again. A message still waiting in the subscription keeps its delivery attempt count.
+pushed again. A message still waiting in the subscription keeps its delivery attempt count; a push
+redelivery after a seek starts counting its attempts again from one.
 
 A snapshot expires 7 days after the oldest unacknowledged message it captured (7 days after creation
 when there was none), and `CreateSnapshot` fails with `FAILED_PRECONDITION` when that is less than an

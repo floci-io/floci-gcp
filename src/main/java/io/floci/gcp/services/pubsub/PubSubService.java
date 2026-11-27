@@ -674,7 +674,7 @@ public class PubSubService {
     }
 
     private void schedulePushRetry(StoredSubscription subscription, StoredMessage message, int attempt) {
-        Duration delay = SubscriptionRetryPolicy.pushBackoff(subscription.getRetryPolicy(), attempt);
+        long delayMillis = SubscriptionRetryPolicy.pushBackoffMillis(subscription.getRetryPolicy(), attempt);
         pushRetryExecutor.schedule(() -> {
             Optional<StoredSubscription> current = subStore.get(subscription.getName());
 
@@ -688,7 +688,7 @@ public class PubSubService {
 
             pushDeliveryExecutor.submit(
                     () -> deliverPushMessage(current.get(), message, attempt + 1));
-        }, delay.toMillis(), TimeUnit.MILLISECONDS);
+        }, delayMillis, TimeUnit.MILLISECONDS);
     }
 
     // A mask makes "filter" itself the trigger, as in GCP. Without a mask GCP rejects the request

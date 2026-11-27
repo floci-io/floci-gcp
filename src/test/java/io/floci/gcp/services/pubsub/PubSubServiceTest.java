@@ -1689,21 +1689,36 @@ class PubSubServiceTest {
         }
     }
 
+    private final CountDownLatch releasePushHandlers = new CountDownLatch(1);
+    private ExecutorService pushServerExecutor;
+
+    // A handler holding for holdMs waits on a latch that cleanup releases, so none outlives the test.
     private HttpServer failingPushServer(AtomicInteger hits, long holdMs) throws Exception {
+        pushServerExecutor = Executors.newCachedThreadPool();
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.setExecutor(pushServerExecutor);
         server.createContext("/hook", exchange -> {
             hits.incrementAndGet();
-            exchange.getRequestBody().readAllBytes();
             try {
-                Thread.sleep(holdMs);
+                exchange.getRequestBody().readAllBytes();
+                if (holdMs > 0) {
+                    releasePushHandlers.await(holdMs, TimeUnit.MILLISECONDS);
+                }
                 exchange.sendResponseHeaders(503, -1);
             } catch (InterruptedException | java.io.IOException ignored) {
                 // The client gave up on this request.
+            } finally {
+                exchange.close();
             }
-            exchange.close();
         });
         server.start();
         return server;
+    }
+
+    private void stopPushServer(HttpServer server) {
+        releasePushHandlers.countDown();
+        server.stop(0);
+        pushServerExecutor.shutdownNow();
     }
 
     private void createPushSubscription(HttpServer server, Map<String, Object> retryPolicy,
@@ -1721,13 +1736,18 @@ class PubSubServiceTest {
         assertTrue(retryExecutor.delays.size() >= count, "retries scheduled: " + retryExecutor.delays);
     }
 
-    private void awaitPushSettled(String messageId) throws InterruptedException {
+    /** Waits until the message's push ends, returning the most deliveries of it ever pending at once. */
+    private int awaitPushSettled(String messageId) throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-        while (service.pendingPushDeliveries("projects/p1/subscriptions/push", messageId) != 0
-                && System.nanoTime() < deadline) {
-            Thread.sleep(10);
+        int maxPending = 0;
+        int pending = service.pendingPushDeliveries("projects/p1/subscriptions/push", messageId);
+        while (pending != 0 && System.nanoTime() < deadline) {
+            maxPending = Math.max(maxPending, pending);
+            Thread.sleep(5);
+            pending = service.pendingPushDeliveries("projects/p1/subscriptions/push", messageId);
         }
-        assertEquals(0, service.pendingPushDeliveries("projects/p1/subscriptions/push", messageId));
+        assertEquals(0, pending);
+        return maxPending;
     }
 
     private String publishAndGetId(String data) {
@@ -1751,10 +1771,10 @@ class PubSubServiceTest {
             // assert
             assertEquals(List.of(Duration.ofSeconds(10), Duration.ofSeconds(20), Duration.ofSeconds(40)),
                     List.copyOf(retryExecutor.delays).subList(0, 3));
-            assertEquals(Duration.ofSeconds(600), SubscriptionRetryPolicy.pushBackoff(
+            assertEquals(600_000L, SubscriptionRetryPolicy.pushBackoffMillis(
                     Map.of("minimumBackoff", "10s", "maximumBackoff", "600s"), 200));
         } finally {
-            server.stop(0);
+            stopPushServer(server);
         }
     }
 
@@ -1774,7 +1794,7 @@ class PubSubServiceTest {
             // assert
             assertEquals(Duration.ofSeconds(10), retryExecutor.delays.get(0));
         } finally {
-            server.stop(0);
+            stopPushServer(server);
         }
     }
 
@@ -1803,7 +1823,7 @@ class PubSubServiceTest {
             assertEquals(5, hits.get(), "no further push after dead-lettering");
             assertEquals(0, service.pendingPushDeliveries("projects/p1/subscriptions/push", messageId));
         } finally {
-            server.stop(0);
+            stopPushServer(server);
         }
     }
 
@@ -1822,14 +1842,15 @@ class PubSubServiceTest {
 
             // act
             String messageId = publishAndGetId("m");
-            awaitPushSettled(messageId);
+            int maxPending = awaitPushSettled(messageId);
 
             // assert
+            assertEquals(1, maxPending, "never delivered twice at once");
             assertEquals(1, retryExecutor.delays.size(), "the first timeout was retried");
             ReceivedMessage dead = pullOne("projects/p1/subscriptions/dlq-sub");
             assertEquals("2", dead.getMessage().getAttributesMap().get("CloudPubSubDeadLetterSourceDeliveryCount"));
         } finally {
-            server.stop(0);
+            stopPushServer(server);
         }
     }
 
@@ -1851,7 +1872,7 @@ class PubSubServiceTest {
             // assert
             assertEquals(2, hits.get());
         } finally {
-            server.stop(0);
+            stopPushServer(server);
         }
     }
 

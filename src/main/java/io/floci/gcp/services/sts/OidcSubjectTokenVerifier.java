@@ -7,6 +7,10 @@ import jakarta.inject.Inject;
 
 import java.io.IOException;
 import java.math.BigInteger;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.security.AlgorithmParameters;
 import java.security.GeneralSecurityException;
@@ -19,6 +23,8 @@ import java.security.spec.ECPoint;
 import java.security.spec.ECPublicKeySpec;
 import java.security.spec.RSAPublicKeySpec;
 import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Iterator;
@@ -27,28 +33,46 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Verifies external OIDC/JWT subject tokens ({@code urn:ietf:params:oauth:token-type:jwt} and
  * {@code urn:ietf:params:oauth:token-type:id_token}) against a Workload Identity Pool OIDC
- * provider's issuer, allowed audiences, timeframe, and inline {@code oidc.jwksJson}.
+ * provider's issuer, allowed audiences, timeframe, and inline {@code oidc.jwksJson} or OIDC
+ * discovery ({@code /.well-known/openid-configuration} -> {@code jwks_uri}).
  */
 @ApplicationScoped
 public class OidcSubjectTokenVerifier {
 
     static final long MAX_CLOCK_SKEW_SECONDS = 300;
+    private static final Duration HTTP_TIMEOUT = Duration.ofSeconds(5);
+    private static final Duration JWKS_CACHE_TTL = Duration.ofMinutes(5);
 
     private final ObjectMapper mapper;
     private final Clock clock;
+    private final HttpClient httpClient;
+    private final ConcurrentHashMap<String, CachedJwks> discoveredJwksCache = new ConcurrentHashMap<>();
 
     @Inject
     public OidcSubjectTokenVerifier(ObjectMapper mapper) {
-        this(mapper, Clock.systemUTC());
+        this(mapper, Clock.systemUTC(), defaultHttpClient());
     }
 
     OidcSubjectTokenVerifier(ObjectMapper mapper, Clock clock) {
+        this(mapper, clock, defaultHttpClient());
+    }
+
+    OidcSubjectTokenVerifier(ObjectMapper mapper, Clock clock, HttpClient httpClient) {
         this.mapper = mapper;
         this.clock = clock;
+        this.httpClient = httpClient;
+    }
+
+    private static HttpClient defaultHttpClient() {
+        return HttpClient.newBuilder()
+                .connectTimeout(HTTP_TIMEOUT)
+                .followRedirects(HttpClient.Redirect.NORMAL)
+                .build();
     }
 
     public Map<String, Object> verify(String subjectToken, JsonNode provider, String canonicalProviderName) {
@@ -77,11 +101,12 @@ public class OidcSubjectTokenVerifier {
             throw new StsException("invalid_grant", "Malformed JWT subject_token.");
         }
 
-        verifyIssuer(claims, oidc.path("issuerUri").asText(""));
+        String issuerUri = oidc.path("issuerUri").asText("");
+        verifyIssuer(claims, issuerUri);
         verifyAudience(claims, oidc.get("allowedAudiences"), canonicalProviderName);
         verifyTimeframe(claims);
         verifySignature(header, (parts[0] + "." + parts[1]).getBytes(StandardCharsets.US_ASCII),
-                signature, oidc.path("jwksJson").asText(""));
+                signature, issuerUri, oidc.path("jwksJson").asText(""));
 
         return toAssertionMap(claims);
     }
@@ -164,19 +189,40 @@ public class OidcSubjectTokenVerifier {
         }
     }
 
-    private void verifySignature(JsonNode header, byte[] signedInput, byte[] signature, String jwksJson) {
+    private void verifySignature(JsonNode header, byte[] signedInput, byte[] signature,
+            String issuerUri, String jwksJson) {
         String alg = header.path("alg").asText("");
         String jcaAlg = jcaAlgorithm(alg);
         if (jcaAlg == null) {
             throw new StsException("invalid_grant", "Unsupported JWT signing algorithm: " + alg);
         }
-        if (jwksJson == null || jwksJson.isBlank()) {
-            throw new StsException("invalid_grant",
-                    "OIDC provider has no jwksJson configured for signature verification.");
+        String kid = header.path("kid").isTextual() ? header.get("kid").asText() : null;
+
+        if (jwksJson != null && !jwksJson.isBlank()) {
+            List<JwkKey> keys = parseJwks(jwksJson);
+            if (verifyWithKeys(keys, alg, jcaAlg, kid, signedInput, signature)) {
+                return;
+            }
+            throw new StsException("invalid_grant", "Invalid JWT signature.");
         }
 
-        List<JwkKey> keys = parseJwks(jwksJson);
-        String kid = header.path("kid").isTextual() ? header.get("kid").asText() : null;
+        boolean fromCache = isCachedAndFresh(issuerUri);
+        List<JwkKey> keys = resolveDiscoveredJwks(issuerUri, false);
+        if (verifyWithKeys(keys, alg, jcaAlg, kid, signedInput, signature)) {
+            return;
+        }
+        // Retry once with a fresh discovery fetch if the cached JWKS may have rotated keys.
+        if (fromCache) {
+            List<JwkKey> refreshed = resolveDiscoveredJwks(issuerUri, true);
+            if (verifyWithKeys(refreshed, alg, jcaAlg, kid, signedInput, signature)) {
+                return;
+            }
+        }
+        throw new StsException("invalid_grant", "Invalid JWT signature.");
+    }
+
+    private static boolean verifyWithKeys(List<JwkKey> keys, String alg, String jcaAlg, String kid,
+            byte[] signedInput, byte[] signature) {
         String requiredKty = alg.startsWith("RS") ? "RSA" : "EC";
         String requiredCrv = expectedEcCurve(alg);
 
@@ -206,14 +252,101 @@ public class OidcSubjectTokenVerifier {
                 verifier.initVerify(candidate.publicKey());
                 verifier.update(signedInput);
                 if (verifier.verify(signature)) {
-                    return;
+                    return true;
                 }
             } catch (GeneralSecurityException expected) {
                 // Signature does not verify with this candidate key; try remaining keys.
                 continue;
             }
         }
-        throw new StsException("invalid_grant", "Invalid JWT signature.");
+        return false;
+    }
+
+    private boolean isCachedAndFresh(String issuerUri) {
+        CachedJwks cached = discoveredJwksCache.get(issuerUri);
+        return cached != null && cached.expiresAt().isAfter(clock.instant());
+    }
+
+    private List<JwkKey> resolveDiscoveredJwks(String issuerUri, boolean forceRefresh) {
+        Instant now = clock.instant();
+        if (!forceRefresh) {
+            CachedJwks cached = discoveredJwksCache.get(issuerUri);
+            if (cached != null && cached.expiresAt().isAfter(now)) {
+                return cached.keys();
+            }
+        }
+        URI discoveryUri = buildDiscoveryUri(issuerUri);
+        String discoveryBody = fetchHttpGet(discoveryUri, "OIDC discovery document");
+        JsonNode discovery;
+        try {
+            discovery = mapper.readTree(discoveryBody);
+        } catch (IOException e) {
+            throw new StsException("invalid_grant", "Invalid OIDC discovery document JSON.");
+        }
+        if (discovery == null || !discovery.isObject()) {
+            throw new StsException("invalid_grant", "Invalid OIDC discovery document JSON.");
+        }
+        String discoveredIssuer = discovery.path("issuer").asText("");
+        if (!discoveredIssuer.isBlank() && !discoveredIssuer.equals(issuerUri)) {
+            throw new StsException("invalid_grant",
+                    "OIDC discovery issuer does not match provider issuerUri.");
+        }
+        String jwksUriText = discovery.path("jwks_uri").asText("");
+        if (jwksUriText.isBlank()) {
+            throw new StsException("invalid_grant",
+                    "OIDC discovery document is missing jwks_uri.");
+        }
+        URI jwksUri = parseHttpUri(jwksUriText, "OIDC jwks_uri");
+        String jwksBody = fetchHttpGet(jwksUri, "OIDC JWKS");
+        List<JwkKey> keys = parseJwks(jwksBody);
+        discoveredJwksCache.put(issuerUri, new CachedJwks(List.copyOf(keys), now.plus(JWKS_CACHE_TTL)));
+        return keys;
+    }
+
+    private static URI buildDiscoveryUri(String issuerUri) {
+        if (issuerUri == null || issuerUri.isBlank()) {
+            throw new StsException("invalid_grant",
+                    "OIDC provider has no jwksJson or discoverable issuerUri configured.");
+        }
+        String base = issuerUri.endsWith("/") ? issuerUri.substring(0, issuerUri.length() - 1) : issuerUri;
+        return parseHttpUri(base + "/.well-known/openid-configuration", "OIDC discovery URI");
+    }
+
+    private static URI parseHttpUri(String rawUri, String label) {
+        URI uri;
+        try {
+            uri = URI.create(rawUri);
+        } catch (IllegalArgumentException e) {
+            throw new StsException("invalid_grant", "Invalid " + label + ".");
+        }
+        String scheme = uri.getScheme();
+        if ((!"http".equalsIgnoreCase(scheme) && !"https".equalsIgnoreCase(scheme))
+                || uri.getHost() == null || uri.getHost().isBlank()) {
+            throw new StsException("invalid_grant", "Invalid " + label + ".");
+        }
+        return uri;
+    }
+
+    private String fetchHttpGet(URI uri, String label) {
+        HttpRequest request = HttpRequest.newBuilder(uri)
+                .GET()
+                .timeout(HTTP_TIMEOUT)
+                .header("Accept", "application/json")
+                .build();
+        try {
+            HttpResponse<String> response = httpClient.send(request,
+                    HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                throw new StsException("invalid_grant",
+                        "Failed to fetch " + label + " (HTTP " + response.statusCode() + ").");
+            }
+            return response.body();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new StsException("invalid_grant", "Interrupted while fetching " + label + ".");
+        } catch (IOException e) {
+            throw new StsException("invalid_grant", "Failed to fetch " + label + ": " + e.getMessage());
+        }
     }
 
     private List<JwkKey> parseJwks(String jwksJson) {
@@ -353,5 +486,8 @@ public class OidcSubjectTokenVerifier {
     }
 
     private record JwkKey(String kty, String kid, String alg, String crv, PublicKey publicKey) {
+    }
+
+    private record CachedJwks(List<JwkKey> keys, Instant expiresAt) {
     }
 }

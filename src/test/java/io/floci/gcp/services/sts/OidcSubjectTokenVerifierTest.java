@@ -3,8 +3,12 @@ package io.floci.gcp.services.sts;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyPair;
 import java.security.interfaces.ECPublicKey;
@@ -15,6 +19,8 @@ import java.time.ZoneOffset;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -106,12 +112,74 @@ class OidcSubjectTokenVerifierTest {
                         + (NOW.getEpochSecond() + 600) + "}").getBytes(StandardCharsets.UTF_8));
         assertInvalidGrant(() -> verifier.verify(algNoneHeader + "." + claimsPart + ".", provider, PROVIDER_NAME));
 
-        // Missing jwksJson
-        ObjectNode noJwksProvider = oidcProvider(ISSUER, List.of("https://expected.aud"), "");
+        // Missing jwksJson with non-HTTP issuer cannot discover JWKS
+        String nonHttpIssuer = "urn:example:issuer";
+        ObjectNode noJwksProvider = oidcProvider(nonHttpIssuer, List.of("https://expected.aud"), "");
         String validJwt = StsFederationTestFixtures.signJwt("RS256", "rsa-1",
-                StsFederationTestFixtures.oidcClaims(ISSUER, "https://expected.aud",
+                StsFederationTestFixtures.oidcClaims(nonHttpIssuer, "https://expected.aud",
                         "u", NOW, 600, Map.of()), kp.getPrivate());
         assertInvalidGrant(() -> verifier.verify(validJwt, noJwksProvider, PROVIDER_NAME));
+    }
+
+    @Test
+    void verifiesJwtViaOidcDiscoveryAndRefreshesOnKeyRotation() throws IOException {
+        KeyPair firstKey = StsFederationTestFixtures.generateRsaKeyPair();
+        KeyPair rotatedKey = StsFederationTestFixtures.generateRsaKeyPair();
+        AtomicReference<String> currentJwks = new AtomicReference<>(
+                StsFederationTestFixtures.rsaJwksJson("key-1", (RSAPublicKey) firstKey.getPublic()));
+        AtomicInteger jwksFetches = new AtomicInteger();
+
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        String issuer = "http://127.0.0.1:" + server.getAddress().getPort();
+        String discoveryJson = "{\"issuer\":\"" + issuer + "\",\"jwks_uri\":\"" + issuer + "/jwks\"}";
+        server.createContext("/.well-known/openid-configuration", exchange -> {
+            byte[] body = discoveryJson.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().add("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, body.length);
+            try (OutputStream out = exchange.getResponseBody()) {
+                out.write(body);
+            }
+        });
+        server.createContext("/jwks", exchange -> {
+            jwksFetches.incrementAndGet();
+            byte[] body = currentJwks.get().getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().add("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, body.length);
+            try (OutputStream out = exchange.getResponseBody()) {
+                out.write(body);
+            }
+        });
+        server.start();
+        try {
+            OidcSubjectTokenVerifier discoveryVerifier =
+                    new OidcSubjectTokenVerifier(mapper, Clock.fixed(NOW, ZoneOffset.UTC));
+            ObjectNode provider = oidcProvider(issuer, List.of("https://expected.aud"), "");
+
+            String jwt1 = StsFederationTestFixtures.signJwt("RS256", "key-1",
+                    StsFederationTestFixtures.oidcClaims(issuer, "https://expected.aud",
+                            "alice", NOW, 600, Map.of()), firstKey.getPrivate());
+            assertEquals("alice", discoveryVerifier.verify(jwt1, provider, PROVIDER_NAME).get("sub"));
+            assertEquals("alice", discoveryVerifier.verify(jwt1, provider, PROVIDER_NAME).get("sub"));
+            assertEquals(1, jwksFetches.get(), "second verification should use cached JWKS");
+
+            // Rotate JWKS to key-2; verifier should refresh once and accept key-2
+            currentJwks.set(StsFederationTestFixtures.rsaJwksJson("key-2", (RSAPublicKey) rotatedKey.getPublic()));
+            String jwt2 = StsFederationTestFixtures.signJwt("RS256", "key-2",
+                    StsFederationTestFixtures.oidcClaims(issuer, "https://expected.aud",
+                            "bob", NOW, 600, Map.of()), rotatedKey.getPrivate());
+            assertEquals("bob", discoveryVerifier.verify(jwt2, provider, PROVIDER_NAME).get("sub"));
+            assertEquals(2, jwksFetches.get(), "key rotation should trigger one JWKS refresh");
+
+            // Discovery issuer mismatch must be rejected
+            String mismatchedIssuer = issuer + "/other";
+            ObjectNode mismatchedProvider = oidcProvider(mismatchedIssuer, List.of("https://expected.aud"), "");
+            String mismatchedJwt = StsFederationTestFixtures.signJwt("RS256", "key-2",
+                    StsFederationTestFixtures.oidcClaims(mismatchedIssuer, "https://expected.aud",
+                            "bob", NOW, 600, Map.of()), rotatedKey.getPrivate());
+            assertInvalidGrant(() -> discoveryVerifier.verify(mismatchedJwt, mismatchedProvider, PROVIDER_NAME));
+        } finally {
+            server.stop(0);
+        }
     }
 
     @Test

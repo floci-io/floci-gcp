@@ -83,6 +83,15 @@ public class CredentialTokenService {
      */
     public MintedFederatedToken mintFederatedToken(String principal, List<String> principalSets,
             long lifetimeSeconds) {
+        return mintFederatedToken(principal, principalSets, List.of(), lifetimeSeconds);
+    }
+
+    /**
+     * Mints a federated access token, optionally constrained by Credential Access Boundary rules
+     * when {@code gcsRules} is non-empty.
+     */
+    public MintedFederatedToken mintFederatedToken(String principal, List<String> principalSets,
+            List<CredentialAccessBoundaryRule> gcsRules, long lifetimeSeconds) {
         if (principal == null || principal.isBlank()) {
             throw GcpException.invalidArgument("federated principal is required");
         }
@@ -91,15 +100,19 @@ public class CredentialTokenService {
         }
         Instant now = clock.instant();
         Instant expireTime = now.plusSeconds(lifetimeSeconds);
-        String tokenValue = FEDERATED_TOKEN_PREFIX + UUID.randomUUID();
+        boolean downscoped = gcsRules != null && !gcsRules.isEmpty();
+        String tokenValue = (downscoped ? DOWNSCOPED_TOKEN_PREFIX : FEDERATED_TOKEN_PREFIX) + UUID.randomUUID();
+        StoredCredentialToken.TokenKind kind = downscoped
+                ? StoredCredentialToken.TokenKind.DOWNSCOPED
+                : StoredCredentialToken.TokenKind.FEDERATED;
         StoredCredentialToken token = new StoredCredentialToken(
                 tokenValue,
-                StoredCredentialToken.TokenKind.FEDERATED,
+                kind,
                 expireTime,
                 null,
                 principal,
                 principalSets == null ? List.of() : principalSets,
-                List.of());
+                downscoped ? gcsRules : List.of());
         synchronized (issuanceLock) {
             tokenStore.put(tokenValue, token);
         }

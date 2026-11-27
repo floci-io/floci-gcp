@@ -102,10 +102,8 @@ public class StsService {
 
         return switch (subjectTokenType) {
             case ACCESS_TOKEN_TYPE -> exchangeDownscopedToken(subjectToken, options);
-            case JWT_TOKEN_TYPE, ID_TOKEN_TYPE -> exchangeExternalToken(
-                    subjectTokenType, subjectToken, audience, scope);
-            case AWS4_REQUEST_TOKEN_TYPE -> exchangeExternalToken(
-                    subjectTokenType, subjectToken, audience, scope);
+            case JWT_TOKEN_TYPE, ID_TOKEN_TYPE, AWS4_REQUEST_TOKEN_TYPE -> exchangeExternalToken(
+                    subjectTokenType, subjectToken, audience, scope, options);
             default -> throw invalidRequest("Unsupported subject_token_type: " + subjectTokenType);
         };
     }
@@ -133,7 +131,7 @@ public class StsService {
     }
 
     private Map<String, Object> exchangeExternalToken(String subjectTokenType, String subjectToken,
-            String audience, String scope) {
+            String audience, String scope, String options) {
         if (audience == null || audience.isBlank()) {
             throw invalidRequest("audience is required");
         }
@@ -179,8 +177,17 @@ public class StsService {
             principalSets.add("principalSet://" + poolPath + "/group/" + group);
         }
 
+        List<CredentialAccessBoundaryRule> gcsRules = List.of();
+        if (options != null && !options.isBlank()) {
+            try {
+                gcsRules = cabParser.parse(options);
+            } catch (GcpException e) {
+                throw invalidGrant(e.getMessage());
+            }
+        }
+
         CredentialTokenService.MintedFederatedToken minted = tokenService.mintFederatedToken(
-                principal, principalSets, CredentialTokenService.DEFAULT_LIFETIME_SECONDS);
+                principal, principalSets, gcsRules, CredentialTokenService.DEFAULT_LIFETIME_SECONDS);
 
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("access_token", minted.token().getTokenValue());

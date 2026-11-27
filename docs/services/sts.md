@@ -56,6 +56,7 @@ Validation failures return HTTP 400 with the OAuth error fields `error` and
 | `audience` | `//iam.googleapis.com/projects/{projectNumber}/locations/global/workloadIdentityPools/{poolId}/providers/{providerId}` (an `https://` prefix or project ID is also accepted) |
 | `subject_token` | Signed OIDC JWT or URL-encoded/raw JSON AWS SigV4 `GetCallerIdentity` request |
 | `scope` | Optional OAuth scope echoed in the response when present |
+| `options` | Optional JSON-encoded GCS Credential Access Boundary to downscope the minted federated token in one call |
 
 The target pool and provider must exist, be `ACTIVE`, and not be `disabled`.
 
@@ -73,8 +74,10 @@ OIDC provider:
   the future; `iat` (if present) must not be in the future (300-second clock
   skew leeway).
 - The JWS signature (`RS256`, `RS384`, `RS512`, `ES256`, `ES384`, `ES512`) is
-  verified against keys configured in the provider's inline `oidc.jwksJson`.
-  `alg: none` and missing `oidc.jwksJson` are rejected.
+  verified against keys configured in the provider's inline `oidc.jwksJson`, or
+  when `oidc.jwksJson` is omitted, fetched via OIDC discovery from
+  `{issuerUri}/.well-known/openid-configuration` (`jwks_uri`) with a 5-minute
+  cache and automatic refresh on key rotation. `alg: none` is rejected.
 
 #### AWS `aws4_request` verification
 

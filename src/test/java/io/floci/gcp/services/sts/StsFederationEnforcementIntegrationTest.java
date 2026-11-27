@@ -187,6 +187,39 @@ class StsFederationEnforcementIntegrationTest {
                 .then()
                 .statusCode(200)
                 .body(equalTo("hello federated world"));
+
+        // Single-step external exchange with CAB options mints a downscoped federated token
+        gcsService.putObject(bucket, "other/secret.txt", "text/plain",
+                "secret".getBytes(StandardCharsets.UTF_8), "http://localhost:4588");
+        String singleStepSubject = StsFederationTestFixtures.urlEncode(
+                StsFederationTestFixtures.awsSubjectTokenJson("us-east-1", "ASIAEXAMPLE", Instant.now(),
+                        audience, allowedRole + "/session-3"));
+        String singleStepToken = given()
+                .contentType("application/json")
+                .body(Map.of(
+                        "grant_type", StsService.TOKEN_EXCHANGE_GRANT_TYPE,
+                        "subject_token_type", StsService.AWS4_REQUEST_TOKEN_TYPE,
+                        "subject_token", singleStepSubject,
+                        "requested_token_type", StsService.ACCESS_TOKEN_TYPE,
+                        "audience", audience,
+                        "options", cab))
+                .when().post("/v1/token")
+                .then()
+                .statusCode(200)
+                .body("access_token", startsWith(CredentialTokenService.DOWNSCOPED_TOKEN_PREFIX))
+                .extract().path("access_token");
+
+        given()
+                .header("Authorization", "Bearer " + singleStepToken)
+                .when().get("/storage/v1/b/{bucket}/o/{object}?alt=media", bucket, "data/file.txt")
+                .then()
+                .statusCode(200)
+                .body(equalTo("hello federated world"));
+        given()
+                .header("Authorization", "Bearer " + singleStepToken)
+                .when().get("/storage/v1/b/{bucket}/o/{object}?alt=media", bucket, "other/secret.txt")
+                .then()
+                .statusCode(403);
     }
 
     private String exchangeOidc(KeyPair rsa, String kid, String sub, String repo, String audience) {

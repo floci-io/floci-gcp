@@ -5136,6 +5136,34 @@ class BigQueryDuckIntegrationTest {
 
     @Test
     @Order(5)
+    void unixTimestampFunctionsReturnNullForUntypedNull() {
+        query("""
+                {"query": "SELECT UNIX_SECONDS(NULL) AS s, UNIX_MILLIS(NULL) AS m, UNIX_MICROS(NULL) AS u, UNIX_DATE(NULL) AS d",
+                 "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .body("schema.fields.type",
+                        equalTo(Arrays.asList("INTEGER", "INTEGER", "INTEGER", "INTEGER")))
+                .body("rows[0].f.v", equalTo(Arrays.asList(null, null, null, null)));
+    }
+
+    @Test
+    @Order(6)
+    void unixTimestampFunctionsPreserveTimestampStringOffset() {
+        List<?> values = query("""
+                {"query": "SELECT UNIX_SECONDS('2026-01-01 05:00:01.5+05') AS s, UNIX_MILLIS('2026-01-01 05:00:01.5+05') AS m, UNIX_MICROS('2026-01-01 05:00:01.5+05') AS u",
+                 "useLegacySql": false}
+                """)
+                .then().statusCode(200)
+                .extract().jsonPath().getList("rows[0].f.v");
+
+        assertEquals(
+                Arrays.asList("1767225601", "1767225601500", "1767225601500000"),
+                values.stream().map(String::valueOf).toList());
+    }
+
+    @Test
+    @Order(5)
     void parsedTimestampZonesOverrideTheFallbackZone() {
         query(Map.of("query", """
                 SELECT

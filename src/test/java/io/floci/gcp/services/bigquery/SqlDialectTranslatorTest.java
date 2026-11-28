@@ -209,6 +209,22 @@ class SqlDialectTranslatorTest {
         assertTrue(using.contains("> '2014-09-27T12:30:00'"), using);
     }
 
+    @Test
+    void aStoredDatasetNamedLikeTheTemporaryMarkerKeepsItsColumnTypesInAScript() {
+        SqlDialectTranslator.QueryParameters a = new SqlDialectTranslator.QueryParameters(List.of(Map.of("name", "a",
+                "parameterType", Map.of("type", "STRING"), "parameterValue", Map.of("value", "2014-09-27t12:30:00"))),
+                "NAMED");
+        TableFieldSchema ts = new TableFieldSchema();
+        ts.setName("ts");
+        ts.setType("TIMESTAMP");
+        Function<SqlDialectTranslator.TableRef, List<TableFieldSchema>> fields =
+                ref -> ref.datasetId().equals("_floci_temporary") ? List.of(ts) : null;
+        String sql = SqlDialectTranslator.translateScript(
+                "SELECT COUNT(*) AS n FROM _floci_temporary.events WHERE ts > @a",
+                "test-project", "test-project", null, a, ref -> null, fields).sql();
+        assertTrue(sql.contains("'2014-09-27T12:30:00'"), sql);
+    }
+
     private static GcpException invalid(String sql) {
         GcpException e = assertThrows(GcpException.class, () -> translate(sql));
         assertEquals("invalidQuery", e.getReason());

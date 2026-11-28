@@ -464,6 +464,15 @@ final class SqlDialectTranslator {
                                              String defaultDatasetId, QueryParameters parameters,
                                              Function<TableRef, Set<String>> columnsOf,
                                              Function<TableRef, List<TableFieldSchema>> fieldsOf) {
+        return translateScript(sql, projectId, jobProjectId, defaultDatasetId, parameters, columnsOf, fieldsOf,
+                (querySql, tables, setupSql) -> null);
+    }
+
+    static ScriptTranslation translateScript(String sql, String projectId, String jobProjectId,
+                                             String defaultDatasetId, QueryParameters parameters,
+                                             Function<TableRef, Set<String>> columnsOf,
+                                             Function<TableRef, List<TableFieldSchema>> fieldsOf,
+                                             TemporaryTableDescriber describeTemporaryTable) {
         List<String> statements = splitScript(sql);
         if (statements.isEmpty()) {
             throw invalidQuery("Syntax error: Unexpected end of script");
@@ -479,6 +488,11 @@ final class SqlDialectTranslator {
         Set<String> temporaryFunctions = new LinkedHashSet<>();
         Map<String, List<Boolean>> numericFunctionParameters = new HashMap<>();
         StringBuilder setup = new StringBuilder();
+        // A temporary table's columns, learned from its column list or by describing its AS query, so a later
+        // statement types them the way it types a stored table's.
+        Map<String, List<TableFieldSchema>> temporaryTableFields = new HashMap<>();
+        Function<TableRef, List<TableFieldSchema>> scriptFields = ref -> TEMPORARY_TABLE_DATASET.equals(ref.datasetId())
+                ? temporaryTableFields.get(ref.tableId()) : fieldsOf.apply(ref);
         boolean needsUnicodeCaseFold = false;
         for (int i = 0; i < statements.size(); i++) {
             String statement = statements.get(i);
@@ -496,7 +510,7 @@ final class SqlDialectTranslator {
                 numericFunctionParameters.put(definition.name().toLowerCase(Locale.ROOT),
                         numericParameterPositions(statement));
                 Translation macro = translateTemporaryFunction(statement, projectId, jobProjectId, defaultDatasetId,
-                        parameters, temporaryTables, temporaryFunctions, numericFunctionParameters, fieldsOf);
+                        parameters, temporaryTables, temporaryFunctions, numericFunctionParameters, scriptFields);
                 setup.append(macro.sql()).append(";\n");
                 tables.addAll(macro.tables());
                 informationSchema.addAll(macro.informationSchema());
@@ -508,13 +522,23 @@ final class SqlDialectTranslator {
                     throw invalidQuery("A script must end with a query or DML statement.");
                 }
                 TemporaryTableTranslation temporary = translateTemporaryTable(statement, projectId, jobProjectId,
-                        defaultDatasetId, parameters, temporaryTables, columnsOf, fieldsOf, numericFunctionParameters);
+                        defaultDatasetId, parameters, temporaryTables, columnsOf, scriptFields,
+                        numericFunctionParameters);
                 Translation table = temporary.translation();
+                String setupBefore = setup.toString();
                 setup.append(table.sql()).append(";\n");
                 tables.addAll(table.tables());
                 informationSchema.addAll(table.informationSchema());
                 needsUnicodeCaseFold |= table.needsUnicodeCaseFold();
                 temporaryTables.add(temporary.name());
+                temporaryTableFields.remove(temporary.name());
+                List<TableFieldSchema> temporaryFields = !temporary.declaredFields().isEmpty()
+                        ? temporary.declaredFields()
+                        : temporary.querySql() == null ? null
+                        : describeTemporaryTable.describe(temporary.querySql(), Set.copyOf(tables), setupBefore);
+                if (temporaryFields != null) {
+                    temporaryTableFields.put(temporary.name(), temporaryFields);
+                }
                 continue;
             }
             String droppedTemporaryTable = droppedTemporaryTable(statement, temporaryTables);
@@ -524,13 +548,14 @@ final class SqlDialectTranslator {
                 }
                 setup.append("DROP TABLE ").append(DuckTypes.quoteIdentifier(droppedTemporaryTable)).append(";\n");
                 temporaryTables.remove(droppedTemporaryTable);
+                temporaryTableFields.remove(droppedTemporaryTable);
                 continue;
             }
             if (!last) {
                 String temporaryTarget = temporaryDmlTarget(statement, temporaryTables);
                 if (temporaryTarget != null) {
                     Translation mutation = translateDmlWithTemporaryTables(statement, projectId, jobProjectId,
-                            defaultDatasetId, parameters, temporaryTables, columnsOf, fieldsOf,
+                            defaultDatasetId, parameters, temporaryTables, columnsOf, scriptFields,
                             numericFunctionParameters);
                     setup.append(mutation.sql()).append(";\n");
                     tables.addAll(mutation.tables());
@@ -545,7 +570,8 @@ final class SqlDialectTranslator {
                             + "and DDL are not supported by the floci BigQuery emulator yet.");
                 }
                 Translation query = translateWithTemporaryTables(statement, projectId, jobProjectId,
-                        defaultDatasetId, parameters, temporaryTables, columnsOf, fieldsOf, numericFunctionParameters);
+                        defaultDatasetId, parameters, temporaryTables, columnsOf, scriptFields,
+                        numericFunctionParameters);
                 setup.append(query.sql()).append(";\n");
                 tables.addAll(query.tables());
                 informationSchema.addAll(query.informationSchema());
@@ -557,9 +583,9 @@ final class SqlDialectTranslator {
                     temporaryTarget != null ? "_floci_temporary" : defaultDatasetId, temporaryTables);
             Translation query = finalStatement.isDml()
                     ? translateDmlWithTemporaryTables(statement, projectId, jobProjectId, defaultDatasetId, parameters,
-                            temporaryTables, columnsOf, fieldsOf, numericFunctionParameters)
+                            temporaryTables, columnsOf, scriptFields, numericFunctionParameters)
                     : translateWithTemporaryTables(statement, projectId, jobProjectId, defaultDatasetId, parameters,
-                            temporaryTables, columnsOf, fieldsOf, numericFunctionParameters);
+                            temporaryTables, columnsOf, scriptFields, numericFunctionParameters);
             return new ScriptTranslation(query.sql(), setup.toString(), tablesWith(tables, query.tables()),
                     informationSchemaWith(informationSchema, query.informationSchema()),
                     needsUnicodeCaseFold || query.needsUnicodeCaseFold(), query.duplicateOutputNames(),
@@ -1118,7 +1144,24 @@ final class SqlDialectTranslator {
                 declaration.ifNotExists());
     }
 
-    private record TemporaryTableTranslation(String name, Translation translation) {}
+    /**
+     * A translated CREATE TEMP TABLE: its declared columns, or empty, and the translated AS query when the columns
+     * come only from it, so the script can learn the table's schema for later statements.
+     */
+    private record TemporaryTableTranslation(String name, Translation translation,
+                                             List<TableFieldSchema> declaredFields, String querySql) {}
+
+    /** Describes a temporary table's translated AS query, behind the setup the script has built so far, or null. */
+    @FunctionalInterface
+    interface TemporaryTableDescriber {
+        List<TableFieldSchema> describe(String querySql, Set<TableRef> tables, String setupSql);
+    }
+
+    /**
+     * The dataset a temporary table's sentinel {@link TableRef} names, so {@code fieldsOf} can answer for it. A dataset
+     * ID holds only letters, digits and underscores, so no stored dataset can have this name.
+     */
+    static final String TEMPORARY_TABLE_DATASET = "#temporary";
 
     private static boolean temporaryTable(String sql) {
         return temporaryDeclaration(sql, "TABLE") != null;
@@ -1319,7 +1362,7 @@ final class SqlDialectTranslator {
         }
         if (as < 0) {
             return new TemporaryTableTranslation(name,
-                    new Translation(translated.toString(), Set.of(), Set.of(), false));
+                    new Translation(translated.toString(), Set.of(), Set.of(), false), fields, null);
         }
         int queryStart = translator.nextSignificant(as + 1, translator.tokens.size());
         if (queryStart < 0) {
@@ -1345,7 +1388,7 @@ final class SqlDialectTranslator {
         }
         return new TemporaryTableTranslation(name,
                 new Translation(translated.toString(), query.tables(), query.informationSchema(),
-                        query.needsUnicodeCaseFold()));
+                        query.needsUnicodeCaseFold()), fields, fields.isEmpty() ? query.sql() : null);
     }
 
     private static String droppedTemporaryTable(String sql, Set<String> temporaryTables) {
@@ -12305,17 +12348,52 @@ final class SqlDialectTranslator {
      * matches of the same type are that column, also when one is REQUIRED and another NULLABLE; matches that differ
      * in type, or where only one is REPEATED, are left untyped.
      */
+    /** The sentinel reference of a temporary table named at {@code start} ({@code _SESSION.t} too), or null. */
+    private TableRef temporarySourceTable(int start) {
+        List<String> segments = new ArrayList<>();
+        int current = start;
+        while (current < tokens.size()) {
+            Token name = tokens.get(current);
+            if (name.kind == Kind.QIDENT) {
+                // A quoted path, `_SESSION.t`, is one token.
+                segments.addAll(List.of(name.value.split("\\.", -1)));
+            } else if (name.kind == Kind.IDENT) {
+                segments.add(name.identifierText());
+            } else {
+                break;
+            }
+            int dot = nextSignificant(current + 1, tokens.size());
+            int next = dot < 0 ? -1 : nextSignificant(dot + 1, tokens.size());
+            if (dot < 0 || !tokens.get(dot).isPunct(".") || next < 0
+                    || tokens.get(next).kind != Kind.IDENT && tokens.get(next).kind != Kind.QIDENT) {
+                break;
+            }
+            current = next;
+        }
+        if (segments.size() == 1 && temporaryTables.contains(segments.getFirst())
+                && !cteVisibleAt(segments.getFirst(), start)) {
+            // A CTE of the same name hides the temporary table, as it does for resolveTable.
+            return new TableRef(TEMPORARY_TABLE_DATASET, segments.getFirst());
+        }
+        if (segments.size() == 2 && segments.getFirst().equalsIgnoreCase("_SESSION")
+                && temporaryTables.contains(segments.getLast())) {
+            return new TableRef(TEMPORARY_TABLE_DATASET, segments.getLast());
+        }
+        return null;
+    }
+
     private TableFieldSchema sourcesColumnField(List<ProjectionSource> sources, List<String> path) {
         boolean qualified = path.size() > 1 && sources.stream()
                 .anyMatch(source -> source.alias() != null && source.alias().equalsIgnoreCase(path.getFirst()));
         List<String> columnPath = qualified ? path.subList(1, path.size()) : path;
         TableFieldSchema found = null;
         for (ProjectionSource source : sources) {
+            TableRef temporary = source.directTable() ? null : temporarySourceTable(source.startToken());
             if (qualified && (source.alias() == null || !source.alias().equalsIgnoreCase(path.getFirst()))
-                    || !source.directTable()) {
+                    || !source.directTable() && temporary == null) {
                 continue;
             }
-            TableRef ref = projectionSourceTable(source.startToken());
+            TableRef ref = temporary != null ? temporary : projectionSourceTable(source.startToken());
             List<TableFieldSchema> fields = ref == null ? null : fieldsOf.apply(ref);
             TableFieldSchema matching = null;
             for (String segment : columnPath) {

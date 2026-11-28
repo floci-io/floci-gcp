@@ -19,7 +19,10 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 
+import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.Base64;
@@ -150,7 +153,8 @@ public class IamCredentialsService {
         }
         Map<String, String> response = new LinkedHashMap<>();
         response.put("token", signClaims(serviceAccount,
-                account -> idTokenClaims(account, audience, includeEmail)).jwt());
+                account -> idTokenClaims(audience, account.getUniqueId(), account.getUniqueId(),
+                        includeEmail ? account.getEmail() : null)).jwt());
         return response;
     }
 
@@ -170,19 +174,48 @@ public class IamCredentialsService {
         }
     }
 
-    private String idTokenClaims(StoredServiceAccount account, String audience, boolean includeEmail) {
+    private String idTokenClaims(String audience, String subject, String azp, String email) {
         long now = clock.instant().getEpochSecond();
-        ObjectNode claims = MAPPER.createObjectNode()
-                .put("aud", audience)
-                .put("azp", account.getUniqueId());
-        if (includeEmail) {
-            claims.put("email", account.getEmail()).put("email_verified", true);
+        ObjectNode claims = MAPPER.createObjectNode().put("aud", audience);
+        if (azp != null) {
+            claims.put("azp", azp);
+        }
+        if (email != null) {
+            claims.put("email", email).put("email_verified", true);
         }
         return claims.put("exp", now + ID_TOKEN_LIFETIME_SECONDS)
                 .put("iat", now)
                 .put("iss", ID_TOKEN_ISSUER)
-                .put("sub", account.getUniqueId())
+                .put("sub", subject)
                 .toString();
+    }
+
+    /**
+     * Signs with floci's own key, so the account need not exist in floci IAM. Like Google's push token, sub and
+     * azp carry the account's numeric unique id, derived from the email when floci IAM does not know the account.
+     */
+    public String mintIdToken(String serviceAccountEmail, String audience) {
+        String uniqueId = iamService.findServiceAccount(serviceAccountEmail)
+                .map(StoredServiceAccount::getUniqueId)
+                .orElseGet(() -> derivedUniqueId(serviceAccountEmail));
+        String claims = idTokenClaims(audience, uniqueId, uniqueId, serviceAccountEmail);
+        String[] signingInput = new String[1];
+        IamService.SignedBytes signed = iamService.signWithPlatformKey(keyId -> {
+            signingInput[0] = jwtSigningInput(keyId, claims);
+            return signingInput[0].getBytes(StandardCharsets.US_ASCII);
+        });
+        return signedJwt(signed, signingInput[0]).jwt();
+    }
+
+    // Shaped like the 21-digit ids floci IAM assigns, and the same for an email on every call.
+    private static String derivedUniqueId(String email) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest(email.getBytes(StandardCharsets.UTF_8));
+            String digits = new BigInteger(1, digest).mod(BigInteger.TEN.pow(20)).toString();
+            return "1" + "0".repeat(20 - digits.length()) + digits;
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 is unavailable", e);
+        }
     }
 
     private SignedJwt signClaims(String serviceAccount, Function<StoredServiceAccount, String> claims) {
@@ -192,7 +225,11 @@ public class IamCredentialsService {
             signingInput[0] = jwtSigningInput(keyId, claims.apply(account));
             return signingInput[0].getBytes(StandardCharsets.US_ASCII);
         });
-        return new SignedJwt(signed.keyId(), signingInput[0] + "." + base64Url(signed.signature()));
+        return signedJwt(signed, signingInput[0]);
+    }
+
+    private static SignedJwt signedJwt(IamService.SignedBytes signed, String signingInput) {
+        return new SignedJwt(signed.keyId(), signingInput + "." + base64Url(signed.signature()));
     }
 
     private record SignedJwt(String keyId, String jwt) {}

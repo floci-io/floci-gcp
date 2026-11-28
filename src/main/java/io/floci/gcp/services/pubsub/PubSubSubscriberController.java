@@ -76,6 +76,7 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
                             ? Durations.toString(request.getMessageRetentionDuration()) : null,
                     request.getFilter(),
                     request.hasPushConfig() ? request.getPushConfig().getPushEndpoint() : null,
+                    PubSubService.PushOidcToken.of(request.getPushConfig()),
                     storedBigQueryConfig(request), storedExpirationPolicy(request),
                     SubscriptionRetryPolicy.toStored(request.hasRetryPolicy(), request.getRetryPolicy()),
                     deadLetterPolicy.getDeadLetterTopic(), deadLetterPolicy.getMaxDeliveryAttempts(),
@@ -508,7 +509,16 @@ public class PubSubSubscriberController extends SubscriberGrpc.SubscriberImplBas
             builder.setFilter(stored.getFilter());
         }
         if (stored.getPushEndpoint() != null) {
-            builder.setPushConfig(PushConfig.newBuilder().setPushEndpoint(stored.getPushEndpoint()).build());
+            PushConfig.Builder pushConfig = PushConfig.newBuilder().setPushEndpoint(stored.getPushEndpoint());
+            if (stored.getPushOidcServiceAccountEmail() != null) {
+                PushConfig.OidcToken.Builder oidc = PushConfig.OidcToken.newBuilder()
+                        .setServiceAccountEmail(stored.getPushOidcServiceAccountEmail());
+                if (stored.getPushOidcAudience() != null) {
+                    oidc.setAudience(stored.getPushOidcAudience());
+                }
+                pushConfig.setOidcToken(oidc);
+            }
+            builder.setPushConfig(pushConfig);
         }
         if (stored.getMessageRetentionDuration() != null) {
             try {

@@ -2,6 +2,7 @@ package io.floci.gcp.services.pubsub;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpServer;
 
 import com.google.protobuf.ByteString;
@@ -15,6 +16,8 @@ import io.floci.gcp.core.storage.InMemoryStorage;
 import io.floci.gcp.services.iam.IamService;
 import io.floci.gcp.services.iam.IamServices;
 import io.floci.gcp.services.iam.model.StoredPolicy;
+import io.floci.gcp.services.iamcredentials.IamCredentialsService;
+import io.floci.gcp.services.iamcredentials.IamCredentialsServices;
 import io.floci.gcp.services.pubsub.model.StoredSnapshot;
 import io.floci.gcp.services.pubsub.model.StoredSubscription;
 import io.floci.gcp.services.pubsub.model.StoredTopic;
@@ -1664,6 +1667,90 @@ class PubSubServiceTest {
             oldServer.stop(0);
             replacementServer.stop(0);
         }
+    }
+
+    private record PushedRequest(Headers headers, String body) {}
+
+    private String pushAndGetAuthorization(PubSubService.PushOidcToken oidcToken, AtomicReference<String> endpointUsed)
+            throws Exception {
+        return pushAndCapture(oidcToken, endpointUsed).headers().getFirst("Authorization");
+    }
+
+    private PushedRequest pushAndCapture(PubSubService.PushOidcToken oidcToken, AtomicReference<String> endpointUsed)
+            throws Exception {
+        AtomicReference<PushedRequest> received = new AtomicReference<>();
+        CountDownLatch delivered = new CountDownLatch(1);
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/hook", exchange -> {
+            received.set(new PushedRequest(exchange.getRequestHeaders(),
+                    new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8)));
+            exchange.sendResponseHeaders(204, -1);
+            exchange.close();
+            delivered.countDown();
+        });
+        server.start();
+        PubSubService withCredentials = new PubSubService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), iamService, clock, PUSH_RETRY_DELAY, credentials());
+        try {
+            String endpoint = "http://127.0.0.1:" + server.getAddress().getPort() + "/hook";
+            endpointUsed.set(endpoint);
+            withCredentials.createTopic("projects/p/topics/t");
+            withCredentials.createSubscription("projects/p/subscriptions/s", "projects/p/topics/t", 10, null, false,
+                    null, null, endpoint, oidcToken, null, null, null, null, 0, false, false);
+            withCredentials.publish("projects/p/topics/t",
+                    List.of(PubsubMessage.newBuilder().setData(ByteString.copyFromUtf8("body")).build()));
+            assertTrue(delivered.await(5, TimeUnit.SECONDS), "Timed out waiting for push delivery");
+        } finally {
+            server.stop(0);
+            withCredentials.shutdownExecutors();
+        }
+        return received.get();
+    }
+
+    private static JsonNode bearerClaims(String authorization) throws Exception {
+        assertNotNull(authorization, "push request carried no Authorization header");
+        assertTrue(authorization.startsWith("Bearer "), authorization);
+        String jwt = authorization.substring("Bearer ".length());
+        return new ObjectMapper().readTree(Base64.getUrlDecoder().decode(jwt.split("\\.")[1]));
+    }
+
+    private IamCredentialsService credentials() {
+        return IamCredentialsServices.over(iamService, clock);
+    }
+
+    @Test
+    void pushWithOidcTokenSendsBearer() throws Exception {
+        JsonNode claims = bearerClaims(pushAndGetAuthorization(new PubSubService.PushOidcToken(
+                "taltap@appspot.gserviceaccount.com", "https://supply-api.taltap.run"), new AtomicReference<>()));
+
+        assertEquals("https://supply-api.taltap.run", claims.get("aud").asText());
+        assertEquals("taltap@appspot.gserviceaccount.com", claims.get("email").asText());
+    }
+
+    @Test
+    void pushWithOidcTokenWithoutAudienceUsesEndpoint() throws Exception {
+        AtomicReference<String> endpoint = new AtomicReference<>();
+
+        JsonNode claims = bearerClaims(pushAndGetAuthorization(
+                new PubSubService.PushOidcToken("taltap@appspot.gserviceaccount.com", null), endpoint));
+
+        assertEquals(endpoint.get(), claims.get("aud").asText());
+    }
+
+    @Test
+    void pushWithoutOidcTokenSendsNoAuthorization() throws Exception {
+        assertNull(pushAndGetAuthorization(null, new AtomicReference<>()));
+    }
+
+    // GCP never offers h2c on a push; servers such as uvicorn drop the body of an h2c Upgrade request.
+    @Test
+    void pushToPlainHttpEndpointDoesNotOfferH2cUpgrade() throws Exception {
+        PushedRequest pushed = pushAndCapture(null, new AtomicReference<>());
+
+        assertNull(pushed.headers().getFirst("Upgrade"));
+        assertNull(pushed.headers().getFirst("HTTP2-Settings"));
+        String data = new ObjectMapper().readTree(pushed.body()).path("message").path("data").asText();
+        assertEquals("body", new String(Base64.getDecoder().decode(data), StandardCharsets.UTF_8));
     }
 
     @Test

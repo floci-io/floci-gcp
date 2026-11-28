@@ -1,14 +1,26 @@
 package io.floci.gcp.services.scheduler;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sun.net.httpserver.Headers;
+import com.sun.net.httpserver.HttpServer;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.json.JsonPath;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.Test;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicReference;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 class SchedulerHttpTargetRestIntegrationTest {
@@ -81,5 +93,70 @@ class SchedulerHttpTargetRestIntegrationTest {
         JsonPath job = get("kept");
         assertEquals("https://example.test/a", job.getString("httpTarget.uri"));
         assertNull(job.get("description"));
+    }
+
+    private record Received(String uri, String authorization, JsonNode claims) {}
+
+    private record Captured(String uri, Headers headers, String body) {}
+
+    private Received runAgainstServerAndDecodeBearer(Map<String, Object> target) throws Exception {
+        Captured captured = runAgainstServer(target);
+        String authorization = captured.headers().getFirst("Authorization");
+        assertNotNull(authorization, "no Authorization header received");
+        assertTrue(authorization.startsWith("Bearer "), authorization);
+        String jwt = authorization.substring("Bearer ".length());
+        return new Received(captured.uri(), authorization,
+                new ObjectMapper().readTree(Base64.getUrlDecoder().decode(jwt.split("\\.")[1])));
+    }
+
+    private Captured runAgainstServer(Map<String, Object> target) throws Exception {
+        AtomicReference<Headers> headers = new AtomicReference<>();
+        AtomicReference<String> body = new AtomicReference<>();
+        AtomicReference<String> uri = new AtomicReference<>();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/hook", exchange -> {
+            headers.set(exchange.getRequestHeaders());
+            body.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            exchange.sendResponseHeaders(204, -1);
+            exchange.close();
+        });
+        server.start();
+        try {
+            Map<String, Object> httpTarget = new HashMap<>(target);
+            uri.set("http://127.0.0.1:" + server.getAddress().getPort() + "/hook");
+            httpTarget.put("uri", uri.get());
+            create("target", httpTarget).then().statusCode(200);
+            given().urlEncodingEnabled(false).contentType("application/json").body("{}").post(jobs + "/target:run").then().statusCode(200);
+        } finally {
+            server.stop(0);
+        }
+        assertNotNull(headers.get(), "the HTTP target was not called");
+        return new Captured(uri.get(), headers.get(), body.get());
+    }
+
+    // GCP never offers h2c to an HTTP target; servers such as uvicorn drop the body of an h2c Upgrade request.
+    @Test void httpTargetToPlainHttpUriDoesNotOfferH2cUpgrade() throws Exception {
+        Captured captured = runAgainstServer(Map.of("httpMethod", "POST",
+                "body", Base64.getEncoder().encodeToString("payload".getBytes(StandardCharsets.UTF_8))));
+
+        assertNull(captured.headers().getFirst("Upgrade"));
+        assertNull(captured.headers().getFirst("HTTP2-Settings"));
+        assertEquals("payload", captured.body());
+    }
+
+    @Test void httpTargetWithOidcTokenSendsBearer() throws Exception {
+        Received received = runAgainstServerAndDecodeBearer(Map.of("oidcToken", Map.of("serviceAccountEmail", EMAIL)));
+
+        assertEquals(EMAIL, received.claims().get("email").asText());
+        assertEquals(received.uri(), received.claims().get("aud").asText());
+    }
+
+    @Test void httpTargetOidcAudienceAndAuthorizationHeaderAreReplaced() throws Exception {
+        Received received = runAgainstServerAndDecodeBearer(Map.of(
+                "headers", Map.of("Authorization", "Bearer static"),
+                "oidcToken", Map.of("serviceAccountEmail", EMAIL, "audience", "https://aud.test")));
+
+        assertNotEquals("Bearer static", received.authorization());
+        assertEquals("https://aud.test", received.claims().get("aud").asText());
     }
 }

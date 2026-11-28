@@ -146,6 +146,7 @@ public class PubSubRestController {
                 stringValue(body, "messageRetentionDuration"),
                 stringValue(body, "filter"),
                 pushEndpoint(body),
+                pushOidcToken(body),
                 objectMap(body, "bigqueryConfig"),
                 objectMap(body, "expirationPolicy"),
                 objectMap(body, "retryPolicy"),
@@ -196,6 +197,7 @@ public class PubSubRestController {
                 stringValue(subscriptionBody, "messageRetentionDuration"),
                 stringValue(subscriptionBody, "filter"),
                 pushEndpoint(subscriptionBody),
+                pushOidcToken(subscriptionBody),
                 objectMap(subscriptionBody, "bigqueryConfig"),
                 objectMap(subscriptionBody, "expirationPolicy"),
                 objectMap(subscriptionBody, "retryPolicy"),
@@ -494,7 +496,17 @@ public class PubSubRestController {
             response.put("filter", subscription.getFilter());
         }
         if (subscription.getPushEndpoint() != null) {
-            response.put("pushConfig", Map.of("pushEndpoint", subscription.getPushEndpoint()));
+            Map<String, Object> pushConfig = new LinkedHashMap<>();
+            pushConfig.put("pushEndpoint", subscription.getPushEndpoint());
+            if (subscription.getPushOidcServiceAccountEmail() != null) {
+                Map<String, Object> oidcToken = new LinkedHashMap<>();
+                oidcToken.put("serviceAccountEmail", subscription.getPushOidcServiceAccountEmail());
+                if (subscription.getPushOidcAudience() != null) {
+                    oidcToken.put("audience", subscription.getPushOidcAudience());
+                }
+                pushConfig.put("oidcToken", oidcToken);
+            }
+            response.put("pushConfig", pushConfig);
         }
         if (subscription.getBigQueryConfig() != null) {
             Map<String, Object> bigQueryConfig = new LinkedHashMap<>(subscription.getBigQueryConfig());
@@ -587,6 +599,13 @@ public class PubSubRestController {
     private static String pushEndpoint(Map<String, Object> body) {
         Map<String, Object> pushConfig = objectMap(body, "pushConfig");
         return pushConfig == null ? null : stringValue(pushConfig, "pushEndpoint");
+    }
+
+    private static PubSubService.PushOidcToken pushOidcToken(Map<String, Object> body) {
+        Map<String, Object> pushConfig = objectMap(body, "pushConfig");
+        Map<String, Object> oidcToken = pushConfig == null ? null : objectMap(pushConfig, "oidcToken");
+        return oidcToken == null ? null : new PubSubService.PushOidcToken(
+                stringValue(oidcToken, "serviceAccountEmail"), stringValue(oidcToken, "audience"));
     }
 
     private static int maxDeliveryAttempts(Map<String, Object> body) {

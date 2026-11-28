@@ -28,8 +28,13 @@ overriding the API endpoint / transport channel and disabling credentials:
 - Targets: `PubsubTarget` (publishes into the local Pub/Sub backend), `HttpTarget` (real outbound
   HTTP request), `AppEngineHttpTarget` (recorded: there is no App Engine backend to dispatch to).
   `HttpTarget.oauth_token` and `oidc_token` are stored and returned, and `UpdateJob` masks reach
-  each token field; no token is minted or attached to the outbound request. `HttpTarget.uri` must
-  begin with `http://` or `https://`.
+  each token field. With `oidc_token` set, the outbound request carries `Authorization: Bearer <ID token>`
+  (replacing any `Authorization` in `headers`), an RS256 JWT with `iss` `https://accounts.google.com`,
+  `aud` from `oidc_token.audience` (the target URI when unset), `email` set to the service account email,
+  and `sub` and `azp` set to its numeric unique ID (derived from the email when floci IAM does not know the
+  account); it expires after one hour. The account does not have to exist in floci IAM, and the token
+  is signed with a key of floci's own. No OAuth access token is minted for `oauth_token`.
+  `HttpTarget.uri` must begin with `http://` or `https://`.
 - `schedule` is standard five-field unix-cron, interpreted in `time_zone` (default UTC).
 - Output-only `state`, `schedule_time`, `last_attempt_time`, and `status` are populated.
 
@@ -107,7 +112,7 @@ Policies are inherited from `projects/{project}`. Job-level policy methods and
 Scheduler `testIamPermissions` are not implemented. Calls to the shared IAM mixin
 on Scheduler jobs fail closed for restricted credentials in enforce mode.
 
-OAuth/OIDC HTTP targets are stored, but token delivery is not implemented.
+OAuth HTTP targets are stored, but access token delivery is not implemented.
 Restricted callers configuring these targets in enforce mode receive
 `FAILED_PRECONDITION` before mutation, rather than an act-as guarantee. Target
 service authorization, background-dispatch identity, `fullView` redaction,

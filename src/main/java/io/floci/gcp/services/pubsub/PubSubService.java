@@ -7,6 +7,7 @@ import com.google.protobuf.Timestamp;
 import com.google.protobuf.util.Timestamps;
 import com.google.pubsub.v1.DeadLetterPolicy;
 import com.google.pubsub.v1.PubsubMessage;
+import com.google.pubsub.v1.PushConfig;
 import com.google.pubsub.v1.ReceivedMessage;
 import io.floci.gcp.config.EmulatorConfig;
 import io.floci.gcp.core.common.GcpException;
@@ -18,6 +19,7 @@ import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.core.storage.StorageFactory;
 import io.floci.gcp.lifecycle.GrpcServerManager;
 import io.floci.gcp.services.iam.IamService;
+import io.floci.gcp.services.iamcredentials.IamCredentialsService;
 import io.floci.gcp.services.pubsub.model.StoredMessage;
 import io.floci.gcp.services.pubsub.model.StoredSnapshot;
 import io.floci.gcp.services.pubsub.model.StoredSubscription;
@@ -114,6 +116,7 @@ public class PubSubService {
     private final EmulatorConfig config;
     private final GrpcServerManager grpcServerManager;
     private final IamService iamService;
+    private final IamCredentialsService iamCredentialsService;
     private final HttpClient httpClient;
     private final ExecutorService pushDeliveryExecutor;
     private final ScheduledExecutorService pushRetryExecutor;
@@ -127,14 +130,14 @@ public class PubSubService {
 
     @Inject
     public PubSubService(ServiceRegistry serviceRegistry, EmulatorConfig config,
-            StorageFactory storageFactory, GrpcServerManager grpcServerManager, IamService iamService) {
+            StorageFactory storageFactory, GrpcServerManager grpcServerManager, IamService iamService,
+            IamCredentialsService iamCredentialsService) {
         this.serviceRegistry = serviceRegistry;
         this.config = config;
         this.grpcServerManager = grpcServerManager;
         this.iamService = iamService;
-        this.httpClient = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(10))
-                .build();
+        this.iamCredentialsService = iamCredentialsService;
+        this.httpClient = newPushHttpClient();
         this.pushDeliveryExecutor = Executors.newCachedThreadPool();
         this.pushRetryExecutor = Executors.newScheduledThreadPool(1);
         this.leaseExpiryExecutor = Executors.newSingleThreadScheduledExecutor();
@@ -169,13 +172,22 @@ public class PubSubService {
             IamService iamService,
             Clock clock,
             Duration pushRetryDelay) {
+        this(topicStore, subStore, snapshotStore, iamService, clock, pushRetryDelay, null);
+    }
+
+    PubSubService(StorageBackend<String, StoredTopic> topicStore,
+            StorageBackend<String, StoredSubscription> subStore,
+            StorageBackend<String, StoredSnapshot> snapshotStore,
+            IamService iamService,
+            Clock clock,
+            Duration pushRetryDelay,
+            IamCredentialsService iamCredentialsService) {
         this.topicStore = topicStore;
         this.subStore = subStore;
         this.snapshotStore = snapshotStore;
         this.iamService = iamService;
-        this.httpClient = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(10))
-                .build();
+        this.iamCredentialsService = iamCredentialsService;
+        this.httpClient = newPushHttpClient();
         this.pushDeliveryExecutor = Executors.newCachedThreadPool();
         this.pushRetryExecutor = Executors.newScheduledThreadPool(1);
         this.leaseExpiryExecutor = Executors.newSingleThreadScheduledExecutor();
@@ -320,6 +332,28 @@ public class PubSubService {
             int maxDeliveryAttempts,
             boolean enableMessageOrdering,
             boolean enableExactlyOnceDelivery) {
+        return createSubscription(name, topicName, ackDeadlineSeconds, labels, retainAckedMessages,
+                messageRetentionDuration, filter, pushEndpoint, null, bigQueryConfig, expirationPolicy,
+                retryPolicy, deadLetterTopic, maxDeliveryAttempts, enableMessageOrdering,
+                enableExactlyOnceDelivery);
+    }
+
+    public StoredSubscription createSubscription(String name,
+            String topicName,
+            int ackDeadlineSeconds,
+            Map<String, String> labels,
+            boolean retainAckedMessages,
+            String messageRetentionDuration,
+            String filter,
+            String pushEndpoint,
+            PushOidcToken pushOidcToken,
+            Map<String, Object> bigQueryConfig,
+            Map<String, Object> expirationPolicy,
+            Map<String, Object> retryPolicy,
+            String deadLetterTopic,
+            int maxDeliveryAttempts,
+            boolean enableMessageOrdering,
+            boolean enableExactlyOnceDelivery) {
         LOG.infof("createSubscription name=%s topic=%s ackDeadline=%d", name, topicName, ackDeadlineSeconds);
         if (subStore.get(name).isPresent()) {
             LOG.warnf("createSubscription failed: subscription already exists name=%s", name);
@@ -330,6 +364,7 @@ public class PubSubService {
             throw GcpException.notFound("Topic not found: " + topicName);
         }
         SubscriptionFilter.validate(filter);
+        requireServiceAccountEmail(pushOidcToken);
         int deadline = ackDeadlineSeconds > 0 ? ackDeadlineSeconds : 10;
         StoredSubscription sub = new StoredSubscription(name, topicName, deadline);
         sub.setLabels(emptyToNull(labels));
@@ -337,6 +372,7 @@ public class PubSubService {
         sub.setMessageRetentionDuration(blankToNull(messageRetentionDuration));
         sub.setFilter(blankToNull(filter));
         sub.setPushEndpoint(blankToNull(pushEndpoint));
+        setPushOidcToken(sub, pushOidcToken);
         sub.setBigQueryConfig(emptyObjectMapToNull(bigQueryConfig));
         sub.setExpirationPolicy(emptyObjectMapToNull(expirationPolicy));
         sub.setRetryPolicy(emptyObjectMapToNull(retryPolicy));
@@ -372,6 +408,9 @@ public class PubSubService {
         if (updateMask.getPathsList().contains("filter")) {
             throw filterNotMutable(stored.getName());
         }
+        if (updateMask.getPathsList().contains("push_config")) {
+            requireServiceAccountEmail(PushOidcToken.of(subProto.getPushConfig()));
+        }
         for (String path : updateMask.getPathsList()) {
             switch (path) {
                 case "ack_deadline_seconds" -> stored.setAckDeadlineSeconds(subProto.getAckDeadlineSeconds());
@@ -388,9 +427,11 @@ public class PubSubService {
                         subProto.getEnableMessageOrdering());
                 case "enable_exactly_once_delivery" -> stored.setEnableExactlyOnceDelivery(
                         subProto.getEnableExactlyOnceDelivery());
-                case "push_config" -> stored.setPushEndpoint(
-                        subProto.getPushConfig().getPushEndpoint().isEmpty() ? null
-                                : subProto.getPushConfig().getPushEndpoint());
+                case "push_config" -> {
+                    stored.setPushEndpoint(subProto.getPushConfig().getPushEndpoint().isEmpty() ? null
+                            : subProto.getPushConfig().getPushEndpoint());
+                    setPushOidcToken(stored, PushOidcToken.of(subProto.getPushConfig()));
+                }
                 case "retry_policy" -> stored.setRetryPolicy(emptyObjectMapToNull(SubscriptionRetryPolicy.toStored(
                         subProto.hasRetryPolicy(), subProto.getRetryPolicy())));
                 case "dead_letter_policy" -> {
@@ -420,6 +461,28 @@ public class PubSubService {
             Boolean enableMessageOrdering,
             Boolean enableExactlyOnceDelivery,
             List<String> updateMaskPaths) {
+        return updateSubscription(name, ackDeadlineSeconds, labels, retainAckedMessages,
+                messageRetentionDuration, filter, pushEndpoint, null, bigQueryConfig, expirationPolicy,
+                retryPolicy, deadLetterTopic, maxDeliveryAttempts, enableMessageOrdering,
+                enableExactlyOnceDelivery, updateMaskPaths);
+    }
+
+    public StoredSubscription updateSubscription(String name,
+            int ackDeadlineSeconds,
+            Map<String, String> labels,
+            Boolean retainAckedMessages,
+            String messageRetentionDuration,
+            String filter,
+            String pushEndpoint,
+            PushOidcToken pushOidcToken,
+            Map<String, Object> bigQueryConfig,
+            Map<String, Object> expirationPolicy,
+            Map<String, Object> retryPolicy,
+            String deadLetterTopic,
+            Integer maxDeliveryAttempts,
+            Boolean enableMessageOrdering,
+            Boolean enableExactlyOnceDelivery,
+            List<String> updateMaskPaths) {
         LOG.infof("updateSubscription name=%s", name);
         StoredSubscription stored = getSubscription(name);
         boolean replaceAll = updateMaskPaths == null || updateMaskPaths.isEmpty();
@@ -427,6 +490,8 @@ public class PubSubService {
         if (filterChangeRequested(stored.getFilter(), filter, updateMaskPaths)) {
             throw filterNotMutable(stored.getName());
         }
+        PushConfigChange pushConfigChange = PushConfigChange.of(updateMaskPaths, replaceAll, stored,
+                pushEndpoint, pushOidcToken);
 
         if (replaceAll || masked(updateMaskPaths, "ack_deadline_seconds")) {
             if (ackDeadlineSeconds > 0) {
@@ -444,8 +509,9 @@ public class PubSubService {
         if (replaceAll || masked(updateMaskPaths, "message_retention_duration")) {
             stored.setMessageRetentionDuration(blankToNull(messageRetentionDuration));
         }
-        if (replaceAll || masked(updateMaskPaths, "push_config")) {
-            stored.setPushEndpoint(blankToNull(pushEndpoint));
+        if (pushConfigChange != null) {
+            stored.setPushEndpoint(pushConfigChange.endpoint());
+            setPushOidcToken(stored, pushConfigChange.token());
         }
         if (replaceAll || masked(updateMaskPaths, "bigquery_config")) {
             stored.setBigQueryConfig(emptyObjectMapToNull(bigQueryConfig));
@@ -476,11 +542,93 @@ public class PubSubService {
         return stored;
     }
 
-    public void modifyPushConfig(String subName, com.google.pubsub.v1.PushConfig pushConfig) {
+    public void modifyPushConfig(String subName, PushConfig pushConfig) {
         LOG.infof("modifyPushConfig subscription=%s", subName);
         StoredSubscription stored = getSubscription(subName);
+        requireServiceAccountEmail(PushOidcToken.of(pushConfig));
         stored.setPushEndpoint(pushConfig.getPushEndpoint().isEmpty() ? null : pushConfig.getPushEndpoint());
+        setPushOidcToken(stored, PushOidcToken.of(pushConfig));
         subStore.put(subName, stored);
+    }
+
+    /** The {@code oidc_token} of a push config: GCP signs a token for the account and sends it as a bearer. */
+    public record PushOidcToken(String serviceAccountEmail, String audience) {
+        static PushOidcToken of(PushConfig pushConfig) {
+            if (!pushConfig.hasOidcToken()) {
+                return null;
+            }
+            return new PushOidcToken(pushConfig.getOidcToken().getServiceAccountEmail(),
+                    pushConfig.getOidcToken().getAudience());
+        }
+    }
+
+    private static void requireServiceAccountEmail(PushOidcToken token) {
+        if (token != null && blankToNull(token.serviceAccountEmail()) == null) {
+            throw missingServiceAccountEmail();
+        }
+    }
+
+    private static GcpException missingServiceAccountEmail() {
+        return GcpException.invalidArgument("push_config.oidc_token.service_account_email must be set");
+    }
+
+    /**
+     * The push endpoint and OIDC token a REST update leaves on the subscription. A child mask such as
+     * {@code push_config.oidc_token.audience} changes only that field and keeps the rest as stored.
+     */
+    private record PushConfigChange(String endpoint, PushOidcToken token) {
+        private static final String ROOT = "push_config";
+        private static final String ENDPOINT = ROOT + ".push_endpoint";
+        private static final String TOKEN = ROOT + ".oidc_token";
+        private static final String TOKEN_EMAIL = TOKEN + ".service_account_email";
+        private static final String TOKEN_AUDIENCE = TOKEN + ".audience";
+
+        /** Null when the mask leaves the push config alone. */
+        static PushConfigChange of(List<String> updateMaskPaths, boolean replaceAll, StoredSubscription stored,
+                String endpoint, PushOidcToken token) {
+            List<String> paths = replaceAll ? List.of(ROOT) : updateMaskPaths.stream()
+                    .map(PubSubService::jsonMaskToProtoMask)
+                    .filter(path -> path.equals(ROOT) || path.startsWith(ROOT + "."))
+                    .toList();
+            if (paths.isEmpty()) {
+                return null;
+            }
+            for (String path : paths) {
+                if (!Set.of(ROOT, ENDPOINT, TOKEN, TOKEN_EMAIL, TOKEN_AUDIENCE).contains(path)) {
+                    throw GcpException.invalidArgument("Unsupported update mask path: " + path);
+                }
+            }
+            if (paths.contains(ROOT)) {
+                requireServiceAccountEmail(token);
+                return new PushConfigChange(blankToNull(endpoint), token);
+            }
+            String newEndpoint = paths.contains(ENDPOINT) ? blankToNull(endpoint) : stored.getPushEndpoint();
+            String email = stored.getPushOidcServiceAccountEmail();
+            String audience = stored.getPushOidcAudience();
+            if (paths.contains(TOKEN)) {
+                email = token == null ? null : blankToNull(token.serviceAccountEmail());
+                audience = token == null ? null : blankToNull(token.audience());
+            }
+            if (paths.contains(TOKEN_EMAIL)) {
+                email = token == null ? null : blankToNull(token.serviceAccountEmail());
+            }
+            if (paths.contains(TOKEN_AUDIENCE)) {
+                audience = token == null ? null : blankToNull(token.audience());
+            }
+            boolean tokenSupplied = paths.contains(TOKEN) && token != null;
+            if (email == null && (tokenSupplied || paths.contains(TOKEN_EMAIL) || audience != null)) {
+                throw missingServiceAccountEmail();
+            }
+            return new PushConfigChange(newEndpoint, email == null ? null : new PushOidcToken(email, audience));
+        }
+    }
+
+    private void setPushOidcToken(StoredSubscription sub, PushOidcToken token) {
+        if (token != null && iamCredentialsService == null) {
+            throw new IllegalStateException("push oidcToken needs an IamCredentialsService to sign with");
+        }
+        sub.setPushOidcServiceAccountEmail(token == null ? null : blankToNull(token.serviceAccountEmail()));
+        sub.setPushOidcAudience(token == null ? null : blankToNull(token.audience()));
     }
 
     public void deleteSubscription(String name) {
@@ -577,6 +725,14 @@ public class PubSubService {
         return messageIds;
     }
 
+    // HTTP/1.1 like GCP's push: the JDK default offers an h2c upgrade, and servers such as uvicorn drop that body.
+    private static HttpClient newPushHttpClient() {
+        return HttpClient.newBuilder()
+                .version(HttpClient.Version.HTTP_1_1)
+                .connectTimeout(Duration.ofSeconds(10))
+                .build();
+    }
+
     private void deliverPushMessage(StoredSubscription subscription, StoredMessage message) {
         Map<String, Object> messageBody = new LinkedHashMap<>();
         messageBody.put("data", Base64.getEncoder().encodeToString(message.getData()));
@@ -597,12 +753,18 @@ public class PubSubService {
         try {
             String body = OBJECT_MAPPER.writeValueAsString(envelope);
 
-            HttpRequest request = HttpRequest.newBuilder()
+            HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
                     .uri(URI.create(subscription.getPushEndpoint()))
                     .timeout(Duration.ofSeconds(10))
                     .header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(body))
-                    .build();
+                    .POST(HttpRequest.BodyPublishers.ofString(body));
+            if (subscription.getPushOidcServiceAccountEmail() != null) {
+                String audience = subscription.getPushOidcAudience() != null
+                        ? subscription.getPushOidcAudience() : subscription.getPushEndpoint();
+                requestBuilder.header("Authorization", "Bearer "
+                        + iamCredentialsService.mintIdToken(subscription.getPushOidcServiceAccountEmail(), audience));
+            }
+            HttpRequest request = requestBuilder.build();
 
             HttpResponse<Void> response =
                     httpClient.send(request, HttpResponse.BodyHandlers.discarding());

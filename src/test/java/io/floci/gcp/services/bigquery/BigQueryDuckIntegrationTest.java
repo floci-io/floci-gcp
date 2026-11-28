@@ -1229,6 +1229,26 @@ class BigQueryDuckIntegrationTest {
     }
 
     @Test
+    @Order(5)
+    void anAverageOfANumericIsNumericLikeBigQuery() {
+        query(Map.of("query", "SELECT AVG(CAST(x AS NUMERIC)) AS a, AVG(DISTINCT CAST(x AS NUMERIC)) AS d,"
+                + " AVG(CAST(x AS NUMERIC)) + 0.5 AS p, AVG(x) AS i FROM UNNEST([1, 1, 2]) x", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields.type", equalTo(List.of("NUMERIC", "NUMERIC", "NUMERIC", "FLOAT")))
+                .body("rows[0].f.v", equalTo(List.of("1.333333333", "1.5", "1.833333333", "1.3333333333333333")));
+        query(Map.of("query", "SELECT x, AVG(CAST(x AS NUMERIC)) OVER () AS w FROM UNNEST([1, 2]) x ORDER BY x",
+                "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[1].type", equalTo("NUMERIC"))
+                .body("rows.collect { it.f[1].v }", equalTo(List.of("1.5", "1.5")));
+        query(Map.of("query", "SELECT AVG(CAST(x AS NUMERIC)) a FROM UNNEST([1, 2]) x", "useLegacySql", false))
+                .then().statusCode(200)
+                .body("schema.fields[0].name", equalTo("a"))
+                .body("schema.fields[0].type", equalTo("NUMERIC"))
+                .body("rows[0].f[0].v", equalTo("1.5"));
+    }
+
+    @Test
     @Order(2)
     void aDecimalLiteralIsFloat64UnlessItMeetsANumericLikeBigQuery() {
         query(Map.of("query", "SELECT 0.5 AS l, x + 0.5 AS v, STRUCT(x + 0.5) AS s, 0.1 + 0.2 AS f, 2 * 0.5 AS i"

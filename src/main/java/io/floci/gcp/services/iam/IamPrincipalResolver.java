@@ -10,7 +10,9 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 
+import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 /** Resolves only identities represented by valid Floci-issued credential tokens. */
 @ApplicationScoped
@@ -48,9 +50,13 @@ public class IamPrincipalResolver {
             return Resolution.external();
         }
         if (token.get().getTokenKind() == StoredCredentialToken.TokenKind.DOWNSCOPED) {
-            Resolution downscoped = Resolution.downscopedToken(token.get().getPrincipal());
+            Resolution downscoped = Resolution.downscopedToken(
+                    token.get().getPrincipal(), token.get().getPrincipalSets());
             requireEnabledAccount(downscoped.principal());
             return downscoped;
+        }
+        if (token.get().getTokenKind() == StoredCredentialToken.TokenKind.FEDERATED) {
+            return Resolution.federated(token.get().getPrincipal(), token.get().getPrincipalSets());
         }
         IamPrincipal principal = IamPrincipal.serviceAccount(normalizeServiceAccount(token.get().getPrincipal()));
         requireEnabledAccount(principal);
@@ -63,6 +69,7 @@ public class IamPrincipalResolver {
      */
     private void requireEnabledAccount(IamPrincipal principal) {
         if (config == null || accounts == null || !principal.isAuthenticated()
+                || !principal.member().startsWith("serviceAccount:")
                 || config.services().iam().authorizationMode() != EmulatorConfig.IamAuthorizationMode.ENFORCE) {
             return;
         }
@@ -107,12 +114,21 @@ public class IamPrincipalResolver {
             return new Resolution(IamPrincipal.anonymous(), IamIdentityKind.EXTERNAL);
         }
 
-        private static Resolution downscopedToken(String principal) {
+        private static Resolution downscopedToken(String principal, List<String> principalSets) {
             if (principal == null || principal.isBlank()) {
                 return new Resolution(IamPrincipal.anonymous(), IamIdentityKind.FLOCI_DOWNSCOPED);
             }
+            if (principal.startsWith("principal://")) {
+                return new Resolution(IamPrincipal.federated(principal, Set.copyOf(principalSets)),
+                        IamIdentityKind.FLOCI_DOWNSCOPED);
+            }
             return new Resolution(IamPrincipal.serviceAccount(normalizeServiceAccount(principal)),
                     IamIdentityKind.FLOCI_DOWNSCOPED);
+        }
+
+        private static Resolution federated(String principal, List<String> principalSets) {
+            return new Resolution(IamPrincipal.federated(principal, Set.copyOf(principalSets)),
+                    IamIdentityKind.FLOCI_FEDERATED);
         }
 
         private static Resolution authenticated(IamPrincipal principal) {

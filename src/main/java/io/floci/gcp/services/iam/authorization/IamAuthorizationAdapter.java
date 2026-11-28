@@ -61,7 +61,8 @@ public interface IamAuthorizationAdapter {
 
     /** Whether this service evaluates policies for this credential class in enforce mode. */
     default boolean requiresPolicyEvaluation(IamIdentityKind identityKind) {
-        return identityKind == IamIdentityKind.FLOCI_SERVICE_ACCOUNT;
+        return identityKind == IamIdentityKind.FLOCI_SERVICE_ACCOUNT
+                || identityKind == IamIdentityKind.FLOCI_FEDERATED;
     }
 
     /** Service-specific binding constraints, applied on writes and before evaluation without I/O. */

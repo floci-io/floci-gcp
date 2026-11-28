@@ -37,6 +37,9 @@ public class IamServiceAccountAuthorizationAdapter implements IamAuthorizationAd
             "iam.serviceAccounts.getAccessToken", "iam.serviceAccounts.getOpenIdToken",
             "iam.serviceAccounts.signBlob", "iam.serviceAccounts.signJwt",
             "iam.serviceAccounts.get", "iam.serviceAccounts.list");
+    private static final Set<String> WORKLOAD_IDENTITY_USER = Set.of(
+            "iam.serviceAccounts.getAccessToken", "iam.serviceAccounts.getOpenIdToken",
+            "iam.serviceAccounts.get", "iam.serviceAccounts.list");
     private static final String WORKLOAD_IDENTITY = "iam.googleapis.com/workloadIdentityPools.";
     private static final String WORKLOAD_IDENTITY_PROVIDER =
             "iam.googleapis.com/workloadIdentityPoolProviders.";
@@ -290,6 +293,7 @@ public class IamServiceAccountAuthorizationAdapter implements IamAuthorizationAd
                 "roles/iam.serviceAccountKeyAdmin", withProjectRead(SERVICE_ACCOUNT_KEY_ADMIN),
                 "roles/iam.serviceAccountUser", withProjectRead(SERVICE_ACCOUNT_USER),
                 "roles/iam.serviceAccountTokenCreator", withProjectRead(SERVICE_ACCOUNT_TOKEN_CREATOR),
+                "roles/iam.workloadIdentityUser", withProjectRead(WORKLOAD_IDENTITY_USER),
                 "roles/iam.workloadIdentityPoolAdmin", withProjectRead(withAliases(WORKLOAD_IDENTITY_ADMIN)),
                 "roles/iam.workloadIdentityPoolViewer", withProjectRead(withAliases(WORKLOAD_IDENTITY_VIEWER)));
     }

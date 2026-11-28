@@ -109,6 +109,7 @@ floci-gcp:
       enabled: true
     sts:
       enabled: true
+      allow-private-oidc-discovery: false
     secretmanager:
       enabled: true
     logging:

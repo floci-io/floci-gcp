@@ -10,6 +10,8 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.gcp.core.common.GcpException;
 import io.floci.gcp.core.common.LocationCatalog;
 import io.floci.gcp.core.common.PageToken;
+import io.floci.gcp.core.common.ProjectNumbers;
+import io.floci.gcp.core.common.ProjectRecord;
 import io.floci.gcp.core.common.ProjectRegistry;
 import io.floci.gcp.core.storage.StorageBackend;
 import io.floci.gcp.core.storage.StorageFactory;
@@ -27,6 +29,7 @@ import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
@@ -401,6 +404,63 @@ public class IamWorkloadIdentityPoolService {
         requireGlobal(location);
         return read(operations, IamWorkloadIdentityPoolNames.provider(projectId, poolId, providerId)
                 + "/operations/" + operationId);
+    }
+
+    // ── STS lookup ───────────────────────────────────────────────────────────
+
+    /**
+     * Resolves an active, non-disabled Workload Identity Pool and Provider for STS token exchange.
+     * Does not implicitly register unknown projects.
+     */
+    public Optional<ActiveProvider> findActiveProvider(String projectIdOrNumber, String poolId, String providerId) {
+        if (projectIdOrNumber == null || projectIdOrNumber.isBlank()
+                || poolId == null || poolId.isBlank()
+                || providerId == null || providerId.isBlank()) {
+            return Optional.empty();
+        }
+        String projectNumber = resolveProjectNumber(projectIdOrNumber);
+        if (projectNumber == null) {
+            return Optional.empty();
+        }
+        String poolName = IamWorkloadIdentityPoolNames.pool(projectNumber, poolId);
+        Optional<ObjectNode> pool = pools.get(poolName).map(this::parse);
+        if (pool.isEmpty()
+                || !"ACTIVE".equals(pool.get().path("state").asText())
+                || pool.get().path("disabled").asBoolean(false)) {
+            return Optional.empty();
+        }
+        String providerName = IamWorkloadIdentityPoolNames.provider(projectNumber, poolId, providerId);
+        Optional<ObjectNode> provider = providers.get(providerName).map(this::parse);
+        if (provider.isEmpty()
+                || !"ACTIVE".equals(provider.get().path("state").asText())
+                || provider.get().path("disabled").asBoolean(false)) {
+            return Optional.empty();
+        }
+        return Optional.of(new ActiveProvider(projectNumber, poolId, providerId,
+                poolName, providerName, pool.get(), provider.get()));
+    }
+
+    private String resolveProjectNumber(String projectIdOrNumber) {
+        if (projects != null) {
+            Optional<ProjectRecord> record = projects.find(projectIdOrNumber);
+            if (record.isPresent()) {
+                return record.get().getProjectNumber();
+            }
+        }
+        if (ProjectRegistry.isNumber(projectIdOrNumber)) {
+            return projectIdOrNumber;
+        }
+        return ProjectNumbers.of(projectIdOrNumber);
+    }
+
+    public record ActiveProvider(
+            String projectNumber,
+            String poolId,
+            String providerId,
+            String poolName,
+            String providerName,
+            ObjectNode pool,
+            ObjectNode provider) {
     }
 
     // ── Policy resolver ──────────────────────────────────────────────────────

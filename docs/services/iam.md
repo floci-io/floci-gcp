@@ -34,10 +34,12 @@ which mode is active and the supported service list.
 | GCS ACLs and GCS gRPC | **Not IAM-enforced.** Existing downscoped-token CAB checks still apply |
 | Cloud Run jobs, worker pools, instances, invocation and operations, all other services | **Not IAM-enforced**, including any policies those services store |
 
-Valid **Floci-issued service-account tokens** activate IAM evaluation on every
-supported surface. Mint one through the existing IAM Credentials
-`generateAccessToken` endpoint and pass it as `Authorization: Bearer TOKEN` or
-through your SDK credentials provider.
+Valid **Floci-issued service-account tokens** and **Floci-issued federated
+tokens** (minted via [STS Workload Identity Federation](sts.md#external-subject-token-exchange-workload-identity-federation))
+activate IAM evaluation on every supported surface. Mint a service-account
+token through the existing IAM Credentials `generateAccessToken` endpoint, or
+mint a federated token through STS `POST /v1/token`, and pass it as
+`Authorization: Bearer TOKEN` or through your SDK credentials provider.
 For plaintext gRPC, Google credentials may refuse an insecure channel before the
 request reaches the emulator; use a fixed authorization header with the SDK's
 no-credentials provider, or use the emulator's TLS transport.
@@ -201,6 +203,7 @@ defines these finite role slices for the implemented permissions:
 | `roles/iam.serviceAccountKeyAdmin` | Key create, get, list, delete; service-account get, list |
 | `roles/iam.serviceAccountUser` | Service-account get, list; `actAs` is not an implemented operation |
 | `roles/iam.serviceAccountTokenCreator` | Service-account get, list, getAccessToken, getOpenIdToken, signBlob, signJwt |
+| `roles/iam.workloadIdentityUser` | Service-account get, list, getAccessToken, getOpenIdToken |
 | `roles/viewer` | Service-account get, list, getIamPolicy; key get, list |
 | `roles/editor` | Viewer slice plus service-account create, update, delete, disable, enable and key create, delete |
 | `roles/owner` | Editor slice plus service-account setIamPolicy |
@@ -633,9 +636,11 @@ either the project ID or number.
 - Pools expose `getIamPolicy`, `setIamPolicy` and `testIamPermissions`. Provider
   permissions inherit from the parent pool policy and then the project policy.
 
-This is the control plane only. Exchanging an external OIDC or AWS credential for
-an access token at STS is not implemented yet; the [STS service](sts.md) still
-supports only access-token-to-access-token downscoping.
+External OIDC/JWT and AWS `aws4_request` credentials can be exchanged against
+active pools and providers via the [STS service](sts.md#external-subject-token-exchange-workload-identity-federation).
+Federated access tokens carry `principal://` and `principalSet://` identities
+evaluated by IAM `enforce` mode, including `roles/iam.workloadIdentityUser` on
+service accounts and direct resource bindings.
 
 ## IAM Policy Bindings
 

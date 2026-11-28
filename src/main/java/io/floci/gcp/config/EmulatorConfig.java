@@ -437,10 +437,13 @@ public interface EmulatorConfig {
         boolean enabled();
     }
 
-	interface StsServiceConfig {
-		@WithDefault("true")
-		boolean enabled();
-	}
+    interface StsServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        @WithDefault("false")
+        boolean allowPrivateOidcDiscovery();
+    }
 
     interface SecretManagerServiceConfig {
         @WithDefault("true")

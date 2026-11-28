@@ -239,6 +239,39 @@ class PubSubServiceTest {
     }
 
     @Test
+    void createSubscriptionKeepsAnEmptyExpirationPolicy() {
+        service.createTopic("projects/p1/topics/t1");
+
+        StoredSubscription created = service.createSubscription("projects/p1/subscriptions/s1",
+                "projects/p1/topics/t1", 10, null, false, null, null, null, null, Map.of(), null, null, 0,
+                false, false);
+
+        assertEquals(Map.of(), created.getExpirationPolicy());
+        assertEquals(Map.of(), service.getSubscription("projects/p1/subscriptions/s1").getExpirationPolicy());
+    }
+
+    @Test
+    void createSubscriptionWithoutAnExpirationPolicyKeepsNone() {
+        service.createTopic("projects/p1/topics/t1");
+
+        service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10);
+
+        assertNull(service.getSubscription("projects/p1/subscriptions/s1").getExpirationPolicy());
+    }
+
+    @Test
+    void updateSubscriptionToAnEmptyExpirationPolicyKeepsItEmpty() {
+        service.createTopic("projects/p1/topics/t1");
+        service.createSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1", 10, null, false,
+                null, null, null, null, Map.of("ttl", "86400s"), null, null, 0, false, false);
+
+        service.updateSubscription("projects/p1/subscriptions/s1", 0, null, null, null, null, null, null,
+                Map.of(), null, null, null, null, null, List.of("expiration_policy"));
+
+        assertEquals(Map.of(), service.getSubscription("projects/p1/subscriptions/s1").getExpirationPolicy());
+    }
+
+    @Test
     void updateSubscriptionRejectsChangingTheFilter() {
         service.createTopic("projects/p1/topics/t1");
         createFilteredSubscription("projects/p1/subscriptions/s1", "projects/p1/topics/t1",
